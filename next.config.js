@@ -23,4 +23,5 @@ const nextConfig = {
   },
 };
 
+// Trigger redeploy with Next.js framework
 module.exports = nextConfig;
