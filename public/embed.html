@@ -1,18 +1,41 @@
 <!-- 
-  Silver Mirror Cancellation Chat Widget
+  Silver Mirror Membership Chat Widget
   
-  Drop this snippet onto any WordPress page to embed the cancellation assistant.
-  Replace YOUR_VERCEL_URL with your actual deployment URL.
+  Drop this snippet onto any WordPress page to embed the membership assistant.
   
   Recommended: Create a page at silvermirror.com/cancel-membership
   and paste this in the HTML block.
 -->
 
-<!-- Option A: Full-page embed (recommended for a dedicated /cancel-membership page) -->
-<div id="sm-cancel-widget" style="width:100%;max-width:520px;margin:0 auto;height:700px;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.12);">
+<style>
+  #sm-cancel-widget {
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto;
+    height: 700px;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+    border: 1px solid #e2e8f0;
+  }
+  #sm-cancel-widget iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+  }
+  @media (max-width: 600px) {
+    #sm-cancel-widget {
+      height: 85vh;
+      max-width: 100%;
+      border-radius: 8px;
+      margin: 0 8px;
+    }
+  }
+</style>
+
+<div id="sm-cancel-widget">
   <iframe 
-    src="https://YOUR_VERCEL_URL/widget" 
-    style="width:100%;height:100%;border:none;" 
+    src="https://sm-member-cancel.vercel.app/widget" 
     title="Silver Mirror Membership Assistant"
     allow="clipboard-write"
   ></iframe>
@@ -29,7 +52,7 @@
     width: 64px;
     height: 64px;
     border-radius: 50%;
-    background: #1B365D;
+    background: #50aaf2;
     color: white;
     border: none;
     cursor: pointer;
@@ -64,9 +87,9 @@
   }
 </style>
 <button id="sm-chat-bubble" onclick="document.getElementById('sm-chat-frame').classList.toggle('open')">
-  💬
+  ð¬
 </button>
 <div id="sm-chat-frame">
-  <iframe src="https://YOUR_VERCEL_URL/widget" title="Silver Mirror Membership Assistant"></iframe>
+  <iframe src="https://sm-member-cancel.vercel.app/widget" title="Silver Mirror Membership Assistant"></iframe>
 </div>
 -->
