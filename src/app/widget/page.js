@@ -6,14 +6,15 @@ const API_BASE = typeof window !== 'undefined'
   ? `${window.location.origin}/api/chat`
   : '/api/chat';
 
-// ── STYLES ──────────────────────────────────────────────────────
-const NAVY = '#1B365D';
-const GOLD = '#D4A853';
-const LIGHT_BG = '#F7F7F2';
+// ââ STYLES ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+const BRIGHT_BLUE = '#50aaf2';
+const LIGHT_BLUE = '#d6ebff';
+const BLACK = '#1a1a1a';
 const WHITE = '#FFFFFF';
-const BORDER = '#E0DDD5';
-const TEXT = '#333';
-const TEXT_LIGHT = '#888';
+const BORDER = '#e2e8f0';
+const TEXT = '#1a1a1a';
+const TEXT_LIGHT = '#6b7280';
+const BG_SUBTLE = '#f8fafc';
 
 const styles = {
   container: {
@@ -21,32 +22,27 @@ const styles = {
     height: '100vh',
     display: 'flex',
     flexDirection: 'column',
-    background: LIGHT_BG,
+    background: WHITE,
     color: TEXT,
     maxWidth: 520,
     margin: '0 auto',
     overflow: 'hidden',
   },
   header: {
-    background: NAVY,
-    color: WHITE,
-    padding: '18px 24px',
+    background: WHITE,
+    color: BLACK,
+    padding: '16px 24px',
     display: 'flex',
     alignItems: 'center',
     gap: 14,
     flexShrink: 0,
+    borderBottom: `1px solid ${BORDER}`,
   },
-  headerIcon: {
-    width: 38,
-    height: 38,
+  headerLogo: {
+    width: 40,
+    height: 40,
     borderRadius: '50%',
-    background: GOLD,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 16,
-    fontWeight: 700,
-    color: NAVY,
+    objectFit: 'cover',
     flexShrink: 0,
   },
   headerText: {
@@ -56,12 +52,14 @@ const styles = {
     fontSize: 16,
     fontWeight: 600,
     margin: 0,
+    color: BLACK,
     letterSpacing: 0.3,
   },
   headerSub: {
     fontSize: 12,
-    opacity: 0.7,
+    color: BRIGHT_BLUE,
     margin: 0,
+    fontWeight: 500,
   },
   messages: {
     flex: 1,
@@ -70,6 +68,7 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: 12,
+    background: BG_SUBTLE,
   },
   msgBot: {
     background: WHITE,
@@ -80,10 +79,11 @@ const styles = {
     fontSize: 14,
     lineHeight: 1.55,
     alignSelf: 'flex-start',
+    color: TEXT,
     boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
   },
   msgUser: {
-    background: NAVY,
+    background: BRIGHT_BLUE,
     color: WHITE,
     borderRadius: '18px 18px 4px 18px',
     padding: '12px 16px',
@@ -93,14 +93,14 @@ const styles = {
     alignSelf: 'flex-end',
   },
   typing: {
-    background: WHITE,
+    background: LIGHT_BLUE,
     border: `1px solid ${BORDER}`,
     borderRadius: '18px 18px 18px 4px',
     padding: '12px 16px',
     maxWidth: '85%',
     alignSelf: 'flex-start',
     fontSize: 14,
-    color: TEXT_LIGHT,
+    color: BRIGHT_BLUE,
   },
   inputArea: {
     padding: '12px 16px 20px',
@@ -124,13 +124,14 @@ const styles = {
     resize: 'none',
     lineHeight: 1.4,
     maxHeight: 120,
+    color: TEXT,
     transition: 'border-color 0.2s',
   },
   sendBtn: {
     width: 42,
     height: 42,
     borderRadius: '50%',
-    background: NAVY,
+    background: BRIGHT_BLUE,
     color: WHITE,
     border: 'none',
     cursor: 'pointer',
@@ -145,18 +146,18 @@ const styles = {
     opacity: 0.4,
     cursor: 'default',
   },
-  // Auth screen
   authContainer: {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
     justifyContent: 'center',
     padding: '32px 24px',
+    background: WHITE,
   },
   authTitle: {
     fontSize: 22,
     fontWeight: 600,
-    color: NAVY,
+    color: BLACK,
     marginBottom: 8,
     textAlign: 'center',
   },
@@ -184,11 +185,12 @@ const styles = {
     fontFamily: 'inherit',
     marginBottom: 16,
     boxSizing: 'border-box',
+    color: TEXT,
     transition: 'border-color 0.2s',
   },
   authBtn: {
     width: '100%',
-    background: NAVY,
+    background: BRIGHT_BLUE,
     color: WHITE,
     border: 'none',
     borderRadius: 10,
@@ -211,8 +213,8 @@ const styles = {
     lineHeight: 1.5,
   },
   gatedMsg: {
-    background: '#FFF8E1',
-    border: '1px solid #FFE082',
+    background: LIGHT_BLUE,
+    border: `1px solid ${BRIGHT_BLUE}33`,
     borderRadius: 10,
     padding: '16px',
     fontSize: 14,
@@ -233,9 +235,9 @@ const styles = {
   },
 };
 
-// ── MAIN WIDGET COMPONENT ───────────────────────────────────────
+// ââ MAIN WIDGET COMPONENT âââââââââââââââââââââââââââââââââââââââ
 export default function ChatWidget() {
-  const [phase, setPhase] = useState('auth'); // auth | gated | chat | ended
+  const [phase, setPhase] = useState('auth');
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [inputVal, setInputVal] = useState('');
@@ -243,7 +245,6 @@ export default function ChatWidget() {
   const [error, setError] = useState(null);
   const [gatedMessage, setGatedMessage] = useState('');
 
-  // Auth fields
   const [name, setName] = useState('');
   const [contact, setContact] = useState('');
   const [contactType, setContactType] = useState('email');
@@ -266,7 +267,6 @@ export default function ChatWidget() {
     }
   }, [phase]);
 
-  // ── AUTHENTICATION ─────────────────────────────────────────────
   const handleAuth = async (e) => {
     e.preventDefault();
     if (!name.trim() || !contact.trim()) return;
@@ -307,7 +307,6 @@ export default function ChatWidget() {
         return;
       }
 
-      // Success — start chat
       setSessionId(data.sessionId);
       setMessages([{ role: 'bot', content: data.message }]);
       setPhase('chat');
@@ -317,7 +316,6 @@ export default function ChatWidget() {
     setLoading(false);
   };
 
-  // ── SEND MESSAGE ──────────────────────────────────────────────
   const handleSend = async () => {
     const text = inputVal.trim();
     if (!text || loading || phase !== 'chat') return;
@@ -346,7 +344,6 @@ export default function ChatWidget() {
 
       setMessages(prev => [...prev, { role: 'bot', content: data.message }]);
 
-      // If conversation is ending, trigger the end flow
       if (data.conversationEnding) {
         await fetch(`${API_BASE}/end`, {
           method: 'POST',
@@ -371,7 +368,6 @@ export default function ChatWidget() {
     }
   };
 
-  // ── END CONVERSATION MANUALLY ─────────────────────────────────
   const handleEndChat = async () => {
     if (!sessionId) return;
     setLoading(true);
@@ -386,12 +382,11 @@ export default function ChatWidget() {
     setLoading(false);
   };
 
-  // ── RENDER ────────────────────────────────────────────────────
   return (
     <div style={styles.container}>
       {/* Header */}
       <div style={styles.header}>
-        <div style={styles.headerIcon}>SM</div>
+        <img src="/sm-logo.jpg" alt="Silver Mirror" style={styles.headerLogo} />
         <div style={styles.headerText}>
           <p style={styles.headerTitle}>Silver Mirror</p>
           <p style={styles.headerSub}>Membership Assistant</p>
@@ -400,8 +395,8 @@ export default function ChatWidget() {
           <button
             onClick={handleEndChat}
             style={{
-              background: 'transparent', border: '1px solid rgba(255,255,255,0.3)',
-              color: 'rgba(255,255,255,0.7)', borderRadius: 6, padding: '6px 12px',
+              background: 'transparent', border: `1px solid ${BORDER}`,
+              color: TEXT_LIGHT, borderRadius: 6, padding: '6px 12px',
               fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
             }}
           >
@@ -415,8 +410,8 @@ export default function ChatWidget() {
         <div style={styles.authContainer}>
           <h2 style={styles.authTitle}>Hi there</h2>
           <p style={styles.authSub}>
-            I'm Silver Mirror's membership assistant. To get started,
-            I'll need to pull up your account.
+            I&apos;m Silver Mirror&apos;s membership assistant. To get started,
+            I&apos;ll need to pull up your account.
           </p>
 
           {error && <div style={styles.authError}>{error}</div>}
@@ -453,7 +448,7 @@ export default function ChatWidget() {
                   setContact('');
                 }}
                 style={{
-                  background: 'none', border: 'none', color: NAVY,
+                  background: 'none', border: 'none', color: BRIGHT_BLUE,
                   fontSize: 13, cursor: 'pointer', textDecoration: 'underline',
                   fontFamily: 'inherit',
                 }}
@@ -516,7 +511,7 @@ export default function ChatWidget() {
           {phase === 'ended' ? (
             <div style={styles.footer}>
               <p style={{ margin: '8px 0', color: TEXT_LIGHT }}>
-                This conversation has ended. You'll receive a confirmation within 48 hours.
+                This conversation has ended. You&apos;ll receive a confirmation within 48 hours.
               </p>
             </div>
           ) : (
@@ -559,7 +554,6 @@ export default function ChatWidget() {
   );
 }
 
-// Simple typing indicator
 function TypingDots() {
   return (
     <span>
