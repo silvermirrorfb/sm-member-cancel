@@ -27,6 +27,9 @@ const styles = {
     maxWidth: 520,
     margin: '0 auto',
     overflow: 'hidden',
+    border: `1px solid ${BORDER}`,
+    borderRadius: 12,
+    boxShadow: '0 4px 24px rgba(0,0,0,0.08)',
   },
   header: {
     background: WHITE,
