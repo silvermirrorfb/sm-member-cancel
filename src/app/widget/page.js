@@ -6,7 +6,7 @@ const API_BASE = typeof window !== 'undefined'
   ? `${window.location.origin}/api/chat`
   : '/api/chat';
 
-// ââ STYLES ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── STYLES ──────────────────────────────────────────────────────
 const BRIGHT_BLUE = '#50aaf2';
 const LIGHT_BLUE = '#d6ebff';
 const BLACK = '#1a1a1a';
@@ -238,7 +238,7 @@ const styles = {
   },
 };
 
-// ââ MAIN WIDGET COMPONENT âââââââââââââââââââââââââââââââââââââââ
+// ── MAIN WIDGET COMPONENT ───────────────────────────────────────
 export default function ChatWidget() {
   const [phase, setPhase] = useState('auth');
   const [sessionId, setSessionId] = useState(null);
