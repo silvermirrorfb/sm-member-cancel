@@ -115,7 +115,11 @@ async function lookupMember(name, emailOrPhone) {
   const businessId = process.env.BOULEVARD_BUSINESS_ID;
 
   if (!apiKey) {
-    console.warn('BOULEVARD_API_KEY not set — using mock data');
+    if (process.env.NODE_ENV === 'production') {
+      console.error('BOULEVARD_API_KEY not set in production \u2014 aborting lookup');
+      return null;
+    }
+    console.warn('BOULEVARD_API_KEY not set \u2014 using mock data (dev only)');
     return mockLookup(name, emailOrPhone);
   }
 
@@ -623,14 +627,45 @@ function mockLookup(name, emailOrPhone) {
   });
 }
 
+/**
+ * Verify that the lookup request matches the profile (P1-1).
+ * Requires fuzzy name match + at least one exact contact match.
+ */
+function verifyMemberIdentity(lookupRequest, profile) {
+  if (!lookupRequest || !profile) return false;
+
+  const requestedName = `${lookupRequest.firstName || ''} ${lookupRequest.lastName || ''}`.toLowerCase().trim();
+  const profileName = (profile.name || '').toLowerCase().trim();
+
+  const nameMatch = profileName === requestedName || levenshtein(profileName, requestedName) <= 3;
+  if (!nameMatch) {
+    console.warn(`Identity verification failed: name mismatch \u2014 requested "${requestedName}" vs profile "${profileName}"`);
+    return false;
+  }
+
+  const requestedEmail = (lookupRequest.email || '').trim().toLowerCase();
+  const profileEmail = (profile.email || '').trim().toLowerCase();
+  const emailMatch = requestedEmail && profileEmail && requestedEmail === profileEmail;
+
+  const requestedPhone = normalizePhone(lookupRequest.phone || '');
+  const profilePhone = normalizePhone(profile.phone || '');
+  const phoneMatch = requestedPhone && profilePhone && requestedPhone === profilePhone;
+
+  if (!emailMatch && !phoneMatch) {
+    console.warn(`Identity verification failed: no contact match for "${profileName}"`);
+    return false;
+  }
+
+  return true;
+}
+
 export {
   lookupMember,
-  buildProfile,
-  computeValues,
   formatProfileForPrompt,
   normalizePhone,
+  verifyMemberIdentity,
+  levenshtein,
   WALKIN_PRICES,
   CURRENT_RATES,
   PERKS,
-  LOYALTY_TIERS,
-};
+}
