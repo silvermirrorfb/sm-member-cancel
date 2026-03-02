@@ -1,13 +1,15 @@
+import crypto from 'crypto';
+
 // Boulevard Enterprise API Client
 // This module handles member lookup and profile data computation.
 //
 // SETUP: Set these env vars:
-//   BOULEVARD_API_URL    — Your Boulevard GraphQL endpoint (e.g. https://dashboard.boulevard.io/api/2020-01/admin)
-//   BOULEVARD_API_KEY    — Your API key
-//   BOULEVARD_API_SECRET — Your API secret
+//   BOULEVARD_API_URL     — Your Boulevard GraphQL endpoint (e.g. https://dashboard.boulevard.io/api/2020-01/admin)
+//   BOULEVARD_API_KEY     — Your API key
+//   BOULEVARD_API_SECRET  — Your API secret
 //   BOULEVARD_BUSINESS_ID — Your Boulevard business ID
 //
-// Auth: Basic auth with API_KEY:API_SECRET (base64 encoded)
+// Auth: HMAC-signed Basic auth token (see https://developers.joinblvd.com/2020-01/admin-api/authentication)
 // Docs: https://developer.joinboulevard.com/
 
 // Default URL — override via BOULEVARD_API_URL env var
@@ -54,6 +56,28 @@ const LOYALTY_TIERS = [
   { points: 3000, service: 'Dermaplaning', value: 95 },
   { points: 5000, service: 'BioRePeel Chemical Peel', value: 225 },
 ];
+
+/**
+ * Generate a signed Boulevard Admin API auth header.
+ * See: https://developers.joinblvd.com/2020-01/admin-api/authentication
+ */
+function generateAuthHeader(apiKey, apiSecret, businessId) {
+  const prefix = 'blvd-admin-v1';
+  const timestamp = Math.floor(Date.now() / 1000);
+
+  const payload = `${prefix}${businessId}${timestamp}`;
+  const rawKey = Buffer.from(apiSecret, 'base64');
+  const signature = crypto
+    .createHmac('sha256', rawKey)
+    .update(payload, 'utf8')
+    .digest('base64');
+
+  const token = `${signature}${payload}`;
+  const httpBasicPayload = `${apiKey}:${token}`;
+  const httpBasicCredentials = Buffer.from(httpBasicPayload, 'utf8').toString('base64');
+
+  return httpBasicCredentials;
+}
 
 /**
  * Normalize a phone number to digits only (with optional leading 1 for US).
@@ -135,20 +159,13 @@ async function lookupMember(name, emailOrPhone) {
       variables = { phone: cleanPhone };
     }
 
-    // Build auth header — Basic auth with API_KEY:API_SECRET
-    const authString = apiSecret
-      ? Buffer.from(`${apiKey}:${apiSecret}`).toString('base64')
-      : Buffer.from(`${apiKey}:`).toString('base64');
+    // Build signed auth header (HMAC token approach per Boulevard docs)
+    const authCredentials = generateAuthHeader(apiKey, apiSecret, businessId);
 
     const headers = {
       'Content-Type': 'application/json',
-      'Authorization': `Basic ${authString}`,
+      'Authorization': `Basic ${authCredentials}`,
     };
-
-    // Add business ID header if configured
-    if (businessId) {
-      headers['X-Boulevard-Business-ID'] = businessId;
-    }
 
     console.log(`Boulevard lookup: ${isEmail ? 'email' : 'phone'} = ${isEmail ? emailOrPhone : normalizePhone(emailOrPhone)} at ${apiUrl}`);
 
@@ -198,7 +215,6 @@ async function lookupMember(name, emailOrPhone) {
     }
 
     const clients = data?.data?.clients?.edges || [];
-
     if (clients.length === 0) {
       console.log('Boulevard lookup: no clients found');
       return null;
@@ -221,7 +237,6 @@ async function lookupMember(name, emailOrPhone) {
     // TODO: Fetch full membership details, visit history, loyalty points
     // from Boulevard's membership and appointment endpoints.
     return buildProfile(match.node);
-
   } catch (err) {
     console.error('Boulevard API error:', err.message || err);
     return null;
@@ -239,7 +254,7 @@ function buildProfile(boulevardData) {
     email: boulevardData.email,
     phone: boulevardData.mobilePhone || null,
     location: boulevardData.location || 'Unknown',
-    tier: boulevardData.membershipTier || '50', // '30', '50', or '90'
+    tier: boulevardData.membershipTier || '50',     // '30', '50', or '90'
     monthlyRate: boulevardData.monthlyRate || 139,
     memberSince: boulevardData.membershipStartDate || null,
     tenureMonths: boulevardData.tenureMonths || 0,
@@ -272,7 +287,6 @@ function buildProfile(boulevardData) {
 
   // Compute derived values
   profile.computed = computeValues(profile);
-
   return profile;
 }
 
@@ -304,7 +318,6 @@ function computeValues(profile) {
   // Loyalty point redemption
   let loyaltyRedeemable = null;
   let loyaltyNextTier = null;
-
   if (profile.loyaltyEnrolled && profile.loyaltyPoints > 0) {
     // Find highest redeemable
     for (const loyaltyTier of LOYALTY_TIERS) {
@@ -344,7 +357,6 @@ function computeValues(profile) {
  */
 function formatProfileForPrompt(profile) {
   const c = profile.computed;
-
   const lines = [
     `Name: ${profile.name}`,
     `Email: ${profile.email}`,
@@ -387,7 +399,6 @@ function formatProfileForPrompt(profile) {
   if (profile.lastBillDate) {
     lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
   }
-
   lines.push(``);
   lines.push(`Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
   if (c.nextPerk) {
@@ -405,7 +416,6 @@ function levenshtein(a, b) {
   const matrix = [];
   for (let i = 0; i <= b.length; i++) matrix[i] = [i];
   for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
-
   for (let i = 1; i <= b.length; i++) {
     for (let j = 1; j <= a.length; j++) {
       if (b[i - 1] === a[j - 1]) {
@@ -449,7 +459,14 @@ function mockLookup(name, emailOrPhone) {
     upcomingAppointments: ['2026-03-05 at 2pm'],
     loyaltyPoints: 1360,
     loyaltyEnrolled: true,
-    perksClaimed: ['Month 2: Moisturizer', 'Month 4: HA Serum', 'Month 5: Hat', 'Month 6: Microcurrent', 'Month 9: Cleanser', 'Month 12: Formulas Bundle'],
+    perksClaimed: [
+      'Month 2: Moisturizer',
+      'Month 4: HA Serum',
+      'Month 5: Hat',
+      'Month 6: Microcurrent',
+      'Month 9: Cleanser',
+      'Month 12: Formulas Bundle',
+    ],
     unusedCredits: 2,
     lastBillDate: '2026-02-15',
   });
