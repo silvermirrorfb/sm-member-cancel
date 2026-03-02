@@ -6,8 +6,8 @@ import { v4 as uuidv4 } from 'uuid';
 const sessions = new Map();
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
-function createSession(memberId, memberProfile) {
-  const sessionId = uuidv4();
+function createSession(memberId, memberProfile, existingId) {
+  const sessionId = existingId || uuidv4();
   const session = {
     id: sessionId,
     memberId,
