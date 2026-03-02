@@ -11,9 +11,25 @@ import {
   stripAllSystemTags,
 } from '../../../../lib/claude';
 import { lookupMember, formatProfileForPrompt } from '../../../../lib/boulevard';
+import { logChatMessage } from '../../../../lib/notify';
+import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
 export async function POST(request) {
   try {
+    // Rate limit: max 30 messages per 10 minutes per IP
+    const ip = getClientIP(request);
+    const { allowed, retryAfterMs } = checkRateLimit(ip, 'message', 30, 10 * 60 * 1000);
+
+    if (!allowed) {
+      return NextResponse.json(
+        { error: 'Too many messages. Please wait a few minutes and try again.' },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(retryAfterMs / 1000)) },
+        }
+      );
+    }
+
     const body = await request.json();
     const { sessionId, message } = body;
 
@@ -42,6 +58,12 @@ export async function POST(request) {
     // Add user message to history
     addMessage(sessionId, 'user', message);
 
+    // Log user message to chatbot log (fire-and-forget)
+    const sessionCreated = new Date(session.createdAt).toISOString();
+    logChatMessage(sessionId, sessionCreated, 'user', message).catch(err =>
+      console.warn('Chatlog failed for user message:', err)
+    );
+
     // Determine which system prompt to use
     const systemPrompt = session.systemPrompt || getSystemPrompt();
 
@@ -55,7 +77,7 @@ export async function POST(request) {
       // Claude wants to look up a member — strip the lookup tag for visible response
       const visibleAck = stripAllSystemTags(response);
 
-      // Store Claude's acknowledgment in history (with tags stripped)
+      // Store CLEANED response in history (not raw with tags)
       addMessage(sessionId, 'assistant', visibleAck);
 
       // Attempt Boulevard lookup
@@ -87,9 +109,15 @@ export async function POST(request) {
 
         addMessage(sessionId, 'assistant', cleanMemberResponse);
 
+        const combinedResponse = visibleAck + '\n\n' + cleanMemberResponse;
+
+        // Log bot response to chatbot log
+        logChatMessage(sessionId, sessionCreated, 'assistant', combinedResponse).catch(err =>
+          console.warn('Chatlog failed for member greeting:', err)
+        );
+
         return NextResponse.json({
-          // Return BOTH the acknowledgment and the member greeting
-          message: visibleAck + '\n\n' + cleanMemberResponse,
+          message: combinedResponse,
           sessionId,
           memberIdentified: true,
         });
@@ -102,8 +130,15 @@ export async function POST(request) {
 
         addMessage(sessionId, 'assistant', cleanFailResponse);
 
+        const combinedFail = visibleAck + '\n\n' + cleanFailResponse;
+
+        // Log bot response to chatbot log
+        logChatMessage(sessionId, sessionCreated, 'assistant', combinedFail).catch(err =>
+          console.warn('Chatlog failed for lookup fail response:', err)
+        );
+
         return NextResponse.json({
-          message: visibleAck + '\n\n' + cleanFailResponse,
+          message: combinedFail,
           sessionId,
           memberIdentified: false,
         });
@@ -114,7 +149,13 @@ export async function POST(request) {
     const summary = parseSessionSummary(response);
     const visibleResponse = stripAllSystemTags(response);
 
-    addMessage(sessionId, 'assistant', response);
+    // Store CLEANED response in history (not raw with tags)
+    addMessage(sessionId, 'assistant', visibleResponse);
+
+    // Log bot response to chatbot log
+    logChatMessage(sessionId, sessionCreated, 'assistant', visibleResponse).catch(err =>
+      console.warn('Chatlog failed for bot response:', err)
+    );
 
     const result = {
       message: visibleResponse,
