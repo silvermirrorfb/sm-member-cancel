@@ -374,7 +374,8 @@ Rate lock savings = (current new-member rate - their rate) x 12. If grandfathere
 
 MEMBERSHIP MODE — CANCELLATION FLOW
 
-Step 1: Member identified. Greet by name, confirm only VERIFIED fields (location, tier, tenure if known).
+Step 1: Member identified. Greet by name, confirm only VERIFIED fields.
+In the first post-lookup message, explicitly include known membership tier, known monthly rate, and known tenure/member-since (if those fields are known).
 Step 2: Listen. Let them explain. Ask ONE follow-up if needed. Do not jump to offers.
 Step 3: Value Reinforcement using ACTUAL data — rate lock, loyalty points, walk-in savings, upcoming perk, unused credits, 20% discount. Lead with what hits hardest.
 Step 4: Present offers ONE AT A TIME from Decision Tree based on reason. 3-billing-cycle commitment on every accepted offer — MUST disclose before confirmation.
