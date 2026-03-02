@@ -20,6 +20,17 @@ const MAX_MESSAGE_CHARS = 4000;
 const MAX_RECOVERY_MESSAGES = 40;
 const MAX_RECOVERY_MESSAGE_CHARS = 2000;
 const MAX_RECOVERY_TOTAL_CHARS = 30000;
+const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
+
+function buildLookupFailureMessage(firstName, attempt) {
+    const namePrefix = firstName ? `${firstName}, ` : '';
+
+    if (attempt <= 1) {
+          return `${namePrefix}I couldn't find your account with that info yet.\n\nLet's try one quick re-check. Please send one of these:\n- A different email you may have used at signup\n- Your mobile number only (digits are fine)\n\nIf you'd rather skip this step, email ${MEMBERSHIP_EMAIL} with your full name and phone number.`;
+    }
+
+    return `${namePrefix}I still can't locate the account in chatbot search.\n\nPlease email ${MEMBERSHIP_EMAIL} and include:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team replies within 24-48 hours and can complete the cancellation process.`;
+}
 
 function buildLookupCandidates(lookupRequest, rawUserMessage) {
     const values = [lookupRequest?.email, lookupRequest?.phone, rawUserMessage]
@@ -282,6 +293,7 @@ export async function POST(request) {
                 session.systemPrompt = memberSystemPrompt;
                       session.memberProfile = profile;
                       session.mode = 'membership';
+                      session.lookupFailureCount = 0;
 
                 // Send a system-level message to Claude so it knows the profile is loaded
                 addMessage(sessionId, 'user',
@@ -319,29 +331,12 @@ export async function POST(request) {
                 });
 
             } else {
-                      // Lookup failed \u2014 tell Claude via a system message
-                addMessage(sessionId, 'user',
-                                     '[SYSTEM] Member lookup failed \u2014 no matching account found. Let the customer know we could not find their account and suggest they try a different email/phone or contact memberships@silvermirror.com directly.'
-                                   );
-
-                const failResponse = await safeSendMessage(systemPrompt, session.messages);
-
-                if (failResponse === null) {
-                            // Claude rate-limited after lookup failure
-                        const fallbackMsg = visibleAck + '\n\n' + "I'm sorry, something went wrong on my end. Please call (888) 677-0055 for immediate help, or email hello@silvermirror.com.";
-                            addMessage(sessionId, 'assistant', fallbackMsg);
-                            return NextResponse.json({
-                                          message: fallbackMsg,
-                                          sessionId,
-                                          memberIdentified: false,
-                                          rateLimited: true,
-                            });
-                }
-
-                const cleanFailResponse = stripAllSystemTags(failResponse);
-                      addMessage(sessionId, 'assistant', cleanFailResponse);
-
-                const combinedFail = visibleAck + '\n\n' + cleanFailResponse;
+                      // Lookup failed \u2014 deterministic copy avoids repetitive loops
+                      session.lookupFailureCount = Number(session.lookupFailureCount || 0) + 1;
+                      const firstName = String(verificationLookup?.firstName || lookupRequest.firstName || '').trim();
+                      const failureMessage = buildLookupFailureMessage(firstName, session.lookupFailureCount);
+                const combinedFail = visibleAck + '\n\n' + failureMessage;
+                      addMessage(sessionId, 'assistant', combinedFail);
 
                 // Log bot response to chatbot log
                 logChatMessage(sessionId, sessionCreated, 'assistant', combinedFail).catch(err =>

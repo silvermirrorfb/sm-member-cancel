@@ -3,7 +3,7 @@ import { createSession } from '../../../../lib/sessions';
 import { logChatMessage } from '../../../../lib/notify';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
-const OPENING_MESSAGE = `Thanks for reaching out to Silver Mirror! I'm a virtual assistant trained to help with questions about facials, memberships, or our product line, Silver Mirror Skincare. If you have a time-sensitive need, please call us at (888) 677-0055.\n\nPlease note: all bookings must be done through the "Book A Facial" button at the top of silvermirror.com.\n\nHow can I help you today?`;
+const OPENING_MESSAGE = `Hi, I'm Silver Mirror's virtual assistant. I can help with facials, products, and memberships, including cancellation requests.\n\nFor urgent help, call (888) 677-0055. For bookings, please use the "Book A Facial" button at silvermirror.com.\n\nHow can I help today?`;
 
 export async function POST(request) {
   try {
