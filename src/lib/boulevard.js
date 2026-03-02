@@ -2,7 +2,7 @@
 // This module handles member lookup and profile data computation.
 //
 // SETUP: Set these env vars:
-//   BOULEVARD_API_URL    — Your Boulevard GraphQL endpoint (e.g. https://dashboard.boulevard.io/api/2020-01/admin.json)
+//   BOULEVARD_API_URL    — Your Boulevard GraphQL endpoint (e.g. https://dashboard.boulevard.io/api/2020-01/admin)
 //   BOULEVARD_API_KEY    — Your API key
 //   BOULEVARD_API_SECRET — Your API secret
 //   BOULEVARD_BUSINESS_ID — Your Boulevard business ID
@@ -11,7 +11,7 @@
 // Docs: https://developer.joinboulevard.com/
 
 // Default URL — override via BOULEVARD_API_URL env var
-const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin.json';
+const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin';
 
 // Timeout for Boulevard API requests (in milliseconds)
 const BOULEVARD_TIMEOUT_MS = 15000; // 15 seconds
