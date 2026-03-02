@@ -293,10 +293,16 @@ export default function ChatWidget() {
           setMessages(prev => [...prev, { role: 'bot', content: botMessage }]);
 
           if (data.conversationEnding) {
+                    // Include history + summary for serverless recovery (P1-3)
+                    const allMessages = [...messages, { role: 'user', content: input }, { role: 'bot', content: botMessage }];
                     await fetch(`${API_BASE}/end`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ sessionId }),
+                                body: JSON.stringify({
+                                          sessionId,
+                                          history: allMessages,
+                                          summary: data.summary || null,
+                                }),
                     });
                     setPhase('ended');
           }
@@ -325,32 +331,15 @@ export default function ChatWidget() {
         if (!sessionId) return;
         setLoading(true);
         try {
+                // Include history for serverless recovery (P1-3)
                 await fetch(`${API_BASE}/end`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ sessionId }),
-                });
-        } catch (e) {
-                /* best effort */
-        }
-        setPhase('ended');
-        setLoading(false);
-  };
-
-  // ── Start New Chat (no page reload) ──
-  const handleNewChat = async () => {
-        // Reset all state
-        setMessages([]);
-        setInputVal('');
-        setSessionId(null);
-        setLoading(true);
-
-        try {
-                const res = await fetch(`${API_BASE}/start`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({}),
-                });
+                          body: JSON.stringify({
+                                    sessionId,
+                                    history: messages,
+                          }),
+                })
                 const data = await res.json();
 
           if (data.error) {
