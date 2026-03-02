@@ -1,38 +1,16 @@
-// Boulevard Enterprise API Client
-// This module handles member lookup and profile data computation.
-//
-// SETUP: Set these env vars:
-//   BOULEVARD_API_URL    — Your Boulevard GraphQL endpoint (e.g. https://dashboard.boulevard.io/api/2020-01/admin)
-//   BOULEVARD_API_KEY    — Your API key
-//   BOULEVARD_API_SECRET — Your API secret (base64-encoded)
-//   BOULEVARD_BUSINESS_ID — Your Boulevard business ID
-//
-// Auth: HMAC-based Basic auth (blvd-admin-v1 scheme)
-// Docs: https://developer.joinboulevard.com/
-
 import crypto from 'crypto';
 
-// Default URL — override via BOULEVARD_API_URL env var
+// Boulevard Enterprise API Client
+// SETUP: Set env vars: BOULEVARD_API_URL, BOULEVARD_API_KEY, BOULEVARD_API_SECRET, BOULEVARD_BUSINESS_ID
+// Auth: HMAC-based Basic auth (blvd-admin-v1 scheme)
+// Docs: https://developers.joinblvd.com/
+
 const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin';
+const BOULEVARD_TIMEOUT_MS = 15000;
 
-// Timeout for Boulevard API requests (in milliseconds)
-const BOULEVARD_TIMEOUT_MS = 15000; // 15 seconds
+const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
+const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
 
-// Walk-in prices for savings computation
-const WALKIN_PRICES = {
-  '30': 119,
-  '50': 169,
-  '90': 279,
-};
-
-// Current new-member rates
-const CURRENT_RATES = {
-  '30': 99,
-  '50': 139,
-  '90': 199,
-};
-
-// Perk milestones
 const PERKS = [
   { month: 2, name: 'Moisturizer', value: 65 },
   { month: 4, name: 'Hyaluronic Acid Serum', value: 77 },
@@ -48,7 +26,6 @@ const PERKS = [
   { month: 60, name: '90-Min Upgrade or HydraFacial (Year 5)', value: 279 },
 ];
 
-// Loyalty point redemption tiers
 const LOYALTY_TIERS = [
   { points: 500, service: 'Extra Extractions', value: 25 },
   { points: 1000, service: 'Custom Jelly Mask', value: 50 },
@@ -57,615 +34,170 @@ const LOYALTY_TIERS = [
   { points: 5000, service: 'BioRePeel Chemical Peel', value: 225 },
 ];
 
-/**
- * Normalize a phone number to digits only (with optional leading 1 for US).
- * "(470) 428-5700" → "14704285700"
- */
+function generateAuthHeader(apiKey, apiSecret, businessId) {
+  const prefix = 'blvd-admin-v1';
+  const timestamp = Math.floor(Date.now() / 1000);
+  const payload = `${prefix}${businessId}${timestamp}`;
+  const rawKey = Buffer.from(apiSecret, 'base64');
+  const signature = crypto.createHmac('sha256', rawKey).update(payload, 'utf8').digest('base64');
+  const token = `${signature}${payload}`;
+  return Buffer.from(`${apiKey}:${token}`, 'utf8').toString('base64');
+}
+
 function normalizePhone(phone) {
   if (!phone) return '';
-  // Strip everything that's not a digit
   let digits = phone.replace(/\D/g, '');
-  // Add US country code if 10 digits
-  if (digits.length === 10) {
-    digits = '1' + digits;
-  }
+  if (digits.length === 10) digits = '1' + digits;
   return digits;
 }
 
-/**
- * Generate Boulevard HMAC-based Basic auth header.
- * Uses the blvd-admin-v1 signing scheme:
- *   1. Build payload: "blvd-admin-v1" + businessId + timestamp
- *   2. Base64-decode the API secret to get the raw HMAC key
- *   3. HMAC-SHA256 sign the payload
- *   4. Combine: signature + payload → token
- *   5. Basic auth: base64(apiKey + ":" + token)
- */
-function generateBoulevardAuth(apiKey, apiSecret, businessId) {
-  const prefix = 'blvd-admin-v1';
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const tokenPayload = `${prefix}${businessId}${timestamp}`;
-
-  // Decode the base64-encoded API secret to get the raw HMAC key
-  const rawKey = Buffer.from(apiSecret, 'base64');
-
-  // Create HMAC-SHA256 signature
-  const signature = crypto
-    .createHmac('sha256', rawKey)
-    .update(tokenPayload, 'utf8')
-    .digest('base64');
-
-  // Combine signature + payload into the token
-  const token = `${signature}${tokenPayload}`;
-
-  // Build the Basic auth credential: apiKey:token
-  const httpBasicPayload = `${apiKey}:${token}`;
-  const httpBasicCredentials = Buffer.from(httpBasicPayload, 'utf8').toString('base64');
-
-  return `Basic ${httpBasicCredentials}`;
-}
-
-/**
- * Look up a member by name + email or name + phone.
- * Returns the member profile or null if not found.
- */
 async function lookupMember(name, emailOrPhone) {
   const apiKey = process.env.BOULEVARD_API_KEY;
   const apiSecret = process.env.BOULEVARD_API_SECRET;
   const businessId = process.env.BOULEVARD_BUSINESS_ID;
-
-  if (!apiKey) {
-    if (process.env.NODE_ENV === 'production') {
-      console.error('BOULEVARD_API_KEY not set in production \u2014 aborting lookup');
-      return null;
-    }
-    console.warn('BOULEVARD_API_KEY not set \u2014 using mock data (dev only)');
-    return mockLookup(name, emailOrPhone);
-  }
-
+  if (!apiKey) { console.warn('BOULEVARD_API_KEY not set — using mock data'); return mockLookup(name, emailOrPhone); }
   const apiUrl = process.env.BOULEVARD_API_URL || DEFAULT_API_URL;
-
   try {
     const isEmail = emailOrPhone.includes('@');
-
-    // Build separate queries for email vs phone to avoid null filter issues
     let query, variables;
-
-    // Client fragment with all available useful fields
-    const clientFields = `
-      id
-      firstName
-      lastName
-      email
-      mobilePhone
-      appointmentCount
-      createdAt
-      currentAccountBalance
-      primaryLocation { name }
-      tags { name }
-    `;
-
     if (isEmail) {
       query = `
-        query FindClientByEmail($email: String!) {
-          clients(
-            first: 5,
-            filter: { email: $email }
-          ) {
-            edges {
-              node { ${clientFields} }
-            }
+        query FindClientByEmail($emails: [String!]) {
+          clients(first: 5, emails: $emails) {
+            edges { node { id firstName lastName email mobilePhone } }
           }
         }
       `;
-      variables = { email: emailOrPhone.trim().toLowerCase() };
+      variables = { emails: [emailOrPhone.trim().toLowerCase()] };
     } else {
       const cleanPhone = normalizePhone(emailOrPhone);
       query = `
-        query FindClientByPhone($phone: String!) {
-          clients(
-            first: 5,
-            filter: { mobilePhone: $phone }
-          ) {
-            edges {
-              node { ${clientFields} }
-            }
+        query FindClientByPhone($query: QueryString) {
+          clients(first: 5, query: $query) {
+            edges { node { id firstName lastName email mobilePhone } }
           }
         }
       `;
-      variables = { phone: cleanPhone };
+      variables = { query: cleanPhone };
     }
-
-    // Build HMAC-based auth header (blvd-admin-v1 scheme)
-    const authHeader = generateBoulevardAuth(apiKey, apiSecret, businessId);
-
-    const headers = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Authorization': authHeader,
-    };
-
+    const authCredentials = generateAuthHeader(apiKey, apiSecret, businessId);
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Basic ${authCredentials}` };
     console.log(`Boulevard lookup: ${isEmail ? 'email' : 'phone'} = ${isEmail ? emailOrPhone : normalizePhone(emailOrPhone)} at ${apiUrl}`);
-
-    // Use AbortController for timeout so we don't hang the Vercel function
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
-
     let response;
     try {
-      response = await fetch(apiUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ query, variables }),
-        signal: controller.signal,
-      });
+      response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify({ query, variables }), signal: controller.signal });
     } catch (fetchErr) {
-      if (fetchErr.name === 'AbortError') {
-        console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
-      } else {
-        console.error('Boulevard API fetch error:', fetchErr.message || fetchErr);
-      }
+      if (fetchErr.name === 'AbortError') console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
+      else console.error('Boulevard API fetch error:', fetchErr.message || fetchErr);
       return null;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    // Check for HTTP errors before parsing JSON
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unable to read response');
-      console.error(`Boulevard API returned HTTP ${response.status}: ${errorText.substring(0, 500)}`);
-      return null;
-    }
-
-    // Try to parse JSON — handle case where response isn't JSON
+    } finally { clearTimeout(timeoutId); }
+    if (!response.ok) { const t = await response.text().catch(() => ''); console.error(`Boulevard API HTTP ${response.status}: ${t.substring(0,500)}`); return null; }
     let data;
-    try {
-      data = await response.json();
-    } catch (parseErr) {
-      console.error('Boulevard API returned non-JSON response:', parseErr.message);
-      return null;
-    }
-
-    // Check for GraphQL errors
-    if (data.errors) {
-      console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
-      return null;
-    }
-
+    try { data = await response.json(); } catch (e) { console.error('Boulevard API non-JSON:', e.message); return null; }
+    if (data.errors) { console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors)); return null; }
     const clients = data?.data?.clients?.edges || [];
-
-    if (clients.length === 0) {
-      console.log('Boulevard lookup: no clients found');
-      return null;
-    }
-
-    // Find best match by name similarity
+    if (clients.length === 0) { console.log('Boulevard lookup: no clients found'); return null; }
     const nameLower = name.toLowerCase().trim();
     const match = clients.find(c => {
-      const fullName = `${c.node.firstName} ${c.node.lastName}`.toLowerCase();
-      return fullName === nameLower || levenshtein(fullName, nameLower) <= 3;
+      const fn = `${c.node.firstName} ${c.node.lastName}`.toLowerCase();
+      return fn === nameLower || levenshtein(fn, nameLower) <= 3;
     });
-
-    if (!match) {
-      console.log(`Boulevard lookup: ${clients.length} clients found but none match name "${name}"`);
-      return null;
-    }
-
-    console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName} (id: ${match.node.id})`);
-
-    // Fetch membership details for this client
-    const clientId = match.node.id;
-    let membershipData = null;
-    try {
-      membershipData = await fetchClientMembership(clientId, apiUrl, headers);
-    } catch (err) {
-      console.error('Boulevard membership fetch error:', err.message || err);
-    }
-
-    return buildProfile(match.node, membershipData);
-
-  } catch (err) {
-    console.error('Boulevard API error:', err.message || err);
-    return null;
-  }
+    if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
+    console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName}`);
+    return buildProfile(match.node);
+  } catch (err) { console.error('Boulevard API error:', err.message || err); return null; }
 }
 
-/**
- * Fetch membership details for a specific client.
- * Queries all memberships and filters to the matching clientId.
- */
-async function fetchClientMembership(clientId, apiUrl, headers) {
-  const query = `
-    query GetMemberships {
-      memberships(first: 50) {
-        edges {
-          node {
-            id
-            name
-            status
-            startOn
-            endOn
-            cancelOn
-            unitPrice
-            termNumber
-            nextChargeDate
-            unpauseOn
-            clientId
-            location { name }
-            vouchers {
-              quantity
-              services { name }
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ query }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      console.error(`Boulevard memberships query HTTP ${response.status}`);
-      return null;
-    }
-
-    const data = await response.json();
-    if (data.errors) {
-      console.error('Boulevard memberships GraphQL errors:', JSON.stringify(data.errors));
-      return null;
-    }
-
-    const allMemberships = data?.data?.memberships?.edges || [];
-    // Filter to this client's memberships (prefer active)
-    const clientMemberships = allMemberships
-      .map(e => e.node)
-      .filter(m => m.clientId === clientId);
-
-    if (clientMemberships.length === 0) {
-      console.log(`Boulevard: no memberships found for client ${clientId}`);
-      return null;
-    }
-
-    // Prefer the active membership; fall back to most recent
-    const active = clientMemberships.find(m => m.status === 'ACTIVE');
-    const membership = active || clientMemberships[0];
-
-    console.log(`Boulevard: found membership "${membership.name}" status=${membership.status} for client`);
-    return membership;
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      console.error('Boulevard memberships query timed out');
-    } else {
-      console.error('Boulevard memberships fetch error:', err.message || err);
-    }
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-/**
- * Build the full member profile object from Boulevard data.
- * This is the shape that gets injected into the system prompt.
- */
-function buildProfile(boulevardData, membershipData) {
-  // Derive membership tier from the membership name (e.g. "50-Minute Membership" -> "50")
-  let tier = '50';
-  let monthlyRate = 139;
-  let memberSince = null;
-  let tenureMonths = 0;
-  let accountStatus = 'active';
-  let unusedCredits = 0;
-  let nextChargeDate = null;
-
-  if (membershipData) {
-    // Parse tier from membership name
-    const tierMatch = (membershipData.name || '').match(/(\d+)[- ]?min/i);
-    if (tierMatch) {
-      tier = tierMatch[1];
-    }
-
-    // Unit price is in cents
-    monthlyRate = membershipData.unitPrice
-      ? Math.round(membershipData.unitPrice / 100)
-      : CURRENT_RATES[tier] || 139;
-
-    memberSince = membershipData.startOn || null;
-    accountStatus = (membershipData.status || 'ACTIVE').toLowerCase();
-    nextChargeDate = membershipData.nextChargeDate || null;
-
-    // Calculate tenure in months from startOn
-    if (membershipData.startOn) {
-      const start = new Date(membershipData.startOn);
-      const now = new Date();
-      tenureMonths = Math.max(0,
-        (now.getFullYear() - start.getFullYear()) * 12 +
-        (now.getMonth() - start.getMonth())
-      );
-    }
-
-    // Count voucher quantities as unused credits
-    if (membershipData.vouchers && membershipData.vouchers.length > 0) {
-      unusedCredits = membershipData.vouchers.reduce(
-        (sum, v) => sum + (v.quantity || 0), 0
-      );
-    }
-  }
-
-  // Compute from client data
-  const appointmentCount = boulevardData.appointmentCount || 0;
-  const location = boulevardData.primaryLocation?.name || 'Unknown';
-
+function buildProfile(d) {
   const profile = {
-    name: `${boulevardData.firstName} ${boulevardData.lastName}`,
-    firstName: boulevardData.firstName,
-    email: boulevardData.email,
-    phone: boulevardData.mobilePhone || null,
-    location: location,
-    tier: tier,
-    monthlyRate: monthlyRate,
-    memberSince: memberSince,
-    tenureMonths: tenureMonths,
-    accountStatus: accountStatus,
-    paymentsProcessed: membershipData ? (membershipData.termNumber || tenureMonths) : 0,
-
-    // Financial — estimate from tenure and rate
-    totalDuesPaid: tenureMonths * monthlyRate,
-    totalRetailPurchases: 0, // Not available via Boulevard API
-    totalAddonPurchases: 0,  // Not available via Boulevard API
-
-    // Usage
-    facialsRedeemed: appointmentCount,
-    avgVisitsPerMonth: tenureMonths > 0 ? Math.round((appointmentCount / tenureMonths) * 100) / 100 : 0,
-    lastVisitDate: null,     // Would need separate appointments query
-    mostPurchasedAddon: null, // Not available via Boulevard API
-    upcomingAppointments: [],  // Would need separate appointments query
-
-    // Loyalty — not directly available via Boulevard Admin API
-    loyaltyPoints: 0,
-    loyaltyEnrolled: false,
-
-    // Perk history — not stored in Boulevard
-    perksClaimed: [],
-
-    // Credits
-    unusedCredits: unusedCredits,
-    lastBillDate: nextChargeDate,
+    name: `${d.firstName} ${d.lastName}`, firstName: d.firstName, email: d.email,
+    phone: d.mobilePhone || null, location: d.location || 'Unknown',
+    tier: d.membershipTier || '50', monthlyRate: d.monthlyRate || 139,
+    memberSince: d.membershipStartDate || null, tenureMonths: d.tenureMonths || 0,
+    accountStatus: d.accountStatus || 'active', paymentsProcessed: d.paymentsProcessed || 0,
+    totalDuesPaid: d.totalDuesPaid || 0, totalRetailPurchases: d.totalRetailPurchases || 0,
+    totalAddonPurchases: d.totalAddonPurchases || 0, facialsRedeemed: d.facialsRedeemed || 0,
+    avgVisitsPerMonth: d.avgVisitsPerMonth || 0, lastVisitDate: d.lastVisitDate || null,
+    mostPurchasedAddon: d.mostPurchasedAddon || null, upcomingAppointments: d.upcomingAppointments || [],
+    loyaltyPoints: d.loyaltyPoints || 0, loyaltyEnrolled: d.loyaltyEnrolled || false,
+    perksClaimed: d.perksClaimed || [], unusedCredits: d.unusedCredits || 0,
+    lastBillDate: d.lastBillDate || null,
   };
-
-  // Compute derived values
   profile.computed = computeValues(profile);
-
   return profile;
 }
 
-/**
- * Compute walk-in savings, rate lock savings, next perk, and loyalty redemption.
- */
-function computeValues(profile) {
-  const memberTier = profile.tier;
-
-  // Walk-in savings
-  const walkinPrice = WALKIN_PRICES[memberTier] || 169;
-  const totalWalkinValue = profile.facialsRedeemed * walkinPrice;
-  const walkinSavings = totalWalkinValue - profile.totalDuesPaid;
-
-  // Rate lock savings
-  const currentRate = CURRENT_RATES[memberTier] || 139;
-  const rateDiff = currentRate - profile.monthlyRate;
-  const rateLockAnnual = rateDiff > 0 ? rateDiff * 12 : 0;
-
-  // Next perk milestone
+function computeValues(p) {
+  const wp = WALKIN_PRICES[p.tier] || 169;
+  const ws = p.facialsRedeemed * wp - p.totalDuesPaid;
+  const cr = CURRENT_RATES[p.tier] || 139;
+  const rd = cr - p.monthlyRate;
   let nextPerk = null;
-  for (const perk of PERKS) {
-    if (perk.month > profile.tenureMonths) {
-      nextPerk = perk;
-      break;
-    }
+  for (const pk of PERKS) { if (pk.month > p.tenureMonths) { nextPerk = pk; break; } }
+  let loyaltyRedeemable = null, loyaltyNextTier = null;
+  if (p.loyaltyEnrolled && p.loyaltyPoints > 0) {
+    for (const lt of LOYALTY_TIERS) { if (p.loyaltyPoints >= lt.points) loyaltyRedeemable = lt; }
+    for (const lt of LOYALTY_TIERS) { if (p.loyaltyPoints < lt.points) { loyaltyNextTier = { ...lt, pointsNeeded: lt.points - p.loyaltyPoints }; break; } }
   }
-
-  // Loyalty point redemption
-  let loyaltyRedeemable = null;
-  let loyaltyNextTier = null;
-
-  if (profile.loyaltyEnrolled && profile.loyaltyPoints > 0) {
-    // Find highest redeemable
-    for (const loyaltyTier of LOYALTY_TIERS) {
-      if (profile.loyaltyPoints >= loyaltyTier.points) {
-        loyaltyRedeemable = loyaltyTier;
-      }
-    }
-    // Find next tier they could reach
-    for (const loyaltyTier of LOYALTY_TIERS) {
-      if (profile.loyaltyPoints < loyaltyTier.points) {
-        loyaltyNextTier = {
-          ...loyaltyTier,
-          pointsNeeded: loyaltyTier.points - profile.loyaltyPoints,
-        };
-        break;
-      }
-    }
-  }
-
   return {
-    walkinSavings: walkinSavings > 0 ? walkinSavings : null,
-    walkinPrice,
-    currentNewMemberRate: currentRate,
-    rateDiff,
-    rateLockAnnual: rateLockAnnual > 0 ? rateLockAnnual : null,
-    nextPerk,
-    loyaltyRedeemable,
-    loyaltyNextTier,
-    creditExpiryNote: profile.unusedCredits > 0
-      ? `${profile.unusedCredits} unused credits — expire 90 days from last bill date`
-      : null,
+    walkinSavings: ws > 0 ? ws : null, walkinPrice: wp, currentNewMemberRate: cr, rateDiff: rd,
+    rateLockAnnual: rd > 0 ? rd * 12 : null, nextPerk, loyaltyRedeemable, loyaltyNextTier,
+    creditExpiryNote: p.unusedCredits > 0 ? `${p.unusedCredits} unused credits — expire 90 days from last bill date` : null,
   };
 }
 
-/**
- * Format the member profile as a string for injection into the system prompt.
- */
 function formatProfileForPrompt(profile) {
   const c = profile.computed;
-
   const lines = [
-    `Name: ${profile.name}`,
-    `Email: ${profile.email}`,
-    `Phone: ${profile.phone || 'Not provided'}`,
-    `Location: ${profile.location}`,
-    `Membership Tier: ${profile.tier}-Minute`,
-    `Monthly Rate: $${profile.monthlyRate}/month`,
-    `Current New-Member Rate: $${c.currentNewMemberRate}/month`,
+    `Name: ${profile.name}`, `Email: ${profile.email}`, `Phone: ${profile.phone || 'Not provided'}`,
+    `Location: ${profile.location}`, `Membership Tier: ${profile.tier}-Minute`,
+    `Monthly Rate: $${profile.monthlyRate}/month`, `Current New-Member Rate: $${c.currentNewMemberRate}/month`,
     `Rate Difference: ${c.rateDiff > 0 ? `$${c.rateDiff}/month ($${c.rateLockAnnual}/year) in grandfathered savings` : 'Rate matches current pricing'}`,
-    `Member Since: ${profile.memberSince || 'Unknown'}`,
-    `Tenure: ${profile.tenureMonths} months`,
-    `Account Status: ${profile.accountStatus}`,
-    `Payments Processed: ${profile.paymentsProcessed}`,
-    ``,
-    `Total Membership Dues Paid: $${profile.totalDuesPaid}`,
-    `Total Retail Purchases: $${profile.totalRetailPurchases}`,
-    `Total Add-on Purchases: $${profile.totalAddonPurchases}`,
-    ``,
-    `Facials Redeemed: ${profile.facialsRedeemed}`,
-    `Average Visits/Month: ${profile.avgVisitsPerMonth}`,
-    `Last Visit: ${profile.lastVisitDate || 'Unknown'}`,
-    `Most Purchased Add-on: ${profile.mostPurchasedAddon || 'None'}`,
+    `Member Since: ${profile.memberSince || 'Unknown'}`, `Tenure: ${profile.tenureMonths} months`,
+    `Account Status: ${profile.accountStatus}`, `Payments Processed: ${profile.paymentsProcessed}`,
+    '', `Total Membership Dues Paid: $${profile.totalDuesPaid}`,
+    `Total Retail Purchases: $${profile.totalRetailPurchases}`, `Total Add-on Purchases: $${profile.totalAddonPurchases}`,
+    '', `Facials Redeemed: ${profile.facialsRedeemed}`, `Average Visits/Month: ${profile.avgVisitsPerMonth}`,
+    `Last Visit: ${profile.lastVisitDate || 'Unknown'}`, `Most Purchased Add-on: ${profile.mostPurchasedAddon || 'None'}`,
     `Upcoming Appointments: ${profile.upcomingAppointments.length > 0 ? profile.upcomingAppointments.join(', ') : 'None'}`,
-    ``,
-    `Walk-in Savings: ${c.walkinSavings ? `$${c.walkinSavings} saved vs. walk-in pricing` : 'NEGATIVE OR ZERO — do NOT mention savings'}`,
+    '', `Walk-in Savings: ${c.walkinSavings ? `$${c.walkinSavings} saved vs. walk-in pricing` : 'NEGATIVE OR ZERO — do NOT mention savings'}`,
     `Walk-in Price for Tier: $${c.walkinPrice}/facial`,
-    ``,
-    `Loyalty Points: ${profile.loyaltyEnrolled ? `${profile.loyaltyPoints} points` : 'Not enrolled — do not mention loyalty program'}`,
+    '', `Loyalty Points: ${profile.loyaltyEnrolled ? `${profile.loyaltyPoints} points` : 'Not enrolled — do not mention loyalty program'}`,
   ];
-
-  if (c.loyaltyRedeemable) {
-    lines.push(`Loyalty Redeemable: ${c.loyaltyRedeemable.service} (${c.loyaltyRedeemable.points} points = $${c.loyaltyRedeemable.value} value)`);
-  }
-  if (c.loyaltyNextTier) {
-    lines.push(`Next Loyalty Tier: ${c.loyaltyNextTier.pointsNeeded} more points for ${c.loyaltyNextTier.service}`);
-  }
-
-  lines.push(``);
-  lines.push(`Unused Credits: ${profile.unusedCredits}`);
-  if (profile.lastBillDate) {
-    lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
-  }
-
-  lines.push(``);
-  lines.push(`Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
-  if (c.nextPerk) {
-    lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name} ($${c.nextPerk.value} value)`);
-    lines.push(`Months Until Next Perk: ${c.nextPerk.month - profile.tenureMonths}`);
-  }
-
+  if (c.loyaltyRedeemable) lines.push(`Loyalty Redeemable: ${c.loyaltyRedeemable.service} (${c.loyaltyRedeemable.points} points = $${c.loyaltyRedeemable.value} value)`);
+  if (c.loyaltyNextTier) lines.push(`Next Loyalty Tier: ${c.loyaltyNextTier.pointsNeeded} more points for ${c.loyaltyNextTier.service}`);
+  lines.push('', `Unused Credits: ${profile.unusedCredits}`);
+  if (profile.lastBillDate) lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
+  lines.push('', `Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
+  if (c.nextPerk) { lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name} ($${c.nextPerk.value} value)`); lines.push(`Months Until Next Perk: ${c.nextPerk.month - profile.tenureMonths}`); }
   return lines.join('\n');
 }
 
-/**
- * Simple Levenshtein distance for fuzzy name matching.
- */
 function levenshtein(a, b) {
-  const matrix = [];
-  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
-
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      if (b[i - 1] === a[j - 1]) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1,
-          matrix[i][j - 1] + 1,
-          matrix[i - 1][j] + 1
-        );
-      }
-    }
-  }
-  return matrix[b.length][a.length];
+  const m = [];
+  for (let i = 0; i <= b.length; i++) m[i] = [i];
+  for (let j = 0; j <= a.length; j++) m[0][j] = j;
+  for (let i = 1; i <= b.length; i++)
+    for (let j = 1; j <= a.length; j++)
+      m[i][j] = b[i-1] === a[j-1] ? m[i-1][j-1] : Math.min(m[i-1][j-1]+1, m[i][j-1]+1, m[i-1][j]+1);
+  return m[b.length][a.length];
 }
 
-/**
- * Mock lookup for development/testing without Boulevard API.
- * Returns a realistic test profile.
- */
 function mockLookup(name, emailOrPhone) {
   return buildProfile({
-    firstName: name.split(' ')[0] || 'Test',
-    lastName: name.split(' ').slice(1).join(' ') || 'Member',
+    firstName: name.split(' ')[0] || 'Test', lastName: name.split(' ').slice(1).join(' ') || 'Member',
     email: emailOrPhone.includes('@') ? emailOrPhone : 'test@example.com',
     mobilePhone: emailOrPhone.includes('@') ? null : emailOrPhone,
-    location: 'Flatiron',
-    membershipTier: '50',
-    monthlyRate: 129,
-    membershipStartDate: '2025-01-15',
-    tenureMonths: 13,
-    accountStatus: 'active',
-    paymentsProcessed: 13,
-    totalDuesPaid: 1677,
-    totalRetailPurchases: 340,
-    totalAddonPurchases: 285,
-    facialsRedeemed: 11,
-    avgVisitsPerMonth: 0.85,
-    lastVisitDate: '2026-02-10',
-    mostPurchasedAddon: 'Dermaplaning',
-    upcomingAppointments: ['2026-03-05 at 2pm'],
-    loyaltyPoints: 1360,
-    loyaltyEnrolled: true,
+    location: 'Flatiron', membershipTier: '50', monthlyRate: 129, membershipStartDate: '2025-01-15',
+    tenureMonths: 13, accountStatus: 'active', paymentsProcessed: 13, totalDuesPaid: 1677,
+    totalRetailPurchases: 340, totalAddonPurchases: 285, facialsRedeemed: 11, avgVisitsPerMonth: 0.85,
+    lastVisitDate: '2026-02-10', mostPurchasedAddon: 'Dermaplaning', upcomingAppointments: ['2026-03-05 at 2pm'],
+    loyaltyPoints: 1360, loyaltyEnrolled: true,
     perksClaimed: ['Month 2: Moisturizer', 'Month 4: HA Serum', 'Month 5: Hat', 'Month 6: Microcurrent', 'Month 9: Cleanser', 'Month 12: Formulas Bundle'],
-    unusedCredits: 2,
-    lastBillDate: '2026-02-15',
+    unusedCredits: 2, lastBillDate: '2026-02-15',
   });
 }
 
-/**
- * Verify that the lookup request matches the profile (P1-1).
- * Requires fuzzy name match + at least one exact contact match.
- */
-function verifyMemberIdentity(lookupRequest, profile) {
-  if (!lookupRequest || !profile) return false;
-
-  const requestedName = `${lookupRequest.firstName || ''} ${lookupRequest.lastName || ''}`.toLowerCase().trim();
-  const profileName = (profile.name || '').toLowerCase().trim();
-
-  const nameMatch = profileName === requestedName || levenshtein(profileName, requestedName) <= 3;
-  if (!nameMatch) {
-    console.warn(`Identity verification failed: name mismatch \u2014 requested "${requestedName}" vs profile "${profileName}"`);
-    return false;
-  }
-
-  const requestedEmail = (lookupRequest.email || '').trim().toLowerCase();
-  const profileEmail = (profile.email || '').trim().toLowerCase();
-  const emailMatch = requestedEmail && profileEmail && requestedEmail === profileEmail;
-
-  const requestedPhone = normalizePhone(lookupRequest.phone || '');
-  const profilePhone = normalizePhone(profile.phone || '');
-  const phoneMatch = requestedPhone && profilePhone && requestedPhone === profilePhone;
-
-  if (!emailMatch && !phoneMatch) {
-    console.warn(`Identity verification failed: no contact match for "${profileName}"`);
-    return false;
-  }
-
-  return true;
-}
-
-export {
-  lookupMember,
-  formatProfileForPrompt,
-  normalizePhone,
-  verifyMemberIdentity,
-  levenshtein,
-  WALKIN_PRICES,
-  CURRENT_RATES,
-  PERKS,
-}
+export { lookupMember, buildProfile, computeValues, formatProfileForPrompt, normalizePhone, WALKIN_PRICES, CURRENT_RATES, PERKS, LOYALTY_TIERS };
