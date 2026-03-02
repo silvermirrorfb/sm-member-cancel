@@ -17,37 +17,10 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
     }
 
-    // For general conversations (no member identified), just close
+    // For general conversations (no member identified), just close cleanly
+    // DO NOT log to the cancellations sheet — that's only for membership conversations
     if (!session.memberProfile) {
-      // Log general conversation to sheets if configured
-      const generalSummary = {
-        date: new Date().toISOString(),
-        client_name: 'General Visitor',
-        email: 'N/A',
-        phone: null,
-        location: 'N/A',
-        membership_tier: 'N/A',
-        monthly_rate: 0,
-        tenure_months: 0,
-        account_status: 'N/A',
-        reason_primary: 'General inquiry',
-        reason_verbatim: getConversationTopics(session.messages),
-        outcome: 'GENERAL',
-        action_required: 'None — general inquiry handled by bot.',
-        member_sentiment: 'neutral',
-        sheet_month: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }),
-        sheet_solution: 'General inquiry — no action needed',
-      };
-
-      completeSession(sessionId, 'GENERAL', generalSummary);
-
-      // Log to sheets only (no email for general conversations)
-      try {
-        const { logToGoogleSheets } = await import('../../../../lib/notify');
-        await logToGoogleSheets(generalSummary);
-      } catch (e) {
-        console.warn('General session sheet log failed:', e);
-      }
+      completeSession(sessionId, 'GENERAL', null);
 
       return NextResponse.json({
         completed: true,
@@ -110,7 +83,7 @@ export async function POST(request) {
       }
     }
 
-    // Build transcript
+    // Build transcript (filter out [SYSTEM] messages)
     const transcript = session.messages
       .map(m => {
         if (m.role === 'user' && m.content.startsWith('[SYSTEM]')) return null;
@@ -121,7 +94,7 @@ export async function POST(request) {
       .filter(Boolean)
       .join('\n\n');
 
-    // Send email + log to sheet
+    // Send email + log to cancellations sheet
     const notifyResult = await processConversationEnd(summary, transcript);
 
     completeSession(sessionId, summary.outcome, summary);
@@ -138,16 +111,4 @@ export async function POST(request) {
       { status: 500 }
     );
   }
-}
-
-/**
- * Extract a brief summary of conversation topics from message history.
- */
-function getConversationTopics(messages) {
-  const userMessages = messages
-    .filter(m => m.role === 'user' && !m.content.startsWith('[SYSTEM]'))
-    .map(m => m.content)
-    .slice(0, 3)
-    .join('; ');
-  return userMessages.substring(0, 200) || 'No messages';
 }
