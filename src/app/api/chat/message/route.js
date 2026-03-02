@@ -100,7 +100,17 @@ export async function POST(request) {
       // ── Check for member_lookup request ──
       const lookupRequest = parseMemberLookup(response);
 
-      if (lookupRequest && !session.memberProfile) {
+      // Validate that the lookup has real data — Claude sometimes emits the tag
+      // while still asking for info, with empty/placeholder values.
+      const hasName = lookupRequest &&
+        (lookupRequest.firstName || '').trim().length > 0 &&
+        (lookupRequest.lastName || '').trim().length > 0;
+      const hasContact = lookupRequest &&
+        ((lookupRequest.email || '').trim().length > 0 ||
+         (lookupRequest.phone || '').trim().length > 0);
+      const lookupIsValid = hasName && hasContact;
+
+      if (lookupRequest && lookupIsValid && !session.memberProfile) {
               // Claude wants to look up a member — strip the lookup tag for visible response
             const visibleAck = stripAllSystemTags(response);
 
