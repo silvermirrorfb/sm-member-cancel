@@ -6,7 +6,6 @@ const nextConfig = {
         // Allow the widget to be embedded on silvermirror.com
         source: '/widget/:path*',
         headers: [
-          { key: 'X-Frame-Options', value: 'ALLOWALL' },
           { key: 'Content-Security-Policy', value: "frame-ancestors 'self' https://*.silvermirror.com https://silvermirror.com http://localhost:*" },
         ],
       },
@@ -23,5 +22,4 @@ const nextConfig = {
   },
 };
 
-// Trigger redeploy with Next.js framework
 module.exports = nextConfig;
