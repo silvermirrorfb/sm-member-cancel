@@ -1,4 +1,4 @@
-———————————————// Boulevard Enterprise API Client
+// Boulevard Enterprise API Client
 // This module handles member lookup and profile data computation.
 //
 // SETUP: Set these env vars:
