@@ -38,12 +38,7 @@ async function sendSummaryEmail(summary, transcript) {
   const to = isUpset ? `${primaryTo}, ${escalationTo}` : primaryTo;
 
   if (!host || !user || !pass) {
-    console.warn('SMTP not configured — logging email to console instead');
-    console.log('=== EMAIL THAT WOULD BE SENT ===');
-    console.log(`To: ${to}`);
-    console.log(`Subject: ${buildSubjectLine(summary)}`);
-    console.log(buildEmailBody(summary, transcript));
-    console.log('=== END EMAIL ===');
+    console.warn('SMTP not configured \u2014 email not sent for session:', summary.client_name, '| outcome:', summary.outcome);
     return { sent: false, reason: 'SMTP not configured' };
   }
 
