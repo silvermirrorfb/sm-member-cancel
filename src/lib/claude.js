@@ -84,13 +84,20 @@ function stripMemberLookup(text) {
 
 /**
  * Parse the session summary JSON from Claude's final response.
+ * Validates required fields to prevent stray/injected tags from ending conversations.
  */
 function parseSessionSummary(text) {
   const match = text.match(/<session_summary>\s*([\s\S]*?)\s*<\/session_summary>/);
   if (!match) return null;
 
   try {
-    return JSON.parse(match[1]);
+    const parsed = JSON.parse(match[1]);
+    // Validate required fields — reject malformed summaries
+    if (!parsed.outcome || !parsed.client_name || !parsed.reason_primary) {
+      console.warn('Session summary missing required fields — ignoring');
+      return null;
+    }
+    return parsed;
   } catch (err) {
     console.error('Failed to parse session summary JSON:', err);
     return null;
