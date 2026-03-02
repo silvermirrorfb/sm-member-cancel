@@ -85,7 +85,11 @@ async function lookupMember(name, emailOrPhone) {
     return mockLookup(name, emailOrPhone);
   }
 
-  const apiUrl = process.env.BOULEVARD_API_URL || DEFAULT_API_URL;
+  let apiUrl = process.env.BOULEVARD_API_URL || DEFAULT_API_URL;
+  // Ensure URL ends with .json — Boulevard returns HTML 404 without it
+  if (!apiUrl.endsWith('.json')) {
+    apiUrl += '.json';
+  }
 
   try {
     const isEmail = emailOrPhone.includes('@');
