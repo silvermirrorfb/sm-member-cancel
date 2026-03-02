@@ -268,7 +268,7 @@ export default function ChatWidget() {
                 const res = await fetch(`${API_BASE}/message`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ sessionId, message: text }),
+                          body: JSON.stringify({ sessionId, message: text, history: messages.map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.content })) }),
                 });
                 const data = await res.json();
 
