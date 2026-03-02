@@ -1,6 +1,10 @@
 export const metadata = {
   title: 'Silver Mirror Virtual Assistant',
   description: 'Get help with facials, memberships, products, and skincare',
+  icons: {
+    icon: '/sm-logo.jpg',
+    apple: '/sm-logo.jpg',
+  },
 };
 
 export const viewport = {
