@@ -17,10 +17,49 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
     }
 
+    // For general conversations (no member identified), just close
+    if (!session.memberProfile) {
+      // Log general conversation to sheets if configured
+      const generalSummary = {
+        date: new Date().toISOString(),
+        client_name: 'General Visitor',
+        email: 'N/A',
+        phone: null,
+        location: 'N/A',
+        membership_tier: 'N/A',
+        monthly_rate: 0,
+        tenure_months: 0,
+        account_status: 'N/A',
+        reason_primary: 'General inquiry',
+        reason_verbatim: getConversationTopics(session.messages),
+        outcome: 'GENERAL',
+        action_required: 'None — general inquiry handled by bot.',
+        member_sentiment: 'neutral',
+        sheet_month: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+        sheet_solution: 'General inquiry — no action needed',
+      };
+
+      completeSession(sessionId, 'GENERAL', generalSummary);
+
+      // Log to sheets only (no email for general conversations)
+      try {
+        const { logToGoogleSheets } = await import('../../../../lib/notify');
+        await logToGoogleSheets(generalSummary);
+      } catch (e) {
+        console.warn('General session sheet log failed:', e);
+      }
+
+      return NextResponse.json({
+        completed: true,
+        outcome: 'GENERAL',
+      });
+    }
+
+    // For membership conversations, generate full summary
     let summary = session.summary;
 
-    // If we don't have a summary yet, ask Claude to generate one
     if (!summary) {
+      const systemPrompt = session.systemPrompt;
       const promptForSummary = [
         ...session.messages,
         {
@@ -29,11 +68,11 @@ export async function POST(request) {
         },
       ];
 
-      const response = await sendMessage(session.systemPrompt, promptForSummary);
+      const response = await sendMessage(systemPrompt, promptForSummary);
       summary = parseSessionSummary(response);
 
       if (!summary) {
-        // Fallback: build a minimal summary from what we know
+        // Fallback minimal summary
         summary = {
           date: new Date().toISOString(),
           client_name: session.memberProfile?.name || 'Unknown',
@@ -71,22 +110,20 @@ export async function POST(request) {
       }
     }
 
-    // Build transcript from message history
+    // Build transcript
     const transcript = session.messages
       .map(m => {
-        const label = m.role === 'user' ? 'MEMBER' : 'BOT';
-        // Strip any system-level synthetic messages
-        if (m.role === 'user' && m.content.startsWith('The member has just opened')) return null;
+        if (m.role === 'user' && m.content.startsWith('[SYSTEM]')) return null;
         if (m.role === 'user' && m.content.startsWith('The conversation is ending')) return null;
+        const label = m.role === 'user' ? 'MEMBER' : 'BOT';
         return `[${label}]: ${stripSummaryFromResponse(m.content)}`;
       })
       .filter(Boolean)
       .join('\n\n');
 
-    // Send notifications
+    // Send email + log to sheet
     const notifyResult = await processConversationEnd(summary, transcript);
 
-    // Mark session complete
     completeSession(sessionId, summary.outcome, summary);
 
     return NextResponse.json({
@@ -97,8 +134,20 @@ export async function POST(request) {
   } catch (err) {
     console.error('Chat end error:', err);
     return NextResponse.json(
-      { error: 'Error finalizing session. The membership team has been notified.' },
+      { error: 'Error finalizing session. Please call (888) 677-0055 if you need immediate help.' },
       { status: 500 }
     );
   }
+}
+
+/**
+ * Extract a brief summary of conversation topics from message history.
+ */
+function getConversationTopics(messages) {
+  const userMessages = messages
+    .filter(m => m.role === 'user' && !m.content.startsWith('[SYSTEM]'))
+    .map(m => m.content)
+    .slice(0, 3)
+    .join('; ');
+  return userMessages.substring(0, 200) || 'No messages';
 }
