@@ -1,14 +1,33 @@
 import Anthropic from '@anthropic-ai/sdk';
 import fs from 'fs';
 import path from 'path';
+import { WALKIN_PRICES, CURRENT_RATES } from './boulevard.js';
 
 const SYSTEM_PROMPT_PATH = path.join(process.cwd(), 'src', 'lib', 'system-prompt.txt');
 
 let cachedSystemPrompt = null;
 
+function applyPricingTokens(promptText) {
+  const tokenValues = {
+    '{{WALKIN_30}}': `$${WALKIN_PRICES['30']}`,
+    '{{WALKIN_50}}': `$${WALKIN_PRICES['50']}`,
+    '{{WALKIN_90}}': `$${WALKIN_PRICES['90']}`,
+    '{{MEMBER_30}}': `$${CURRENT_RATES['30']}`,
+    '{{MEMBER_50}}': `$${CURRENT_RATES['50']}`,
+    '{{MEMBER_90}}': `$${CURRENT_RATES['90']}`,
+  };
+
+  let out = promptText;
+  for (const [token, value] of Object.entries(tokenValues)) {
+    out = out.replaceAll(token, value);
+  }
+  return out;
+}
+
 function loadSystemPrompt() {
   if (!cachedSystemPrompt) {
-    cachedSystemPrompt = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf-8');
+    const raw = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf-8');
+    cachedSystemPrompt = applyPricingTokens(raw);
   }
   return cachedSystemPrompt;
 }

@@ -108,6 +108,50 @@ function parseTierFromText(text) {
   return match ? match[1] : null;
 }
 
+function normalizeNameText(text) {
+  if (!text) return '';
+  return String(text)
+    .toLowerCase()
+    .replace(/[^a-z\s'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeName(text) {
+  return normalizeNameText(text)
+    .split(' ')
+    .filter(Boolean);
+}
+
+function namesLikelyMatch(requestedName, candidateFirstName, candidateLastName) {
+  const reqTokens = tokenizeName(requestedName);
+  const candFull = `${candidateFirstName || ''} ${candidateLastName || ''}`.trim();
+  const candTokens = tokenizeName(candFull);
+  if (reqTokens.length === 0 || candTokens.length === 0) return false;
+
+  const reqFirst = reqTokens[0];
+  const reqLast = reqTokens[reqTokens.length - 1];
+  const candFirst = candTokens[0];
+  const candLast = candTokens[candTokens.length - 1];
+
+  // Strong signal: first + last token align.
+  if (reqFirst === candFirst && reqLast === candLast) return true;
+
+  // Allow middle-name variants where both sides still contain first + last.
+  if (reqFirst === candFirst && candTokens.includes(reqLast)) return true;
+  if (candFirst === reqFirst && reqTokens.includes(candLast)) return true;
+
+  const reqNorm = normalizeNameText(requestedName);
+  const candNorm = normalizeNameText(candFull);
+  if (!reqNorm || !candNorm) return false;
+
+  // Substring allows "sophia dowd" vs "sophia isabel dowd".
+  if (reqNorm.includes(candNorm) || candNorm.includes(reqNorm)) return true;
+
+  // Final fuzzy check for minor typos.
+  return levenshtein(candNorm, reqNorm) <= 3;
+}
+
 function getCachedMembership(clientId) {
   const cached = membershipCache.get(clientId);
   if (!cached) return undefined;
@@ -228,11 +272,9 @@ async function fetchBoulevardGraphQL(apiUrl, headers, query, variables) {
 }
 
 function findNameMatch(name, clients) {
-  const nameLower = name.toLowerCase().trim();
-  return clients.find(c => {
-    const fn = `${c.node.firstName} ${c.node.lastName}`.toLowerCase();
-    return fn === nameLower || levenshtein(fn, nameLower) <= 3;
-  }) || null;
+  return clients.find(c =>
+    namesLikelyMatch(name, c?.node?.firstName || '', c?.node?.lastName || '')
+  ) || null;
 }
 
 async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {

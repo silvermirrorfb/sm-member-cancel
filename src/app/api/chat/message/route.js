@@ -73,8 +73,17 @@ function buildLookupNameCandidates(lookupRequest, rawUserMessage) {
           let scrubbed = rawUserMessage;
           scrubbed = scrubbed.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ');
           scrubbed = scrubbed.replace(/\+?\d[\d\s().-]{8,}\d/g, ' ');
-          const parts = scrubbed.match(/[A-Za-z][A-Za-z'-]*/g) || [];
-          if (parts.length >= 2) names.push(`${parts[0]} ${parts[1]}`);
+          const rawParts = scrubbed.match(/[A-Za-z][A-Za-z'-]*/g) || [];
+          const noise = new Set(['email', 'text', 'phone', 'cell', 'number', 'mobile']);
+          const parts = rawParts.filter(p => !noise.has(String(p).toLowerCase()));
+
+          if (parts.length >= 2) {
+                names.push(`${parts[0]} ${parts[1]}`);
+                if (parts.length > 2) {
+                      names.push(`${parts[0]} ${parts[parts.length - 1]}`);
+                      names.push(parts.join(' '));
+                }
+          }
     }
 
     const seen = new Set();
