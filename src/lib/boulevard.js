@@ -11,7 +11,7 @@
 // Docs: https://developer.joinboulevard.com/
 
 // Default URL — override via BOULEVARD_API_URL env var
-const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin.json';
+const DEFAULT_API_URL = 'https://dashboard.boulevard.app/api/2020-01/admin.json';
 
 // Walk-in prices for savings computation
 const WALKIN_PRICES = {
