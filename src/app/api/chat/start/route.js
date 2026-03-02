@@ -1,22 +1,62 @@
-import { NextResponse } from 'next/server';
-import { createSession } from '../../../../lib/sessions';
+/**
+ * Simple in-memory rate limiter.
+ * Tracks requests per IP within a rolling time window.
+ * Note: On serverless (Vercel), this resets on cold starts,
+ * but still protects against rapid bursts within warm instances.
+ */
 
-const OPENING_MESSAGE = `Thanks for reaching out to Silver Mirror! I'm a virtual assistant trained to help with questions about facials, memberships, or our product line, Silver Mirror Skincare. If you have a time-sensitive need, please call us at (888) 677-0055.\n\nPlease note: all bookings must be done through the "Book A Facial" button at the top of silvermirror.com.\n\nHow can I help you today?`;
+const requests = new Map();
 
-export async function POST(request) {
-  try {
-    // Create a new session — no auth required
-    const session = createSession(null, null);
-
-    return NextResponse.json({
-      sessionId: session.id,
-      message: OPENING_MESSAGE,
-    });
-  } catch (err) {
-    console.error('Chat start error:', err);
-    return NextResponse.json(
-      { error: 'Something went wrong. Please try again.' },
-      { status: 500 }
-    );
+// Clean up old entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, data] of requests) {
+    if (now - data.windowStart > data.windowMs * 2) {
+      requests.delete(key);
+    }
   }
+}, 5 * 60 * 1000);
+
+/**
+ * Check if a request should be rate-limited.
+ * @param {string} ip - The client IP address
+ * @param {string} route - The route name (e.g., 'start', 'message')
+ * @param {number} maxRequests - Max requests per window
+ * @param {number} windowMs - Window size in milliseconds
+ * @returns {{ allowed: boolean, remaining: number, retryAfterMs: number }}
+ */
+function checkRateLimit(ip, route, maxRequests = 30, windowMs = 10 * 60 * 1000) {
+  const key = `${ip}:${route}`;
+  const now = Date.now();
+
+  let data = requests.get(key);
+
+  if (!data || now - data.windowStart > windowMs) {
+    // New window
+    data = { count: 1, windowStart: now, windowMs };
+    requests.set(key, data);
+    return { allowed: true, remaining: maxRequests - 1, retryAfterMs: 0 };
+  }
+
+  data.count += 1;
+
+  if (data.count > maxRequests) {
+    const retryAfterMs = windowMs - (now - data.windowStart);
+    return { allowed: false, remaining: 0, retryAfterMs };
+  }
+
+  return { allowed: true, remaining: maxRequests - data.count, retryAfterMs: 0 };
 }
+
+/**
+ * Get client IP from Next.js request.
+ */
+function getClientIP(request) {
+  return (
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    request.headers.get('x-real-ip') ||
+    'unknown'
+  );
+}
+
+export { checkRateLimit, getClientIP };
