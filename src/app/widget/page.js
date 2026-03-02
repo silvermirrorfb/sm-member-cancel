@@ -2,9 +2,10 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 
-const API_BASE = typeof window !== 'undefined'
-  ? `${window.location.origin}/api/chat`
-  : '/api/chat';
+const API_BASE =
+  typeof window !== 'undefined'
+    ? `${window.location.origin}/api/chat`
+    : '/api/chat';
 
 // ── STYLES ──────────────────────────────────────────────────────
 const BRIGHT_BLUE = '#50aaf2';
@@ -146,22 +147,19 @@ const styles = {
   },
   footer: {
     textAlign: 'center',
-    padding: '6px 0 10px',
-    fontSize: 10,
-    color: TEXT_LIGHT,
+    padding: '12px 14px 16px',
     background: WHITE,
     borderTop: `1px solid ${BORDER}`,
   },
 };
 
-// ── MAIN WIDGET COMPONENT ───────────────────────────────────────
+// ── MAIN WIDGET COMPONENT ─────────────────────────────────────
 export default function ChatWidget() {
   const [phase, setPhase] = useState('loading'); // loading, chat, ended
   const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [inputVal, setInputVal] = useState('');
   const [loading, setLoading] = useState(false);
-
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -184,7 +182,10 @@ export default function ChatWidget() {
         });
         const data = await res.json();
         if (data.error) {
-          setMessages([{ role: 'bot', content: 'Something went wrong starting the chat. Please call (888) 677-0055 for help.' }]);
+          setMessages([{
+            role: 'bot',
+            content: 'Something went wrong starting the chat. Please call (888) 677-0055 for help.',
+          }]);
           setPhase('chat');
           return;
         }
@@ -192,7 +193,10 @@ export default function ChatWidget() {
         setMessages([{ role: 'bot', content: data.message }]);
         setPhase('chat');
       } catch (err) {
-        setMessages([{ role: 'bot', content: 'Unable to connect. Please call (888) 677-0055 for help.' }]);
+        setMessages([{
+          role: 'bot',
+          content: 'Unable to connect. Please call (888) 677-0055 for help.',
+        }]);
         setPhase('chat');
       }
     }
@@ -208,7 +212,6 @@ export default function ChatWidget() {
   const handleSend = async () => {
     const text = inputVal.trim();
     if (!text || loading || phase !== 'chat' || !sessionId) return;
-
     setInputVal('');
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     setLoading(true);
@@ -219,22 +222,26 @@ export default function ChatWidget() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId, message: text }),
       });
-
       const data = await res.json();
 
       if (data.error) {
-        setMessages(prev => [...prev, {
-          role: 'bot',
-          content: "I'm sorry, something went wrong on my end. Please call (888) 677-0055 for immediate help, or email hello@silvermirror.com."
-        }]);
+        setMessages(prev => [
+          ...prev,
+          {
+            role: 'bot',
+            content:
+              "I'm sorry, something went wrong on my end. Please call (888) 677-0055 for immediate help, or email hello@silvermirror.com.",
+          },
+        ]);
         setLoading(false);
         return;
       }
 
-      setMessages(prev => [...prev, { role: 'bot', content: data.message }]);
+      // Null-safety: if message is missing, show fallback
+      const botMessage = data.message || "I'm sorry, I wasn't able to generate a response. Please try again or call (888) 677-0055.";
+      setMessages(prev => [...prev, { role: 'bot', content: botMessage }]);
 
       if (data.conversationEnding) {
-        // Trigger end-of-conversation processing
         await fetch(`${API_BASE}/end`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -243,11 +250,16 @@ export default function ChatWidget() {
         setPhase('ended');
       }
     } catch (err) {
-      setMessages(prev => [...prev, {
-        role: 'bot',
-        content: "I'm having trouble connecting right now. Please call (888) 677-0055 or email hello@silvermirror.com."
-      }]);
+      setMessages(prev => [
+        ...prev,
+        {
+          role: 'bot',
+          content:
+            "I'm having trouble connecting right now. Please call (888) 677-0055 or email hello@silvermirror.com.",
+        },
+      ]);
     }
+
     setLoading(false);
   };
 
@@ -267,15 +279,27 @@ export default function ChatWidget() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId }),
       });
-    } catch (e) { /* best effort */ }
+    } catch (e) {
+      /* best effort */
+    }
     setPhase('ended');
     setLoading(false);
+  };
+
+  const handleNewChat = () => {
+    window.location.reload();
   };
 
   // ── Render ──
   if (phase === 'loading') {
     return (
-      <div style={{ ...styles.container, justifyContent: 'center', alignItems: 'center' }}>
+      <div
+        style={{
+          ...styles.container,
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}
+      >
         <div style={{ color: TEXT_LIGHT, fontSize: 13 }}>Loading...</div>
       </div>
     );
@@ -285,7 +309,11 @@ export default function ChatWidget() {
     <div style={styles.container}>
       {/* Header */}
       <div style={styles.header}>
-        <img src="/sm-logo.jpg" alt="Silver Mirror" style={styles.headerLogo} />
+        <img
+          src="/sm-logo.jpg"
+          alt="Silver Mirror"
+          style={styles.headerLogo}
+        />
         <div style={styles.headerText}>
           <p style={styles.headerTitle}>Silver Mirror</p>
           <p style={styles.headerSub}>Virtual Assistant</p>
@@ -294,9 +322,14 @@ export default function ChatWidget() {
           <button
             onClick={handleEndChat}
             style={{
-              background: 'transparent', border: `1px solid ${BORDER}`,
-              color: TEXT_LIGHT, borderRadius: 6, padding: '5px 10px',
-              fontSize: 11, cursor: 'pointer', fontFamily: 'inherit',
+              background: 'transparent',
+              border: `1px solid ${BORDER}`,
+              color: TEXT_LIGHT,
+              borderRadius: 6,
+              padding: '5px 10px',
+              fontSize: 11,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
             }}
           >
             End Chat
@@ -307,15 +340,16 @@ export default function ChatWidget() {
       {/* Messages */}
       <div style={styles.messages}>
         {messages.map((msg, i) => (
-          <div key={i} style={msg.role === 'user' ? styles.msgUser : styles.msgBot}>
-            {msg.content.split('\n').map((line, j) => (
-              <span key={j}>
-                {renderLine(line)}
-                {j < msg.content.split('\n').length - 1 && <br />}
-              </span>
-            ))}
+          <div
+            key={i}
+            style={msg.role === 'user' ? styles.msgUser : styles.msgBot}
+          >
+            {msg.role === 'user'
+              ? renderPlainText(msg.content)
+              : renderMarkdown(msg.content)}
           </div>
         ))}
+
         {loading && (
           <div style={styles.typing}>
             <TypingDots />
@@ -327,9 +361,32 @@ export default function ChatWidget() {
       {/* Input or Ended */}
       {phase === 'ended' ? (
         <div style={styles.footer}>
-          <p style={{ margin: '6px 0', color: TEXT_LIGHT, fontSize: 12 }}>
-            Chat ended. Need more help? Call (888) 677-0055 or email hello@silvermirror.com
+          <p style={{ margin: '4px 0 10px', color: TEXT_LIGHT, fontSize: 12 }}>
+            Chat ended. Need more help? Call{' '}
+            <a href="tel:8886770055" style={{ color: BRIGHT_BLUE, textDecoration: 'none' }}>
+              (888) 677-0055
+            </a>{' '}
+            or email{' '}
+            <a href="mailto:hello@silvermirror.com" style={{ color: BRIGHT_BLUE, textDecoration: 'none' }}>
+              hello@silvermirror.com
+            </a>
           </p>
+          <button
+            onClick={handleNewChat}
+            style={{
+              background: BRIGHT_BLUE,
+              color: WHITE,
+              border: 'none',
+              borderRadius: 20,
+              padding: '8px 20px',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+          >
+            Start New Chat
+          </button>
         </div>
       ) : (
         <div style={styles.inputArea}>
@@ -337,7 +394,7 @@ export default function ChatWidget() {
             <textarea
               ref={inputRef}
               value={inputVal}
-              onChange={e => setInputVal(e.target.value)}
+              onChange={(e) => setInputVal(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Type your message..."
               style={styles.input}
@@ -348,7 +405,7 @@ export default function ChatWidget() {
               onClick={handleSend}
               style={{
                 ...styles.sendBtn,
-                ...((!inputVal.trim() || loading) ? styles.sendBtnDisabled : {}),
+                ...(!inputVal.trim() || loading ? styles.sendBtnDisabled : {}),
               }}
               disabled={!inputVal.trim() || loading}
               aria-label="Send"
@@ -363,25 +420,190 @@ export default function ChatWidget() {
 }
 
 /**
- * Render a line of text, converting URLs to clickable links.
+ * Render plain text with line breaks (for user messages).
  */
-function renderLine(text) {
-  const urlRegex = /(https?:\/\/[^\s)]+)/g;
-  const parts = text.split(urlRegex);
-  return parts.map((part, i) => {
-    if (urlRegex.test(part)) {
-      // Reset lastIndex since we're reusing the regex
-      urlRegex.lastIndex = 0;
+function renderPlainText(content) {
+  const text = content || '';
+  return text.split('\n').map((line, i) => (
+    <span key={i}>
+      {line}
+      {i < text.split('\n').length - 1 && <br />}
+    </span>
+  ));
+}
+
+/**
+ * Render bot messages with markdown support:
+ * - ## Headers -> bold section headers
+ * - **bold** -> <strong>
+ * - - bullet items -> indented with bullet
+ * - URLs -> clickable links
+ * - Line breaks preserved
+ */
+function renderMarkdown(content) {
+  const text = content || '';
+  const lines = text.split('\n');
+
+  return lines.map((line, i) => {
+    const trimmed = line.trim();
+
+    // Empty lines -> spacing
+    if (!trimmed) {
+      return <div key={i} style={{ height: 6 }} />;
+    }
+
+    // ## Header
+    if (trimmed.startsWith('## ')) {
+      const headerText = trimmed.replace(/^##\s+/, '');
       return (
-        <a
+        <div
           key={i}
-          href={part}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ color: '#50aaf2', textDecoration: 'underline' }}
+          style={{
+            fontWeight: 700,
+            fontSize: 13.5,
+            marginTop: i > 0 ? 10 : 0,
+            marginBottom: 2,
+            color: '#1a1a1a',
+          }}
         >
-          {part}
-        </a>
+          {renderInline(headerText)}
+        </div>
+      );
+    }
+
+    // # Header (larger)
+    if (trimmed.startsWith('# ') && !trimmed.startsWith('## ')) {
+      const headerText = trimmed.replace(/^#\s+/, '');
+      return (
+        <div
+          key={i}
+          style={{
+            fontWeight: 700,
+            fontSize: 14.5,
+            marginTop: i > 0 ? 12 : 0,
+            marginBottom: 4,
+            color: '#1a1a1a',
+          }}
+        >
+          {renderInline(headerText)}
+        </div>
+      );
+    }
+
+    // Bullet items: - or *
+    if (/^[-•*]\s+/.test(trimmed)) {
+      const bulletText = trimmed.replace(/^[-•*]\s+/, '');
+      return (
+        <div
+          key={i}
+          style={{
+            paddingLeft: 14,
+            position: 'relative',
+            marginBottom: 2,
+          }}
+        >
+          <span
+            style={{
+              position: 'absolute',
+              left: 0,
+              color: '#9ca3af',
+            }}
+          >
+            &bull;
+          </span>
+          {renderInline(bulletText)}
+        </div>
+      );
+    }
+
+    // Numbered items: 1. 2. etc.
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const match = trimmed.match(/^(\d+\.)\s+(.*)/);
+      if (match) {
+        return (
+          <div
+            key={i}
+            style={{
+              paddingLeft: 20,
+              position: 'relative',
+              marginBottom: 2,
+            }}
+          >
+            <span
+              style={{
+                position: 'absolute',
+                left: 0,
+                color: '#9ca3af',
+                fontWeight: 600,
+                fontSize: 12,
+              }}
+            >
+              {match[1]}
+            </span>
+            {renderInline(match[2])}
+          </div>
+        );
+      }
+    }
+
+    // Regular paragraph
+    return (
+      <div key={i} style={{ marginBottom: 2 }}>
+        {renderInline(trimmed)}
+      </div>
+    );
+  });
+}
+
+/**
+ * Render inline formatting: **bold**, URLs
+ */
+function renderInline(text) {
+  if (!text) return null;
+
+  const boldParts = text.split(/(\*\*[^*]+\*\*)/g);
+
+  return boldParts.map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      const inner = part.slice(2, -2);
+      return (
+        <strong key={i} style={{ fontWeight: 600 }}>
+          {renderUrls(inner)}
+        </strong>
+      );
+    }
+    return <span key={i}>{renderUrls(part)}</span>;
+  });
+}
+
+/**
+ * Convert URLs to clickable links.
+ */
+function renderUrls(text) {
+  if (!text) return null;
+  const urlRegex = /(https?:\/\/[^\s),]+)/g;
+  const parts = text.split(urlRegex);
+
+  return parts.map((part, i) => {
+    if (/^https?:\/\//.test(part)) {
+      let url = part;
+      let trailing = '';
+      if (/[.)!?;:]$/.test(url)) {
+        trailing = url.slice(-1);
+        url = url.slice(0, -1);
+      }
+      return (
+        <span key={i}>
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#50aaf2', textDecoration: 'underline' }}
+          >
+            {url}
+          </a>
+          {trailing}
+        </span>
       );
     }
     return part;
@@ -392,8 +614,14 @@ function TypingDots() {
   return (
     <span>
       <style>{`
-        @keyframes blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
-        .dot { display: inline-block; animation: blink 1.4s infinite both; }
+        @keyframes blink {
+          0%, 80%, 100% { opacity: 0.3; }
+          40% { opacity: 1; }
+        }
+        .dot {
+          display: inline-block;
+          animation: blink 1.4s infinite both;
+        }
         .dot:nth-child(2) { animation-delay: 0.2s; }
         .dot:nth-child(3) { animation-delay: 0.4s; }
       `}</style>
