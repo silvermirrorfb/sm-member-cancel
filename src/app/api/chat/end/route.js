@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSession, completeSession } from '../../../../lib/sessions';
+import { getSession, createSession, addMessage, completeSession } from '../../../../lib/sessions';
 import { sendMessage, parseSessionSummary, stripSummaryFromResponse } from '../../../../lib/claude';
 import { processConversationEnd } from '../../../../lib/notify';
 
@@ -12,13 +12,32 @@ export async function POST(request) {
       return NextResponse.json({ error: 'sessionId required.' }, { status: 400 });
     }
 
-    const session = getSession(sessionId);
+    let session = getSession(sessionId);
+
+    // P1-3: Recover session from client history on serverless rotation
+    if (!session && body.history && Array.isArray(body.history)) {
+      console.warn(`End session ${sessionId} not found \u2014 recovering from client history`);
+      session = createSession(null, null, sessionId);
+      for (const msg of body.history) {
+        addMessage(session.id, msg.role === 'bot' ? 'assistant' : msg.role, msg.content);
+      }
+      // Restore member profile if provided by client
+      if (body.memberProfile) {
+        session.memberProfile = body.memberProfile;
+        session.mode = 'membership';
+      }
+      // Use client-provided summary if available (avoids redundant Claude call)
+      if (body.summary) {
+        session.summary = body.summary;
+      }
+    }
+
     if (!session) {
       return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
     }
 
     // For general conversations (no member identified), just close cleanly
-    // DO NOT log to the cancellations sheet — that's only for membership conversations
+    // DO NOT log to the cancellations sheet \u2014 that's only for membership conversations
     if (!session.memberProfile) {
       completeSession(sessionId, 'GENERAL', null);
 
@@ -41,8 +60,13 @@ export async function POST(request) {
         },
       ];
 
-      const response = await sendMessage(systemPrompt, promptForSummary);
-      summary = parseSessionSummary(response);
+      // P2-1: Wrap Claude call in try/catch so email + sheet still get logged on failure
+      try {
+        const response = await sendMessage(systemPrompt, promptForSummary);
+        summary = parseSessionSummary(response);
+      } catch (err) {
+        console.error('Claude summary generation failed \u2014 using fallback:', err.message);
+      }
 
       if (!summary) {
         // Fallback minimal summary
@@ -74,11 +98,11 @@ export async function POST(request) {
           lead_recommended: null,
           offers_presented: [],
           all_declined: false,
-          action_required: 'Review transcript — session ended without resolution. Follow up with member.',
+          action_required: 'Review transcript \u2014 session ended without resolution. Follow up with member.',
           cost_to_company: '$0',
           member_sentiment: 'unknown',
           sheet_month: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }),
-          sheet_solution: 'Referred to team — incomplete session',
+          sheet_solution: 'Referred to team \u2014 incomplete session',
         };
       }
     }
