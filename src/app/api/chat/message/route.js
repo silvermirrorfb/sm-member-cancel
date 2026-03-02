@@ -10,7 +10,7 @@ import {
     stripSummaryFromResponse,
     stripAllSystemTags,
 } from '../../../../lib/claude';
-import { lookupMember, formatProfileForPrompt } from '../../../../lib/boulevard';
+import { lookupMember, formatProfileForPrompt, verifyMemberIdentity } from '../../../../lib/boulevard';
 import { logChatMessage } from '../../../../lib/notify';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
@@ -59,8 +59,8 @@ export async function POST(request) {
 
       let session = getSession(sessionId);
           if (!session) {
-                  // Serverless instance rotation — recover session from client history
-                  console.warn(`Session ${"$"}{sessionId} not found — recovering from client history`);
+                  // Serverless instance rotation \u2014 recover session from client history
+                  console.warn(`Session ${sessionId} not found \u2014 recovering from client history`);
                   const { history } = body;
                   session = createSession(null, null, sessionId);
                   if (history && Array.isArray(history)) {
@@ -77,12 +77,15 @@ export async function POST(request) {
                       );
       }
 
+      // Sanitize user input \u2014 strip system tags to prevent injection
+      const sanitizedMessage = stripAllSystemTags(message);
+
       // Add user message to history
-      addMessage(sessionId, 'user', message);
+      addMessage(sessionId, 'user', sanitizedMessage);
 
       // Log user message to chatbot log (fire-and-forget)
       const sessionCreated = new Date(session.createdAt).toISOString();
-          logChatMessage(sessionId, sessionCreated, 'user', message).catch(err =>
+          logChatMessage(sessionId, sessionCreated, 'user', sanitizedMessage).catch(err =>
                   console.warn('Chatlog failed for user message:', err)
                                                                                );
 
@@ -93,7 +96,7 @@ export async function POST(request) {
       let response = await safeSendMessage(systemPrompt, session.messages);
 
       if (response === null) {
-              // Claude is rate-limited — return friendly message without crashing
+              // Claude is rate-limited \u2014 return friendly message without crashing
             addMessage(sessionId, 'assistant', RATE_LIMIT_USER_MESSAGE);
               return NextResponse.json({
                         message: RATE_LIMIT_USER_MESSAGE,
@@ -102,10 +105,10 @@ export async function POST(request) {
               });
       }
 
-      // ── Check for member_lookup request ──
+      // \u2500\u2500 Check for member_lookup request \u2500\u2500
       const lookupRequest = parseMemberLookup(response);
 
-      // Validate that the lookup has real data — Claude sometimes emits the tag
+      // Validate that the lookup has real data \u2014 Claude sometimes emits the tag
       // while still asking for info, with empty/placeholder values.
       const hasName = lookupRequest &&
         (lookupRequest.firstName || '').trim().length > 0 &&
@@ -116,7 +119,7 @@ export async function POST(request) {
       const lookupIsValid = hasName && hasContact;
 
       if (lookupRequest && lookupIsValid && !session.memberProfile) {
-              // Claude wants to look up a member — strip the lookup tag for visible response
+              // Claude wants to look up a member \u2014 strip the lookup tag for visible response
             const visibleAck = stripAllSystemTags(response);
 
             // Store CLEANED response in history (not raw with tags)
@@ -133,8 +136,14 @@ export async function POST(request) {
                         console.error('Boulevard lookup error:', err);
               }
 
+            // Verify identity before exposing profile data
+            if (profile && !verifyMemberIdentity(lookupRequest, profile)) {
+                      console.warn('Identity verification failed \u2014 treating as lookup miss');
+                      profile = null;
+            }
+
             if (profile) {
-                      // Success — switch to Membership Mode
+                      // Success \u2014 switch to Membership Mode
                 const profileText = formatProfileForPrompt(profile);
                       const memberSystemPrompt = buildSystemPromptWithProfile(profileText);
 
@@ -151,7 +160,7 @@ export async function POST(request) {
                 const memberResponse = await safeSendMessage(memberSystemPrompt, session.messages);
 
                 if (memberResponse === null) {
-                            // Claude rate-limited after profile load — still return the ack + a helpful message
+                            // Claude rate-limited after profile load \u2014 still return the ack + a helpful message
                         const fallbackMsg = visibleAck + '\n\n' + RATE_LIMIT_USER_MESSAGE;
                             addMessage(sessionId, 'assistant', RATE_LIMIT_USER_MESSAGE);
                             return NextResponse.json({
@@ -179,9 +188,9 @@ export async function POST(request) {
                 });
 
             } else {
-                      // Lookup failed — tell Claude via a system message
+                      // Lookup failed \u2014 tell Claude via a system message
                 addMessage(sessionId, 'user',
-                                     '[SYSTEM] Member lookup failed — no matching account found. Let the customer know we could not find their account and suggest they try a different email/phone or contact memberships@silvermirror.com directly.'
+                                     '[SYSTEM] Member lookup failed \u2014 no matching account found. Let the customer know we could not find their account and suggest they try a different email/phone or contact memberships@silvermirror.com directly.'
                                    );
 
                 const failResponse = await safeSendMessage(systemPrompt, session.messages);
@@ -216,8 +225,9 @@ export async function POST(request) {
             }
       }
 
-      // ── Normal response (no lookup) ──
-      const summary = parseSessionSummary(response);
+      // \u2500\u2500 Normal response (no lookup) \u2500\u2500
+      // Only accept session_summary in membership mode to prevent stray tags
+      const summary = session.mode === 'membership' ? parseSessionSummary(response) : null;
           const visibleResponse = stripAllSystemTags(response);
 
       // Store CLEANED response in history (not raw with tags)
