@@ -53,7 +53,7 @@ Edit `.env.local` with your credentials. At minimum you need:
 - `ANTHROPIC_API_KEY` — Get from console.anthropic.com
 
 For full functionality also set:
-- `BOULEVARD_API_KEY` — For real member lookup (without it, uses mock data)
+- `BOULEVARD_API_KEY`, `BOULEVARD_API_SECRET`, `BOULEVARD_BUSINESS_ID` — For real member lookup (without key, uses mock data)
 - SMTP settings — For emailing summaries (without it, logs to console)
 - Google Sheets credentials — For tracking (without it, logs to console)
 

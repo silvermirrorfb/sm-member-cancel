@@ -34,6 +34,38 @@ const LOYALTY_TIERS = [
   { points: 5000, service: 'BioRePeel Chemical Peel', value: 225 },
 ];
 
+function getSafeApiTarget(apiUrl) {
+  try {
+    const parsed = new URL(apiUrl);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return 'invalid-url';
+  }
+}
+
+function buildFetchErrorDiagnostics(err, apiUrl) {
+  const cause = err && typeof err === 'object' ? err.cause : null;
+  return {
+    target: getSafeApiTarget(apiUrl),
+    name: err?.name || null,
+    message: err?.message || null,
+    causeName: cause?.name || null,
+    causeCode: cause?.code || null,
+    causeMessage: cause?.message || null,
+    errno: cause?.errno || null,
+    syscall: cause?.syscall || null,
+    address: cause?.address || null,
+    port: cause?.port || null,
+  };
+}
+
+function normalizeBoulevardApiUrl(rawUrl) {
+  let apiUrl = String(rawUrl || DEFAULT_API_URL).trim();
+  if (apiUrl.endsWith('/')) apiUrl = apiUrl.slice(0, -1);
+  if (apiUrl.endsWith('/admin.json')) apiUrl = apiUrl.slice(0, -5); // strip ".json"
+  return apiUrl;
+}
+
 function generateAuthHeader(apiKey, apiSecret, businessId) {
   const prefix = 'blvd-admin-v1';
   const timestamp = Math.floor(Date.now() / 1000);
@@ -51,12 +83,34 @@ function normalizePhone(phone) {
   return digits;
 }
 
+function verifyMemberIdentity(lookupRequest, profile) {
+  if (!lookupRequest || !profile) return false;
+
+  const reqFirst = (lookupRequest.firstName || '').trim().toLowerCase();
+  const reqLast = (lookupRequest.lastName || '').trim().toLowerCase();
+  const profileFirst = (profile.firstName || '').trim().toLowerCase();
+  const profileLast = ((profile.name || '').split(' ').slice(1).join(' ') || '').trim().toLowerCase();
+
+  const nameMatches = reqFirst === profileFirst && reqLast.length > 0 && profileLast.includes(reqLast);
+  if (!nameMatches) return false;
+
+  const reqEmail = (lookupRequest.email || '').trim().toLowerCase();
+  const reqPhone = normalizePhone(lookupRequest.phone || '');
+  const profileEmail = (profile.email || '').trim().toLowerCase();
+  const profilePhone = normalizePhone(profile.phone || '');
+
+  const emailMatches = reqEmail && profileEmail && reqEmail === profileEmail;
+  const phoneMatches = reqPhone && profilePhone && reqPhone === profilePhone;
+  return Boolean(emailMatches || phoneMatches);
+}
+
 async function lookupMember(name, emailOrPhone) {
   const apiKey = process.env.BOULEVARD_API_KEY;
   const apiSecret = process.env.BOULEVARD_API_SECRET;
   const businessId = process.env.BOULEVARD_BUSINESS_ID;
   if (!apiKey) { console.warn('BOULEVARD_API_KEY not set — using mock data'); return mockLookup(name, emailOrPhone); }
-  const apiUrl = process.env.BOULEVARD_API_URL || DEFAULT_API_URL;
+  if (!apiSecret || !businessId) { console.error('Boulevard auth requires BOULEVARD_API_SECRET and BOULEVARD_BUSINESS_ID when BOULEVARD_API_KEY is set'); return null; }
+  const apiUrl = normalizeBoulevardApiUrl(process.env.BOULEVARD_API_URL || DEFAULT_API_URL);
   try {
     const isEmail = emailOrPhone.includes('@');
     let query, variables;
@@ -81,7 +135,11 @@ async function lookupMember(name, emailOrPhone) {
       variables = { query: cleanPhone };
     }
     const authCredentials = generateAuthHeader(apiKey, apiSecret, businessId);
-    const headers = { 'Content-Type': 'application/json', 'Authorization': `Basic ${authCredentials}` };
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Basic ${authCredentials}`,
+      'X-Boulevard-Business-ID': businessId,
+    };
     console.log(`Boulevard lookup: ${isEmail ? 'email' : 'phone'} = ${isEmail ? emailOrPhone : normalizePhone(emailOrPhone)} at ${apiUrl}`);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
@@ -90,7 +148,7 @@ async function lookupMember(name, emailOrPhone) {
       response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify({ query, variables }), signal: controller.signal });
     } catch (fetchErr) {
       if (fetchErr.name === 'AbortError') console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
-      else console.error('Boulevard API fetch error:', fetchErr.message || fetchErr);
+      else console.error('Boulevard API fetch error:', buildFetchErrorDiagnostics(fetchErr, apiUrl));
       return null;
     } finally { clearTimeout(timeoutId); }
     if (!response.ok) { const t = await response.text().catch(() => ''); console.error(`Boulevard API HTTP ${response.status}: ${t.substring(0,500)}`); return null; }
@@ -200,4 +258,15 @@ function mockLookup(name, emailOrPhone) {
   });
 }
 
-export { lookupMember, buildProfile, computeValues, formatProfileForPrompt, normalizePhone, WALKIN_PRICES, CURRENT_RATES, PERKS, LOYALTY_TIERS };
+export {
+  lookupMember,
+  verifyMemberIdentity,
+  buildProfile,
+  computeValues,
+  formatProfileForPrompt,
+  normalizePhone,
+  WALKIN_PRICES,
+  CURRENT_RATES,
+  PERKS,
+  LOYALTY_TIERS,
+};

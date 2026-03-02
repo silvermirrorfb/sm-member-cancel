@@ -5,9 +5,7 @@ import {
     buildSystemPromptWithProfile,
     sendMessage,
     parseMemberLookup,
-    stripMemberLookup,
     parseSessionSummary,
-    stripSummaryFromResponse,
     stripAllSystemTags,
 } from '../../../../lib/claude';
 import { lookupMember, formatProfileForPrompt, verifyMemberIdentity } from '../../../../lib/boulevard';
@@ -17,6 +15,44 @@ import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 // Friendly message shown when Claude API is rate-limited
 const RATE_LIMIT_USER_MESSAGE =
     "I'm sorry, I'm experiencing high demand right now. Please try again in a minute, or call (888) 677-0055 for immediate help.";
+
+const MAX_MESSAGE_CHARS = 4000;
+const MAX_RECOVERY_MESSAGES = 40;
+const MAX_RECOVERY_MESSAGE_CHARS = 2000;
+const MAX_RECOVERY_TOTAL_CHARS = 30000;
+
+function sanitizeRecoveredHistory(history) {
+    if (!Array.isArray(history)) return [];
+
+    const cleaned = [];
+    let totalChars = 0;
+
+    for (const item of history.slice(-MAX_RECOVERY_MESSAGES)) {
+          if (!item || typeof item !== 'object') continue;
+
+          const roleRaw = String(item.role || '').toLowerCase();
+          const role =
+              roleRaw === 'bot' || roleRaw === 'assistant'
+              ? 'assistant'
+              : roleRaw === 'user'
+              ? 'user'
+              : null;
+          if (!role) continue;
+
+          if (typeof item.content !== 'string') continue;
+          const content = item.content.trim().slice(0, MAX_RECOVERY_MESSAGE_CHARS);
+          if (!content) continue;
+
+          if (role === 'user' && content.startsWith('[SYSTEM]')) continue;
+
+          if (totalChars + content.length > MAX_RECOVERY_TOTAL_CHARS) break;
+          totalChars += content.length;
+
+          cleaned.push({ role, content });
+    }
+
+    return cleaned;
+}
 
 /**
  * Safely call sendMessage with graceful handling for Anthropic 429 rate limits.
@@ -48,7 +84,8 @@ export async function POST(request) {
       }
 
       const body = await request.json();
-          const { sessionId, message } = body;
+          const { sessionId } = body;
+      const message = typeof body.message === 'string' ? body.message.trim() : '';
 
       if (!sessionId || !message) {
               return NextResponse.json(
@@ -56,17 +93,27 @@ export async function POST(request) {
                 { status: 400 }
                       );
       }
+      if (message.length > MAX_MESSAGE_CHARS) {
+              return NextResponse.json(
+                { error: `Message is too long. Please keep messages under ${MAX_MESSAGE_CHARS} characters.` },
+                { status: 400 }
+                      );
+      }
 
       let session = getSession(sessionId);
           if (!session) {
-                  // Serverless instance rotation \u2014 recover session from client history
-                  console.warn(`Session ${sessionId} not found \u2014 recovering from client history`);
-                  const { history } = body;
+                  // Serverless instance rotation — recover session from client history
+                  console.warn(`Session ${sessionId} not found — attempting recovery from client history`);
+                  const recoveredHistory = sanitizeRecoveredHistory(body.history);
+                  if (recoveredHistory.length === 0) {
+                          return NextResponse.json(
+                            { error: 'Session expired. Please start a new chat.' },
+                            { status: 409 }
+                                      );
+                  }
                   session = createSession(null, null, sessionId);
-                  if (history && Array.isArray(history)) {
-                          for (const msg of history) {
-                                  addMessage(session.id, msg.role === 'bot' ? 'assistant' : msg.role, msg.content);
-                          }
+                  for (const msg of recoveredHistory) {
+                          addMessage(session.id, msg.role, msg.content);
                   }
           }
 
