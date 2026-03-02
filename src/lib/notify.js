@@ -1,5 +1,23 @@
 import nodemailer from 'nodemailer';
 
+// ── Helper: Get authenticated Google Sheets client ──
+async function getSheetsClient() {
+  const credentials = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!credentials) return null;
+
+  const { google } = await import('googleapis');
+  const auth = new google.auth.GoogleAuth({
+    credentials: JSON.parse(credentials),
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+
+  return google.sheets({ version: 'v4', auth });
+}
+
+// ══════════════════════════════════════════════════════════════
+// EMAIL FUNCTIONS
+// ══════════════════════════════════════════════════════════════
+
 /**
  * Send the session summary email to memberships@silvermirror.com
  */
@@ -8,8 +26,16 @@ async function sendSummaryEmail(summary, transcript) {
   const port = parseInt(process.env.SMTP_PORT || '587');
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
-  const from = process.env.EMAIL_FROM || 'cancellation-bot@silvermirror.com';
-  const to = process.env.EMAIL_TO || 'memberships@silvermirror.com';
+  const from = process.env.EMAIL_FROM || 'info@silvermirror.com';
+
+  // Always send to memberships@. If member is upset, also send to hello@.
+  const UPSET_SENTIMENTS = ['frustrated', 'angry', 'upset', 'hostile', 'furious', 'irritated', 'disappointed'];
+  const sentiment = (summary.member_sentiment || '').toLowerCase();
+  const isUpset = UPSET_SENTIMENTS.some(s => sentiment.includes(s));
+
+  const primaryTo = process.env.EMAIL_TO || 'memberships@silvermirror.com';
+  const escalationTo = process.env.EMAIL_ESCALATION || 'hello@silvermirror.com';
+  const to = isUpset ? `${primaryTo}, ${escalationTo}` : primaryTo;
 
   if (!host || !user || !pass) {
     console.warn('SMTP not configured — logging email to console instead');
@@ -45,7 +71,11 @@ function buildSubjectLine(summary) {
   const outcome = summary.outcome || 'UNKNOWN';
   const name = summary.client_name || 'Unknown Member';
   const reason = summary.reason_primary || 'Unknown';
-  return `[Cancel Bot] ${outcome} — ${name} — ${reason}`;
+  const UPSET_SENTIMENTS = ['frustrated', 'angry', 'upset', 'hostile', 'furious', 'irritated', 'disappointed'];
+  const sentiment = (summary.member_sentiment || '').toLowerCase();
+  const isUpset = UPSET_SENTIMENTS.some(s => sentiment.includes(s));
+  const flag = isUpset ? '🔴 ESCALATION — ' : '';
+  return `${flag}[Cancel Bot] ${outcome} — ${name} — ${reason}`;
 }
 
 function buildEmailBody(summary, transcript) {
@@ -102,6 +132,8 @@ ${transcript}
 }
 
 function buildEmailHtml(summary, transcript) {
+  const esc = (str) => String(str || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
   const outcomeColor = {
     'RETAINED': '#4CAF50',
     'CANCELLED': '#F44336',
@@ -128,121 +160,170 @@ function buildEmailHtml(summary, transcript) {
 <body>
   <div class="header">
     <h2 style="margin:0;">Cancellation Session Summary</h2>
-    <div style="opacity:0.8;">${summary.date}</div>
+    <div style="opacity:0.8;">${esc(summary.date)}</div>
   </div>
 
-  <div style="text-align:center;"><span class="outcome">${summary.outcome}</span></div>
+  <div style="text-align:center;"><span class="outcome">${esc(summary.outcome)}</span></div>
 
   <div class="section">
     <h3>Member Info</h3>
     <table>
-      <tr><td class="label">Name</td><td>${summary.client_name}</td></tr>
-      <tr><td class="label">Email</td><td>${summary.email}</td></tr>
-      <tr><td class="label">Phone</td><td>${summary.phone || 'Not provided'}</td></tr>
-      <tr><td class="label">Location</td><td>${summary.location}</td></tr>
-      <tr><td class="label">Tier</td><td>${summary.membership_tier}-Minute at $${summary.monthly_rate}/mo</td></tr>
-      <tr><td class="label">Tenure</td><td>${summary.tenure_months} months</td></tr>
+      <tr><td class="label">Name</td><td>${esc(summary.client_name)}</td></tr>
+      <tr><td class="label">Email</td><td>${esc(summary.email)}</td></tr>
+      <tr><td class="label">Phone</td><td>${esc(summary.phone || 'Not provided')}</td></tr>
+      <tr><td class="label">Location</td><td>${esc(summary.location)}</td></tr>
+      <tr><td class="label">Tier</td><td>${esc(summary.membership_tier)}-Minute at $${esc(summary.monthly_rate)}/mo</td></tr>
+      <tr><td class="label">Tenure</td><td>${esc(summary.tenure_months)} months</td></tr>
     </table>
   </div>
 
   <div class="section">
     <h3>Value at Risk</h3>
     <table>
-      <tr><td class="label">Loyalty Points</td><td>${summary.loyalty_points}${summary.loyalty_redeemable ? ` (${summary.loyalty_redeemable})` : ''}</td></tr>
-      <tr><td class="label">Walk-in Savings</td><td>${summary.walkin_savings ? `$${summary.walkin_savings}` : 'N/A'}</td></tr>
-      <tr><td class="label">Rate Lock Savings</td><td>${summary.rate_lock_savings_annual ? `$${summary.rate_lock_savings_annual}/year` : 'Matches current'}</td></tr>
-      <tr><td class="label">Unused Credits</td><td>${summary.unused_credits}</td></tr>
-      <tr><td class="label">Next Perk</td><td>Month ${summary.next_perk_month}: ${summary.next_perk_name} ($${summary.next_perk_value})</td></tr>
+      <tr><td class="label">Loyalty Points</td><td>${esc(summary.loyalty_points)}${summary.loyalty_redeemable ? ` (${esc(summary.loyalty_redeemable)})` : ''}</td></tr>
+      <tr><td class="label">Walk-in Savings</td><td>${summary.walkin_savings ? `$${esc(summary.walkin_savings)}` : 'N/A'}</td></tr>
+      <tr><td class="label">Rate Lock Savings</td><td>${summary.rate_lock_savings_annual ? `$${esc(summary.rate_lock_savings_annual)}/year` : 'Matches current'}</td></tr>
+      <tr><td class="label">Unused Credits</td><td>${esc(summary.unused_credits)}</td></tr>
+      <tr><td class="label">Next Perk</td><td>Month ${esc(summary.next_perk_month)}: ${esc(summary.next_perk_name)} ($${esc(summary.next_perk_value)})</td></tr>
     </table>
   </div>
 
   <div class="section">
     <h3>Reason</h3>
     <table>
-      <tr><td class="label">Primary</td><td><strong>${summary.reason_primary}</strong></td></tr>
-      <tr><td class="label">Secondary</td><td>${summary.reason_secondary || 'None'}</td></tr>
-      <tr><td class="label">In Their Words</td><td><em>"${summary.reason_verbatim}"</em></td></tr>
+      <tr><td class="label">Primary</td><td><strong>${esc(summary.reason_primary)}</strong></td></tr>
+      <tr><td class="label">Secondary</td><td>${esc(summary.reason_secondary || 'None')}</td></tr>
+      <tr><td class="label">In Their Words</td><td><em>"${esc(summary.reason_verbatim)}"</em></td></tr>
     </table>
   </div>
 
   <div class="action">
     <strong>ACTION REQUIRED:</strong><br/>
-    ${summary.action_required}
+    ${esc(summary.action_required)}
   </div>
 
   <div class="section">
     <h3>Details</h3>
     <table>
-      <tr><td class="label">Offers Presented</td><td>${(summary.offers_presented || []).join(' → ') || 'None'}</td></tr>
-      <tr><td class="label">Offer Accepted</td><td>${summary.offer_accepted || 'None'}</td></tr>
+      <tr><td class="label">Offers Presented</td><td>${esc((summary.offers_presented || []).join(' → ') || 'None')}</td></tr>
+      <tr><td class="label">Offer Accepted</td><td>${esc(summary.offer_accepted || 'None')}</td></tr>
       <tr><td class="label">3-Cycle Commitment</td><td>${summary.commitment_disclosed ? 'Disclosed & accepted' : 'N/A'}</td></tr>
-      <tr><td class="label">Lead Recommended</td><td>${summary.lead_recommended || 'N/A'}</td></tr>
-      <tr><td class="label">Cost to SM</td><td>${summary.cost_to_company}</td></tr>
-      <tr><td class="label">Member Sentiment</td><td>${summary.member_sentiment}</td></tr>
+      <tr><td class="label">Lead Recommended</td><td>${esc(summary.lead_recommended || 'N/A')}</td></tr>
+      <tr><td class="label">Cost to SM</td><td>${esc(summary.cost_to_company)}</td></tr>
+      <tr><td class="label">Member Sentiment</td><td>${esc(summary.member_sentiment)}</td></tr>
     </table>
   </div>
 
   <div class="section">
     <h3>Full Transcript</h3>
-    <div class="transcript">${transcript.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+    <div class="transcript">${esc(transcript)}</div>
   </div>
 </body>
 </html>`;
 }
 
-/**
- * Append a row to Google Sheets for tracking.
- */
+// ══════════════════════════════════════════════════════════════
+// GOOGLE SHEETS — CANCELLATION SUMMARY (membership conversations only)
+// Sheet: GOOGLE_SHEET_ID → "Cancellations" tab
+// Columns A-V (22 columns matching your existing headers)
+// ══════════════════════════════════════════════════════════════
+
 async function logToGoogleSheets(summary) {
   const sheetId = process.env.GOOGLE_SHEET_ID;
-  const credentials = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-
-  if (!sheetId || !credentials) {
-    console.warn('Google Sheets not configured — logging to console');
-    console.log('SHEET ROW:', {
-      month: summary.sheet_month,
-      name: summary.client_name,
-      reason: summary.reason_primary,
-      solution: summary.sheet_solution,
-    });
-    return { logged: false, reason: 'Google Sheets not configured' };
+  if (!sheetId) {
+    console.warn('GOOGLE_SHEET_ID not configured — skipping cancellation log');
+    return { logged: false, reason: 'Not configured' };
   }
 
   try {
-    const { google } = await import('googleapis');
-    const auth = new google.auth.GoogleAuth({
-      credentials: JSON.parse(credentials),
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
+    const sheets = await getSheetsClient();
+    if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
 
-    const sheets = google.sheets({ version: 'v4', auth });
+    // 22 columns: A-V matching headers in the Cancellations sheet
+    const row = [
+      summary.date || new Date().toISOString(),                              // A: Date
+      summary.sheet_month || new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }), // B: Month
+      summary.client_name || '',                                              // C: Client Name
+      summary.phone || '',                                                    // D: Phone
+      summary.location || '',                                                 // E: Location
+      summary.membership_tier || '',                                          // F: Tier
+      summary.monthly_rate || '',                                             // G: Monthly Rate
+      summary.tenure_months || '',                                            // H: Tenure (Months)
+      summary.reason_primary || '',                                           // I: V1 (Primary Reason)
+      summary.reason_secondary || '',                                         // J: Secondary Reason
+      summary.reason_verbatim || '',                                          // K: Member's Words
+      summary.outcome || '',                                                  // L: Outcome
+      summary.offer_accepted || '',                                           // M: Offer Accepted
+      (summary.offers_presented || []).join(' → ') || '',                      // N: Offers Presented
+      summary.action_required || '',                                          // O: Action Required
+      summary.cost_to_company || '',                                          // P: Cost to SM
+      summary.member_sentiment || '',                                         // Q: Member Sentiment
+      summary.loyalty_points || '',                                           // R: Loyalty Points
+      summary.walkin_savings ? `$${summary.walkin_savings}` : '',             // S: Walk-in Savings
+      summary.rate_lock_savings_annual ? `$${summary.rate_lock_savings_annual}/yr` : '', // T: Rate Lock Savings
+      summary.unused_credits || '',                                           // U: Unused Credits
+      summary.lead_recommended || '',                                         // V: Lead Recommended
+    ];
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
-      range: 'Cancellations!A:F',
+      range: 'Cancellations!A:V',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [row] },
+    });
+
+    return { logged: true };
+  } catch (err) {
+    console.error('Cancellation sheet logging failed:', err);
+    return { logged: false, reason: err.message };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// GOOGLE SHEETS — CHATBOT MESSAGE LOG (ALL conversations)
+// Sheet: GOOGLE_CHATLOG_SHEET_ID → "Sheet1" tab
+// Columns: Session ID | Session Created | Session Updated | Message Role | Message Content
+// ══════════════════════════════════════════════════════════════
+
+async function logChatMessage(sessionId, sessionCreated, role, content) {
+  const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
+  if (!sheetId) {
+    console.warn('GOOGLE_CHATLOG_SHEET_ID not configured — skipping message log');
+    return { logged: false, reason: 'Not configured' };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
+
+    const now = new Date().toISOString();
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: 'Sheet1!A:E',
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[
-          summary.date,
-          summary.sheet_month,
-          summary.client_name,
-          summary.email,
-          summary.reason_primary,
-          summary.sheet_solution,
+          sessionId,
+          sessionCreated,
+          now,
+          role,
+          content,
         ]],
       },
     });
 
     return { logged: true };
   } catch (err) {
-    console.error('Google Sheets logging failed:', err);
+    console.error('Chat message logging failed:', err);
     return { logged: false, reason: err.message };
   }
 }
 
-/**
- * Process the end of a conversation: send email + log to sheet.
- */
+// ══════════════════════════════════════════════════════════════
+// COMBINED: Process end of membership conversation
+// ══════════════════════════════════════════════════════════════
+
 async function processConversationEnd(summary, transcript) {
   const [emailResult, sheetResult] = await Promise.allSettled([
     sendSummaryEmail(summary, transcript),
@@ -255,9 +336,9 @@ async function processConversationEnd(summary, transcript) {
   };
 }
 
-
 export {
   sendSummaryEmail,
   logToGoogleSheets,
+  logChatMessage,
   processConversationEnd,
 };
