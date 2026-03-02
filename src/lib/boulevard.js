@@ -1,12 +1,17 @@
 // Boulevard Enterprise API Client
 // This module handles member lookup and profile data computation.
 //
-// SETUP: Set BOULEVARD_API_KEY and BOULEVARD_BUSINESS_ID in your .env
+// SETUP: Set these env vars:
+//   BOULEVARD_API_URL    — Your Boulevard GraphQL endpoint (e.g. https://dashboard.boulevard.io/api/2020-01/admin.json)
+//   BOULEVARD_API_KEY    — Your API key
+//   BOULEVARD_API_SECRET — Your API secret
+//   BOULEVARD_BUSINESS_ID — Your Boulevard business ID
 //
-// The Boulevard GraphQL Admin API docs are at:
-// https://developer.joinboulevard.com/
+// Auth: Basic auth with API_KEY:API_SECRET (base64 encoded)
+// Docs: https://developer.joinboulevard.com/
 
-const BOULEVARD_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin.json';
+// Default URL — override via BOULEVARD_API_URL env var
+const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin.json';
 
 // Walk-in prices for savings computation
 const WALKIN_PRICES = {
@@ -48,60 +53,136 @@ const LOYALTY_TIERS = [
 ];
 
 /**
+ * Normalize a phone number to digits only (with optional leading 1 for US).
+ * "(470) 428-5700" → "14704285700"
+ */
+function normalizePhone(phone) {
+  if (!phone) return '';
+  // Strip everything that's not a digit
+  let digits = phone.replace(/\D/g, '');
+  // Add US country code if 10 digits
+  if (digits.length === 10) {
+    digits = '1' + digits;
+  }
+  return digits;
+}
+
+/**
  * Look up a member by name + email or name + phone.
  * Returns the member profile or null if not found.
  */
 async function lookupMember(name, emailOrPhone) {
   const apiKey = process.env.BOULEVARD_API_KEY;
+  const apiSecret = process.env.BOULEVARD_API_SECRET;
+  const businessId = process.env.BOULEVARD_BUSINESS_ID;
+
   if (!apiKey) {
     console.warn('BOULEVARD_API_KEY not set — using mock data');
     return mockLookup(name, emailOrPhone);
   }
 
+  const apiUrl = process.env.BOULEVARD_API_URL || DEFAULT_API_URL;
+
   try {
-    // Boulevard GraphQL query to find client
-    const query = `
-      query FindClient($email: String, $phone: String) {
-        clients(
-          first: 5,
-          filter: {
-            email: $email,
-            mobilePhone: $phone
-          }
-        ) {
-          edges {
-            node {
-              id
-              firstName
-              lastName
-              email
-              mobilePhone
-              # Membership and visit data would be fetched here
-              # Exact schema depends on Boulevard API version
+    const isEmail = emailOrPhone.includes('@');
+
+    // Build separate queries for email vs phone to avoid null filter issues
+    let query, variables;
+
+    if (isEmail) {
+      query = `
+        query FindClientByEmail($email: String!) {
+          clients(
+            first: 5,
+            filter: { email: $email }
+          ) {
+            edges {
+              node {
+                id
+                firstName
+                lastName
+                email
+                mobilePhone
+              }
             }
           }
         }
-      }
-    `;
+      `;
+      variables = { email: emailOrPhone.trim().toLowerCase() };
+    } else {
+      const cleanPhone = normalizePhone(emailOrPhone);
+      query = `
+        query FindClientByPhone($phone: String!) {
+          clients(
+            first: 5,
+            filter: { mobilePhone: $phone }
+          ) {
+            edges {
+              node {
+                id
+                firstName
+                lastName
+                email
+                mobilePhone
+              }
+            }
+          }
+        }
+      `;
+      variables = { phone: cleanPhone };
+    }
 
-    const isEmail = emailOrPhone.includes('@');
-    const variables = isEmail
-      ? { email: emailOrPhone }
-      : { phone: emailOrPhone };
+    // Build auth header — Basic auth with API_KEY:API_SECRET
+    const authString = apiSecret
+      ? Buffer.from(`${apiKey}:${apiSecret}`).toString('base64')
+      : Buffer.from(`${apiKey}:`).toString('base64');
 
-    const response = await fetch(BOULEVARD_API_URL, {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Basic ${authString}`,
+    };
+
+    // Add business ID header if configured
+    if (businessId) {
+      headers['X-Boulevard-Business-ID'] = businessId;
+    }
+
+    console.log(`Boulevard lookup: ${isEmail ? 'email' : 'phone'} = ${isEmail ? emailOrPhone : normalizePhone(emailOrPhone)} at ${apiUrl}`);
+
+    const response = await fetch(apiUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
+      headers,
       body: JSON.stringify({ query, variables }),
     });
 
-    const data = await response.json();
+    // Check for HTTP errors before parsing JSON
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unable to read response');
+      console.error(`Boulevard API returned HTTP ${response.status}: ${errorText.substring(0, 500)}`);
+      return null;
+    }
+
+    // Try to parse JSON — handle case where response isn't JSON
+    let data;
+    try {
+      data = await response.json();
+    } catch (parseErr) {
+      console.error('Boulevard API returned non-JSON response:', parseErr.message);
+      return null;
+    }
+
+    // Check for GraphQL errors
+    if (data.errors) {
+      console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
+      return null;
+    }
+
     const clients = data?.data?.clients?.edges || [];
 
-    if (clients.length === 0) return null;
+    if (clients.length === 0) {
+      console.log('Boulevard lookup: no clients found');
+      return null;
+    }
 
     // Find best match by name similarity
     const nameLower = name.toLowerCase().trim();
@@ -110,16 +191,18 @@ async function lookupMember(name, emailOrPhone) {
       return fullName === nameLower || levenshtein(fullName, nameLower) <= 3;
     });
 
-    if (!match) return null;
+    if (!match) {
+      console.log(`Boulevard lookup: ${clients.length} clients found but none match name "${name}"`);
+      return null;
+    }
+
+    console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName}`);
 
     // TODO: Fetch full membership details, visit history, loyalty points
     // from Boulevard's membership and appointment endpoints.
-    // For now, return the basic client data and fill in the rest
-    // as you wire up more Boulevard endpoints.
-
     return buildProfile(match.node);
   } catch (err) {
-    console.error('Boulevard API error:', err);
+    console.error('Boulevard API error:', err.message || err);
     return null;
   }
 }
@@ -129,8 +212,6 @@ async function lookupMember(name, emailOrPhone) {
  * This is the shape that gets injected into the system prompt.
  */
 function buildProfile(boulevardData) {
-  // TODO: Replace with actual Boulevard data mapping
-  // This shows the exact shape the system prompt expects
   const profile = {
     name: `${boulevardData.firstName} ${boulevardData.lastName}`,
     firstName: boulevardData.firstName,
@@ -178,15 +259,15 @@ function buildProfile(boulevardData) {
  * Compute walk-in savings, rate lock savings, next perk, and loyalty redemption.
  */
 function computeValues(profile) {
-  const tier = profile.tier;
+  const memberTier = profile.tier;
 
   // Walk-in savings
-  const walkinPrice = WALKIN_PRICES[tier] || 169;
+  const walkinPrice = WALKIN_PRICES[memberTier] || 169;
   const totalWalkinValue = profile.facialsRedeemed * walkinPrice;
   const walkinSavings = totalWalkinValue - profile.totalDuesPaid;
 
   // Rate lock savings
-  const currentRate = CURRENT_RATES[tier] || 139;
+  const currentRate = CURRENT_RATES[memberTier] || 139;
   const rateDiff = currentRate - profile.monthlyRate;
   const rateLockAnnual = rateDiff > 0 ? rateDiff * 12 : 0;
 
@@ -202,19 +283,20 @@ function computeValues(profile) {
   // Loyalty point redemption
   let loyaltyRedeemable = null;
   let loyaltyNextTier = null;
+
   if (profile.loyaltyEnrolled && profile.loyaltyPoints > 0) {
     // Find highest redeemable
-    for (const tier of LOYALTY_TIERS) {
-      if (profile.loyaltyPoints >= tier.points) {
-        loyaltyRedeemable = tier;
+    for (const loyaltyTier of LOYALTY_TIERS) {
+      if (profile.loyaltyPoints >= loyaltyTier.points) {
+        loyaltyRedeemable = loyaltyTier;
       }
     }
     // Find next tier they could reach
-    for (const tier of LOYALTY_TIERS) {
-      if (profile.loyaltyPoints < tier.points) {
+    for (const loyaltyTier of LOYALTY_TIERS) {
+      if (profile.loyaltyPoints < loyaltyTier.points) {
         loyaltyNextTier = {
-          ...tier,
-          pointsNeeded: tier.points - profile.loyaltyPoints,
+          ...loyaltyTier,
+          pointsNeeded: loyaltyTier.points - profile.loyaltyPoints,
         };
         break;
       }
@@ -283,7 +365,6 @@ function formatProfileForPrompt(profile) {
   if (profile.lastBillDate) {
     lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
   }
-
   lines.push(``);
   lines.push(`Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
   if (c.nextPerk) {
@@ -322,7 +403,6 @@ function levenshtein(a, b) {
  * Returns a realistic test profile.
  */
 function mockLookup(name, emailOrPhone) {
-  // Return a test profile for development
   return buildProfile({
     firstName: name.split(' ')[0] || 'Test',
     lastName: name.split(' ').slice(1).join(' ') || 'Member',
@@ -351,12 +431,12 @@ function mockLookup(name, emailOrPhone) {
   });
 }
 
-
 export {
   lookupMember,
   buildProfile,
   computeValues,
   formatProfileForPrompt,
+  normalizePhone,
   WALKIN_PRICES,
   CURRENT_RATES,
   PERKS,
