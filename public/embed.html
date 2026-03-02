@@ -1,95 +1,215 @@
-<!-- 
-  Silver Mirror Membership Chat Widget
-  
-  Drop this snippet onto any WordPress page to embed the membership assistant.
-  
-  Recommended: Create a page at silvermirror.com/cancel-membership
-  and paste this in the HTML block.
--->
-
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Silver Mirror Chat Widget</title>
 <style>
-  #sm-cancel-widget {
-    width: 100%;
-    max-width: 520px;
-    margin: 0 auto;
-    height: 700px;
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-    border: 1px solid #e2e8f0;
-  }
-  #sm-cancel-widget iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-  }
-  @media (max-width: 600px) {
-    #sm-cancel-widget {
-      height: 85vh;
-      max-width: 100%;
-      border-radius: 8px;
-      margin: 0 8px;
-    }
-  }
-</style>
+  /* ── Reset ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-<div id="sm-cancel-widget">
-  <iframe 
-    src="https://sm-member-cancel.vercel.app/widget" 
-    title="Silver Mirror Membership Assistant"
-    allow="clipboard-write"
-  ></iframe>
-</div>
-
-<!-- Option B: Floating bottom-right bubble (for any page) -->
-<!--
-<style>
-  #sm-chat-bubble {
+  /* ── Floating Icon Button ── */
+  #sm-chat-icon {
     position: fixed;
     bottom: 24px;
     right: 24px;
-    z-index: 9999;
-    width: 64px;
-    height: 64px;
+    width: 60px;
+    height: 60px;
     border-radius: 50%;
-    background: #50aaf2;
-    color: white;
-    border: none;
+    background: #ffffff;
+    border: 2px solid #e2e8f0;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
     cursor: pointer;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-    font-size: 24px;
+    z-index: 99999;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: transform 0.2s;
+    overflow: hidden;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
   }
-  #sm-chat-bubble:hover { transform: scale(1.1); }
-  #sm-chat-frame {
+  #sm-chat-icon:hover {
+    transform: scale(1.08);
+    box-shadow: 0 6px 28px rgba(0, 0, 0, 0.18);
+  }
+  #sm-chat-icon img {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    object-fit: cover;
+  }
+  /* Pulse ring on load */
+  #sm-chat-icon::after {
+    content: '';
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 2px solid #50aaf2;
+    animation: sm-pulse 2s ease-out 1s 3;
+    opacity: 0;
+  }
+  @keyframes sm-pulse {
+    0% { transform: scale(1); opacity: 0.6; }
+    100% { transform: scale(1.5); opacity: 0; }
+  }
+
+  /* ── Chat Popup ── */
+  #sm-chat-popup {
     position: fixed;
-    bottom: 100px;
+    bottom: 96px;
     right: 24px;
-    z-index: 9999;
     width: 400px;
-    height: 600px;
+    height: 580px;
+    max-height: calc(100vh - 120px);
     border-radius: 16px;
     overflow: hidden;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.16);
+    border: 1px solid #e2e8f0;
+    z-index: 99998;
     display: none;
+    flex-direction: column;
+    background: #ffffff;
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+    transition: opacity 0.25s ease, transform 0.25s ease;
   }
-  #sm-chat-frame.open { display: block; }
-  #sm-chat-frame iframe { width: 100%; height: 100%; border: none; }
+  #sm-chat-popup.sm-open {
+    display: flex;
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  #sm-chat-popup.sm-closing {
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+  }
+
+  /* ── Close Button ── */
+  #sm-chat-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.06);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    font-size: 14px;
+    color: #6b7280;
+    transition: background 0.15s;
+  }
+  #sm-chat-close:hover {
+    background: rgba(0, 0, 0, 0.12);
+    color: #1a1a1a;
+  }
+
+  /* ── Iframe ── */
+  #sm-chat-popup iframe {
+    flex: 1;
+    width: 100%;
+    border: none;
+    background: #ffffff;
+  }
+
+  /* ── Mobile ── */
   @media (max-width: 480px) {
-    #sm-chat-frame {
-      bottom: 0; right: 0; left: 0;
-      width: 100%; height: 100%;
+    #sm-chat-icon {
+      bottom: 16px;
+      right: 16px;
+      width: 54px;
+      height: 54px;
+    }
+    #sm-chat-icon img {
+      width: 38px;
+      height: 38px;
+    }
+    #sm-chat-popup {
+      bottom: 0;
+      right: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      max-height: 100vh;
       border-radius: 0;
+      border: none;
+    }
+    #sm-chat-close {
+      top: 14px;
+      right: 14px;
+      width: 32px;
+      height: 32px;
+      font-size: 16px;
     }
   }
 </style>
-<button id="sm-chat-bubble" onclick="document.getElementById('sm-chat-frame').classList.toggle('open')">
-  💬
-</button>
-<div id="sm-chat-frame">
-  <iframe src="https://sm-member-cancel.vercel.app/widget" title="Silver Mirror Membership Assistant"></iframe>
+</head>
+<body>
+
+<!-- Floating Icon -->
+<div id="sm-chat-icon" onclick="smToggleChat()" aria-label="Open chat" role="button" tabindex="0">
+  <img src="WIDGET_ORIGIN/sm-logo.jpg" alt="Silver Mirror" />
 </div>
--->
+
+<!-- Chat Popup -->
+<div id="sm-chat-popup">
+  <button id="sm-chat-close" onclick="smToggleChat()" aria-label="Close chat">&times;</button>
+  <iframe id="sm-chat-iframe" title="Silver Mirror Chat"></iframe>
+</div>
+
+<script>
+(function() {
+  // ── Configuration ──
+  // Replace WIDGET_ORIGIN with your actual Vercel deployment URL
+  var WIDGET_ORIGIN = 'https://sm-member-cancel.vercel.app';
+
+  // Update logo src
+  var icon = document.getElementById('sm-chat-icon');
+  var img = icon.querySelector('img');
+  img.src = WIDGET_ORIGIN + '/sm-logo.jpg';
+
+  var popup = document.getElementById('sm-chat-popup');
+  var iframe = document.getElementById('sm-chat-iframe');
+  var isOpen = false;
+  var iframeLoaded = false;
+
+  window.smToggleChat = function() {
+    if (isOpen) {
+      // Close
+      popup.classList.add('sm-closing');
+      setTimeout(function() {
+        popup.classList.remove('sm-open', 'sm-closing');
+        popup.style.display = 'none';
+        icon.style.display = 'flex';
+      }, 250);
+      isOpen = false;
+    } else {
+      // Open
+      if (!iframeLoaded) {
+        iframe.src = WIDGET_ORIGIN + '/widget';
+        iframeLoaded = true;
+      }
+      popup.style.display = 'flex';
+      // Force reflow for animation
+      popup.offsetHeight;
+      popup.classList.add('sm-open');
+      icon.style.display = 'none';
+      isOpen = true;
+    }
+  };
+
+  // Allow Enter key on icon
+  icon.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      smToggleChat();
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
