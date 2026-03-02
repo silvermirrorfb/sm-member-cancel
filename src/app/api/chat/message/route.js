@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSession, addMessage } from '../../../../lib/sessions';
+import { getSession, addMessage, createSession } from '../../../../lib/sessions';
 import {
     getSystemPrompt,
     buildSystemPromptWithProfile,
@@ -57,12 +57,17 @@ export async function POST(request) {
                       );
       }
 
-      const session = getSession(sessionId);
+      let session = getSession(sessionId);
           if (!session) {
-                  return NextResponse.json(
-                    { error: 'Session not found or expired. Please refresh and start a new conversation.' },
-                    { status: 404 }
-                          );
+                  // Serverless instance rotation — recover session from client history
+                  console.warn(`Session ${"$"}{sessionId} not found — recovering from client history`);
+                  const { history } = body;
+                  session = createSession(null, null, sessionId);
+                  if (history && Array.isArray(history)) {
+                          for (const msg of history) {
+                                  addMessage(session.id, msg.role === 'bot' ? 'assistant' : msg.role, msg.content);
+                          }
+                  }
           }
 
       if (session.status !== 'active') {
