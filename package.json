@@ -4,6 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
     "dev": "next dev",
     "build": "next build",
     "start": "next start"
@@ -20,4 +22,7 @@
     "react-dom": "^19.2.4",
     "uuid": "^13.0.0"
   }
-}
+,
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }}
