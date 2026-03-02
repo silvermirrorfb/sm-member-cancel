@@ -14,18 +14,23 @@ function loadSystemPrompt() {
 }
 
 /**
- * Build the full system prompt with member profile data injected.
+ * Get the base system prompt (General Mode — no member profile).
+ */
+function getSystemPrompt() {
+  return loadSystemPrompt();
+}
+
+/**
+ * Build the system prompt with a member profile injected (Membership Mode).
  */
 function buildSystemPromptWithProfile(profileText) {
-  const template = loadSystemPrompt();
-  return template.replace('{{MEMBER_PROFILE}}', profileText);
+  const base = loadSystemPrompt();
+  // Append the member profile block so Claude enters Membership Mode
+  return base + '\n\n<member_profile>\n' + profileText + '\n</member_profile>';
 }
 
 /**
  * Send a message to Claude and get a response.
- * @param {string} systemPrompt - The full system prompt with profile injected
- * @param {Array} messages - Conversation history [{role, content}, ...]
- * @returns {string} Claude's response text
  */
 async function sendMessage(systemPrompt, messages) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -45,7 +50,6 @@ async function sendMessage(systemPrompt, messages) {
     })),
   });
 
-  // Extract text from response
   const text = response.content
     .filter(block => block.type === 'text')
     .map(block => block.text)
@@ -55,8 +59,31 @@ async function sendMessage(systemPrompt, messages) {
 }
 
 /**
+ * Detect if Claude's response contains a member_lookup request.
+ * Returns parsed lookup data or null.
+ */
+function parseMemberLookup(text) {
+  const match = text.match(/<member_lookup>\s*([\s\S]*?)\s*<\/member_lookup>/);
+  if (!match) return null;
+
+  try {
+    return JSON.parse(match[1]);
+  } catch (err) {
+    console.error('Failed to parse member_lookup JSON:', err);
+    return null;
+  }
+}
+
+/**
+ * Strip the member_lookup tags from the response so the user
+ * only sees the conversational message.
+ */
+function stripMemberLookup(text) {
+  return text.replace(/<member_lookup>[\s\S]*?<\/member_lookup>/, '').trim();
+}
+
+/**
  * Parse the session summary JSON from Claude's final response.
- * Claude outputs it wrapped in <session_summary> tags.
  */
 function parseSessionSummary(text) {
   const match = text.match(/<session_summary>\s*([\s\S]*?)\s*<\/session_summary>/);
@@ -66,24 +93,35 @@ function parseSessionSummary(text) {
     return JSON.parse(match[1]);
   } catch (err) {
     console.error('Failed to parse session summary JSON:', err);
-    console.error('Raw text:', match[1]);
     return null;
   }
 }
 
 /**
- * Strip the session summary tags from the response so the user
- * only sees the conversational message.
+ * Strip session summary tags from response.
  */
 function stripSummaryFromResponse(text) {
   return text.replace(/<session_summary>[\s\S]*?<\/session_summary>/, '').trim();
 }
 
+/**
+ * Strip ALL system tags from response (lookup + summary).
+ */
+function stripAllSystemTags(text) {
+  let cleaned = stripMemberLookup(text);
+  cleaned = stripSummaryFromResponse(cleaned);
+  return cleaned;
+}
+
 
 export {
   loadSystemPrompt,
+  getSystemPrompt,
   buildSystemPromptWithProfile,
   sendMessage,
+  parseMemberLookup,
+  stripMemberLookup,
   parseSessionSummary,
   stripSummaryFromResponse,
+  stripAllSystemTags,
 };
