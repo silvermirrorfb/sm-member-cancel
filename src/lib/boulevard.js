@@ -11,7 +11,10 @@
 // Docs: https://developer.joinboulevard.com/
 
 // Default URL — override via BOULEVARD_API_URL env var
-const DEFAULT_API_URL = 'https://dashboard.boulevard.app/api/2020-01/admin.json';
+const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin.json';
+
+// Timeout for Boulevard API requests (in milliseconds)
+const BOULEVARD_TIMEOUT_MS = 15000; // 15 seconds
 
 // Walk-in prices for savings computation
 const WALKIN_PRICES = {
@@ -149,11 +152,28 @@ async function lookupMember(name, emailOrPhone) {
 
     console.log(`Boulevard lookup: ${isEmail ? 'email' : 'phone'} = ${isEmail ? emailOrPhone : normalizePhone(emailOrPhone)} at ${apiUrl}`);
 
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ query, variables }),
-    });
+    // Use AbortController for timeout so we don't hang the Vercel function
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal,
+      });
+    } catch (fetchErr) {
+      if (fetchErr.name === 'AbortError') {
+        console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
+      } else {
+        console.error('Boulevard API fetch error:', fetchErr.message || fetchErr);
+      }
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     // Check for HTTP errors before parsing JSON
     if (!response.ok) {
@@ -201,6 +221,7 @@ async function lookupMember(name, emailOrPhone) {
     // TODO: Fetch full membership details, visit history, loyalty points
     // from Boulevard's membership and appointment endpoints.
     return buildProfile(match.node);
+
   } catch (err) {
     console.error('Boulevard API error:', err.message || err);
     return null;
@@ -323,6 +344,7 @@ function computeValues(profile) {
  */
 function formatProfileForPrompt(profile) {
   const c = profile.computed;
+
   const lines = [
     `Name: ${profile.name}`,
     `Email: ${profile.email}`,
@@ -365,6 +387,7 @@ function formatProfileForPrompt(profile) {
   if (profile.lastBillDate) {
     lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
   }
+
   lines.push(``);
   lines.push(`Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
   if (c.nextPerk) {
@@ -382,6 +405,7 @@ function levenshtein(a, b) {
   const matrix = [];
   for (let i = 0; i <= b.length; i++) matrix[i] = [i];
   for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+
   for (let i = 1; i <= b.length; i++) {
     for (let j = 1; j <= a.length; j++) {
       if (b[i - 1] === a[j - 1]) {
