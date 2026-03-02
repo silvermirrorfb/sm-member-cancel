@@ -20,18 +20,30 @@ const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
 const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
 
 const PERKS = [
-  { month: 2, name: 'Moisturizer', value: 65 },
-  { month: 4, name: 'Hyaluronic Acid Serum', value: 77 },
-  { month: 5, name: 'Silver Mirror Hat', value: 30 },
-  { month: 6, name: 'Choose one add-on (Neck Firming, Eye Puff, or Microcurrent)', value: 50 },
-  { month: 9, name: 'Cleanser', value: 41 },
-  { month: 12, name: 'Foundational Formulas Bundle', value: 183 },
-  { month: 18, name: 'Signature Mask', value: 69 },
-  { month: 22, name: 'Free enhancement up to $50', value: 50 },
-  { month: 24, name: 'Dermaplaning + retail bundle', value: 95 },
-  { month: 36, name: 'Foundational Formulas Bundle (Year 3)', value: 183 },
-  { month: 48, name: 'Foundational Bundle + SM Hat (Year 4)', value: 213 },
-  { month: 60, name: '90-Min Upgrade or HydraFacial (Year 5)', value: 279 },
+  { month: 2, name: 'Moisturizer', value: 65, type: 'retail' },
+  { month: 4, name: 'Hyaluronic Acid Serum', value: 77, type: 'retail' },
+  { month: 5, name: 'Silver Mirror Hat', value: 30, type: 'retail' },
+  { month: 6, name: 'Choose one add-on (Neck Firming, Eye Puff, or Microcurrent)', value: 50, type: 'service_choice' },
+  { month: 9, name: 'Cleanser', value: 41, type: 'retail' },
+  { month: 12, name: 'Foundational Formulas Bundle', value: 183, type: 'retail' },
+  { month: 18, name: 'Signature Mask', value: 69, type: 'retail' },
+  { month: 22, name: '$50 Enhancement Credit', value: 50, type: 'credit' },
+  { month: 24, name: 'Dermaplaning + retail bundle', value: 125, type: 'service_bundle' },
+  { month: 36, name: 'Year 3 Anniversary — Foundational Formulas Bundle', value: 183, type: 'retail' },
+  { month: 42, name: 'Year 3.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
+  { month: 48, name: 'Year 4 Anniversary — Foundational Bundle + SM Hat', value: 213, type: 'retail' },
+  { month: 54, name: 'Year 4.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
+  { month: 60, name: 'Year 5 Anniversary — 90-Min Upgrade or HydraFacial', value: 279, type: 'service_upgrade' },
+  { month: 66, name: 'Year 5.5 Recognition Email (no perk)', value: 0, type: 'recognition' },
+  { month: 72, name: 'Year 6 Anniversary — Pick add-on + Signature Mask', value: 119, type: 'service_choice_with_retail' },
+  { month: 78, name: 'Year 6.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
+  { month: 84, name: 'Year 7 Anniversary — Pick add-on + Foundational Bundle', value: 233, type: 'service_choice_with_retail' },
+  { month: 90, name: 'Year 7.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
+  { month: 96, name: 'Year 8 Anniversary — Pick add-on + HA Serum', value: 127, type: 'service_choice_with_retail' },
+  { month: 102, name: 'Year 8.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
+  { month: 108, name: 'Year 9 Anniversary — Pick add-on + Signature Mask + HA Serum', value: 196, type: 'service_choice_with_retail' },
+  { month: 114, name: 'Year 9.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
+  { month: 120, name: 'Year 10 Anniversary — Diamond package (basket + 3 guest passes + 10% add-on discount)', value: 400, type: 'diamond' },
 ];
 
 const LOYALTY_TIERS = [
@@ -206,6 +218,38 @@ function monthsBetween(startIsoDate, endDate = new Date()) {
   months += endDate.getUTCMonth() - start.getUTCMonth();
   if (endDate.getUTCDate() < start.getUTCDate()) months -= 1;
   return Math.max(0, months);
+}
+
+function getNextPerkMilestone(tenureMonths) {
+  if (!isFiniteNumber(tenureMonths)) return null;
+
+  for (const pk of PERKS) {
+    if (pk.month > tenureMonths) return pk;
+  }
+
+  // Post-Year-10 cadence: annual anniversary + mid-year credit.
+  for (let month = tenureMonths + 1; month <= tenureMonths + 24; month++) {
+    if (month % 12 === 0) {
+      const year = Math.floor(month / 12);
+      return {
+        month,
+        name: `Year ${year} Anniversary — Foundational Bundle + pick one add-on (up to $50)`,
+        value: 233,
+        type: 'post_year10_anniversary',
+      };
+    }
+    if (month % 12 === 6) {
+      const year = Math.floor(month / 12);
+      return {
+        month,
+        name: `Year ${year}.5 Mid-Year — $50 Enhancement Credit`,
+        value: 50,
+        type: 'post_year10_credit',
+      };
+    }
+  }
+
+  return null;
 }
 
 function verifyMemberIdentity(lookupRequest, profile) {
@@ -521,10 +565,7 @@ function computeValues(p) {
     : null;
   const cr = p.tier && CURRENT_RATES[p.tier] ? CURRENT_RATES[p.tier] : null;
   const rd = cr !== null && isFiniteNumber(p.monthlyRate) ? cr - p.monthlyRate : null;
-  let nextPerk = null;
-  if (isFiniteNumber(p.tenureMonths) && p.memberSince) {
-    for (const pk of PERKS) { if (pk.month > p.tenureMonths) { nextPerk = pk; break; } }
-  }
+  const nextPerk = getNextPerkMilestone(p.tenureMonths);
   let loyaltyRedeemable = null, loyaltyNextTier = null;
   if (p.loyaltyEnrolled === true && isFiniteNumber(p.loyaltyPoints) && p.loyaltyPoints > 0) {
     for (const lt of LOYALTY_TIERS) { if (p.loyaltyPoints >= lt.points) loyaltyRedeemable = lt; }
@@ -581,8 +622,12 @@ function formatProfileForPrompt(profile) {
   lines.push('', `Unused Credits: ${isFiniteNumber(profile.unusedCredits) ? profile.unusedCredits : 'UNKNOWN'}`);
   if (profile.lastBillDate) lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
   lines.push('', `Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
-  if (c.nextPerk && isFiniteNumber(profile.tenureMonths) && profile.memberSince) {
-    lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name} ($${c.nextPerk.value} value)`);
+  if (c.nextPerk && isFiniteNumber(profile.tenureMonths)) {
+    if (isFiniteNumber(c.nextPerk.value) && c.nextPerk.value > 0) {
+      lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name} ($${c.nextPerk.value} value)`);
+    } else {
+      lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name}`);
+    }
     lines.push(`Months Until Next Perk: ${c.nextPerk.month - profile.tenureMonths}`);
   }
   return lines.join('\n');
