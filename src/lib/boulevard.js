@@ -4,15 +4,16 @@
 // SETUP: Set these env vars:
 //   BOULEVARD_API_URL    — Your Boulevard GraphQL endpoint (e.g. https://dashboard.boulevard.io/api/2020-01/admin)
 //   BOULEVARD_API_KEY    — Your API key
-//   BOULEVARD_API_SECRET — Your API secret
+//   BOULEVARD_API_SECRET — Your API secret (base64-encoded)
 //   BOULEVARD_BUSINESS_ID — Your Boulevard business ID
 //
-// Auth: Basic auth with API_KEY:API_SECRET (base64 encoded)
+// Auth: HMAC-based Basic auth (blvd-admin-v1 scheme)
 // Docs: https://developer.joinboulevard.com/
 
+import crypto from 'crypto';
+
 // Default URL — override via BOULEVARD_API_URL env var
-// IMPORTANT: The .json suffix is required — without it, Boulevard returns an HTML 404 page.
-const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin.json';
+const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin';
 
 // Timeout for Boulevard API requests (in milliseconds)
 const BOULEVARD_TIMEOUT_MS = 15000; // 15 seconds
@@ -72,6 +73,39 @@ function normalizePhone(phone) {
 }
 
 /**
+ * Generate Boulevard HMAC-based Basic auth header.
+ * Uses the blvd-admin-v1 signing scheme:
+ *   1. Build payload: "blvd-admin-v1" + businessId + timestamp
+ *   2. Base64-decode the API secret to get the raw HMAC key
+ *   3. HMAC-SHA256 sign the payload
+ *   4. Combine: signature + payload → token
+ *   5. Basic auth: base64(apiKey + ":" + token)
+ */
+function generateBoulevardAuth(apiKey, apiSecret, businessId) {
+  const prefix = 'blvd-admin-v1';
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const tokenPayload = `${prefix}${businessId}${timestamp}`;
+
+  // Decode the base64-encoded API secret to get the raw HMAC key
+  const rawKey = Buffer.from(apiSecret, 'base64');
+
+  // Create HMAC-SHA256 signature
+  const signature = crypto
+    .createHmac('sha256', rawKey)
+    .update(tokenPayload, 'utf8')
+    .digest('base64');
+
+  // Combine signature + payload into the token
+  const token = `${signature}${tokenPayload}`;
+
+  // Build the Basic auth credential: apiKey:token
+  const httpBasicPayload = `${apiKey}:${token}`;
+  const httpBasicCredentials = Buffer.from(httpBasicPayload, 'utf8').toString('base64');
+
+  return `Basic ${httpBasicCredentials}`;
+}
+
+/**
  * Look up a member by name + email or name + phone.
  * Returns the member profile or null if not found.
  */
@@ -85,11 +119,7 @@ async function lookupMember(name, emailOrPhone) {
     return mockLookup(name, emailOrPhone);
   }
 
-  let apiUrl = process.env.BOULEVARD_API_URL || DEFAULT_API_URL;
-  // Ensure URL ends with .json — Boulevard returns HTML 404 without it
-  if (!apiUrl.endsWith('.json')) {
-    apiUrl += '.json';
-  }
+  const apiUrl = process.env.BOULEVARD_API_URL || DEFAULT_API_URL;
 
   try {
     const isEmail = emailOrPhone.includes('@');
@@ -142,20 +172,14 @@ async function lookupMember(name, emailOrPhone) {
       variables = { phone: cleanPhone };
     }
 
-    // Build auth header — Basic auth with API_KEY:API_SECRET
-    const authString = apiSecret
-      ? Buffer.from(`${apiKey}:${apiSecret}`).toString('base64')
-      : Buffer.from(`${apiKey}:`).toString('base64');
+    // Build HMAC-based auth header (blvd-admin-v1 scheme)
+    const authHeader = generateBoulevardAuth(apiKey, apiSecret, businessId);
 
     const headers = {
       'Content-Type': 'application/json',
-      'Authorization': `Basic ${authString}`,
+      'Accept': 'application/json',
+      'Authorization': authHeader,
     };
-
-    // Add business ID header if configured
-    if (businessId) {
-      headers['X-Boulevard-Business-ID'] = businessId;
-    }
 
     console.log(`Boulevard lookup: ${isEmail ? 'email' : 'phone'} = ${isEmail ? emailOrPhone : normalizePhone(emailOrPhone)} at ${apiUrl}`);
 
