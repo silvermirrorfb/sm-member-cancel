@@ -9,6 +9,12 @@ const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin';
 const BOULEVARD_TIMEOUT_MS = 15000;
 const PHONE_SCAN_PAGE_SIZE = 100;
 const PHONE_SCAN_MAX_PAGES = 20;
+const MEMBERSHIP_SCAN_PAGE_SIZE = 200;
+const MEMBERSHIP_SCAN_MAX_PAGES = 120;
+const MEMBERSHIP_CACHE_TTL_MS = 30 * 60 * 1000;
+const MEMBERSHIP_NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+const membershipCache = new Map();
 
 const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
 const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
@@ -100,6 +106,51 @@ function parseTierFromText(text) {
   if (!text || typeof text !== 'string') return null;
   const match = text.match(/\b(30|50|90)\s*[- ]?minute\b/i);
   return match ? match[1] : null;
+}
+
+function getCachedMembership(clientId) {
+  const cached = membershipCache.get(clientId);
+  if (!cached) return undefined;
+  if (cached.expiresAt <= Date.now()) {
+    membershipCache.delete(clientId);
+    return undefined;
+  }
+  return cached.value;
+}
+
+function setCachedMembership(clientId, value) {
+  const ttl = value ? MEMBERSHIP_CACHE_TTL_MS : MEMBERSHIP_NEGATIVE_CACHE_TTL_MS;
+  membershipCache.set(clientId, { value, expiresAt: Date.now() + ttl });
+}
+
+function membershipStatusScore(status) {
+  const s = String(status || '').toUpperCase();
+  if (s === 'ACTIVE') return 4;
+  if (s === 'PAUSED') return 3;
+  if (s === 'PENDING') return 2;
+  if (s === 'CANCELED' || s === 'CANCELLED') return 1;
+  return 0;
+}
+
+function pickBetterMembership(current, candidate) {
+  if (!candidate) return current;
+  if (!current) return candidate;
+
+  const cs = membershipStatusScore(current.status);
+  const ns = membershipStatusScore(candidate.status);
+  if (ns > cs) return candidate;
+  if (ns < cs) return current;
+
+  const currentStart = new Date(current.startOn || 0).getTime() || 0;
+  const nextStart = new Date(candidate.startOn || 0).getTime() || 0;
+  if (nextStart > currentStart) return candidate;
+  if (nextStart < currentStart) return current;
+
+  const currentTerm = isFiniteNumber(current.termNumber) ? current.termNumber : -1;
+  const nextTerm = isFiniteNumber(candidate.termNumber) ? candidate.termNumber : -1;
+  if (nextTerm > currentTerm) return candidate;
+
+  return current;
 }
 
 function monthsBetween(startIsoDate, endDate = new Date()) {
@@ -232,6 +283,63 @@ async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {
   return found;
 }
 
+async function findMembershipForClient(apiUrl, headers, clientId) {
+  if (!clientId) return null;
+
+  const cached = getCachedMembership(clientId);
+  if (cached !== undefined) return cached;
+
+  let after = null;
+  let best = null;
+
+  for (let page = 0; page < MEMBERSHIP_SCAN_MAX_PAGES; page++) {
+    const query = `
+      query FindMembershipForClient($after: String) {
+        memberships(first: ${MEMBERSHIP_SCAN_PAGE_SIZE}, after: $after) {
+          edges {
+            node {
+              id
+              clientId
+              name
+              startOn
+              status
+              termNumber
+              unitPrice
+              nextChargeDate
+              location { name }
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+
+    const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { after });
+    if (!data) return null;
+
+    const connection = data?.data?.memberships;
+    const edges = connection?.edges || [];
+
+    for (const edge of edges) {
+      const membership = edge?.node;
+      if (!membership || membership.clientId !== clientId) continue;
+      best = pickBetterMembership(best, membership);
+
+      if (String(membership.status || '').toUpperCase() === 'ACTIVE') {
+        setCachedMembership(clientId, membership);
+        return membership;
+      }
+    }
+
+    if (!connection?.pageInfo?.hasNextPage) break;
+    after = connection?.pageInfo?.endCursor || null;
+    if (!after) break;
+  }
+
+  setCachedMembership(clientId, best || null);
+  return best || null;
+}
+
 async function lookupMember(name, emailOrPhone) {
   const apiKey = process.env.BOULEVARD_API_KEY;
   const apiSecret = process.env.BOULEVARD_API_SECRET;
@@ -304,7 +412,18 @@ async function lookupMember(name, emailOrPhone) {
     const match = findNameMatch(name, clients);
     if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
     console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName}`);
-    return buildProfile(match.node);
+    const membership = await findMembershipForClient(apiUrl, headers, match.node.id);
+    const source = membership ? {
+      ...match.node,
+      membershipName: membership.name,
+      membershipStartDate: membership.startOn,
+      membershipStatus: membership.status,
+      membershipTermNumber: membership.termNumber,
+      nextChargeDate: membership.nextChargeDate,
+      unitPrice: membership.unitPrice,
+      location: membership?.location?.name || match.node?.primaryLocation?.name || match.node.location,
+    } : match.node;
+    return buildProfile(source);
   } catch (err) { console.error('Boulevard API error:', err.message || err); return null; }
 }
 
@@ -326,7 +445,7 @@ function buildProfile(d) {
     phone: d.mobilePhone || null, location: d.location || d.primaryLocation?.name || 'Unknown',
     tier: tier || null, monthlyRate,
     clientSince, memberSince, tenureMonths,
-    accountStatus: d.accountStatus || (d.active === false ? 'inactive' : d.active === true ? 'active' : null),
+    accountStatus: d.accountStatus || d.membershipStatus || (d.active === false ? 'inactive' : d.active === true ? 'active' : null),
     paymentsProcessed: isFiniteNumber(d.paymentsProcessed) ? d.paymentsProcessed : null,
     totalDuesPaid: isFiniteNumber(d.totalDuesPaid) ? d.totalDuesPaid : null,
     totalRetailPurchases: isFiniteNumber(d.totalRetailPurchases) ? d.totalRetailPurchases : null,
@@ -339,6 +458,7 @@ function buildProfile(d) {
     loyaltyPoints: isFiniteNumber(d.loyaltyPoints) ? d.loyaltyPoints : null,
     loyaltyEnrolled: typeof d.loyaltyEnrolled === 'boolean' ? d.loyaltyEnrolled : null,
     perksClaimed: d.perksClaimed || [], unusedCredits: isFiniteNumber(d.unusedCredits) ? d.unusedCredits : null,
+    nextChargeDate: toIsoDate(d.nextChargeDate) || null,
     lastBillDate: toIsoDate(d.lastBillDate) || null,
   };
   profile.computed = computeValues(profile);
@@ -389,6 +509,7 @@ function formatProfileForPrompt(profile) {
     `Monthly Rate: ${isFiniteNumber(profile.monthlyRate) ? `$${profile.monthlyRate}/month` : 'UNKNOWN — do not state monthly rate'}`,
     `Member Since: ${profile.memberSince || 'UNKNOWN — do not state join date/tenure'}`,
     `Tenure: ${isFiniteNumber(profile.tenureMonths) ? `${profile.tenureMonths} months` : 'UNKNOWN — do not state tenure'}`,
+    `Next Charge Date: ${profile.nextChargeDate || 'UNKNOWN'}`,
     `Account Status: ${profile.accountStatus || 'UNKNOWN'}`,
     `Appointment Count: ${isFiniteNumber(profile.appointmentCount) ? profile.appointmentCount : 'UNKNOWN'}`,
     '',
