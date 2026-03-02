@@ -7,6 +7,8 @@ import crypto from 'crypto';
 
 const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin';
 const BOULEVARD_TIMEOUT_MS = 15000;
+const PHONE_SCAN_PAGE_SIZE = 100;
+const PHONE_SCAN_MAX_PAGES = 20;
 
 const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
 const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
@@ -104,6 +106,92 @@ function verifyMemberIdentity(lookupRequest, profile) {
   return Boolean(emailMatches || phoneMatches);
 }
 
+async function fetchBoulevardGraphQL(apiUrl, headers, query, variables) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
+  let response;
+
+  try {
+    response = await fetch(apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ query, variables }),
+      signal: controller.signal,
+    });
+  } catch (fetchErr) {
+    if (fetchErr.name === 'AbortError') console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
+    else console.error('Boulevard API fetch error:', buildFetchErrorDiagnostics(fetchErr, apiUrl));
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    const t = await response.text().catch(() => '');
+    console.error(`Boulevard API HTTP ${response.status}: ${t.substring(0,500)}`);
+    return null;
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch (e) {
+    console.error('Boulevard API non-JSON:', e.message);
+    return null;
+  }
+
+  if (data.errors) {
+    console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
+    return null;
+  }
+
+  return data;
+}
+
+function findNameMatch(name, clients) {
+  const nameLower = name.toLowerCase().trim();
+  return clients.find(c => {
+    const fn = `${c.node.firstName} ${c.node.lastName}`.toLowerCase();
+    return fn === nameLower || levenshtein(fn, nameLower) <= 3;
+  }) || null;
+}
+
+async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {
+  const found = [];
+  let after = null;
+
+  for (let page = 0; page < PHONE_SCAN_MAX_PAGES; page++) {
+    const query = `
+      query FindClientsByPhoneScan($after: String) {
+        clients(first: ${PHONE_SCAN_PAGE_SIZE}, after: $after) {
+          edges { node { id firstName lastName email mobilePhone } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+    const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { after });
+    if (!data) return null;
+
+    const connection = data?.data?.clients;
+    const edges = connection?.edges || [];
+    if (edges.length === 0) return found;
+
+    for (const edge of edges) {
+      if (normalizePhone(edge?.node?.mobilePhone || '') === cleanPhone) {
+        found.push(edge);
+      }
+    }
+
+    if (found.length > 0) return found;
+    if (!connection?.pageInfo?.hasNextPage) break;
+
+    after = connection?.pageInfo?.endCursor || null;
+    if (!after) break;
+  }
+
+  return found;
+}
+
 async function lookupMember(name, emailOrPhone) {
   const apiKey = process.env.BOULEVARD_API_KEY;
   const apiSecret = process.env.BOULEVARD_API_SECRET;
@@ -112,56 +200,48 @@ async function lookupMember(name, emailOrPhone) {
   if (!apiSecret || !businessId) { console.error('Boulevard auth requires BOULEVARD_API_SECRET and BOULEVARD_BUSINESS_ID when BOULEVARD_API_KEY is set'); return null; }
   const apiUrl = normalizeBoulevardApiUrl(process.env.BOULEVARD_API_URL || DEFAULT_API_URL);
   try {
-    const isEmail = emailOrPhone.includes('@');
-    let query, variables;
-    if (isEmail) {
-      query = `
-        query FindClientByEmail($emails: [String!]) {
-          clients(first: 5, emails: $emails) {
-            edges { node { id firstName lastName email mobilePhone } }
-          }
-        }
-      `;
-      variables = { emails: [emailOrPhone.trim().toLowerCase()] };
-    } else {
-      const cleanPhone = normalizePhone(emailOrPhone);
-      query = `
-        query FindClientByPhone($query: QueryString) {
-          clients(first: 5, query: $query) {
-            edges { node { id firstName lastName email mobilePhone } }
-          }
-        }
-      `;
-      variables = { query: cleanPhone };
-    }
+    const rawContact = String(emailOrPhone || '').trim();
+    const isEmail = rawContact.includes('@');
+
     const authCredentials = generateAuthHeader(apiKey, apiSecret, businessId);
     const headers = {
       'Content-Type': 'application/json',
       'Authorization': `Basic ${authCredentials}`,
       'X-Boulevard-Business-ID': businessId,
     };
-    console.log(`Boulevard lookup: ${isEmail ? 'email' : 'phone'} = ${isEmail ? emailOrPhone : normalizePhone(emailOrPhone)} at ${apiUrl}`);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
-    let response;
-    try {
-      response = await fetch(apiUrl, { method: 'POST', headers, body: JSON.stringify({ query, variables }), signal: controller.signal });
-    } catch (fetchErr) {
-      if (fetchErr.name === 'AbortError') console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
-      else console.error('Boulevard API fetch error:', buildFetchErrorDiagnostics(fetchErr, apiUrl));
+
+    let clients = [];
+    if (isEmail) {
+      const query = `
+        query FindClientByEmail($emails: [String!]) {
+          clients(first: 5, emails: $emails) {
+            edges { node { id firstName lastName email mobilePhone } }
+          }
+        }
+      `;
+      const email = rawContact.toLowerCase();
+      console.log(`Boulevard lookup: email = ${email} at ${apiUrl}`);
+      const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { emails: [email] });
+      if (!data) return null;
+      clients = data?.data?.clients?.edges || [];
+    } else {
+      const cleanPhone = normalizePhone(rawContact);
+      if (!cleanPhone) {
+        console.log('Boulevard lookup: invalid phone input');
+        return null;
+      }
+      console.log(`Boulevard lookup: phone = ${cleanPhone} at ${apiUrl}`);
+      const scanned = await findClientsByPhoneScan(apiUrl, headers, cleanPhone);
+      if (!scanned) return null;
+      clients = scanned;
+    }
+
+    if (clients.length === 0) {
+      console.log('Boulevard lookup: no clients found');
       return null;
-    } finally { clearTimeout(timeoutId); }
-    if (!response.ok) { const t = await response.text().catch(() => ''); console.error(`Boulevard API HTTP ${response.status}: ${t.substring(0,500)}`); return null; }
-    let data;
-    try { data = await response.json(); } catch (e) { console.error('Boulevard API non-JSON:', e.message); return null; }
-    if (data.errors) { console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors)); return null; }
-    const clients = data?.data?.clients?.edges || [];
-    if (clients.length === 0) { console.log('Boulevard lookup: no clients found'); return null; }
-    const nameLower = name.toLowerCase().trim();
-    const match = clients.find(c => {
-      const fn = `${c.node.firstName} ${c.node.lastName}`.toLowerCase();
-      return fn === nameLower || levenshtein(fn, nameLower) <= 3;
-    });
+    }
+
+    const match = findNameMatch(name, clients);
     if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
     console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName}`);
     return buildProfile(match.node);

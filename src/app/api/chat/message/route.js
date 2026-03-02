@@ -21,6 +21,34 @@ const MAX_RECOVERY_MESSAGES = 40;
 const MAX_RECOVERY_MESSAGE_CHARS = 2000;
 const MAX_RECOVERY_TOTAL_CHARS = 30000;
 
+function buildLookupCandidates(lookupRequest) {
+    const values = [lookupRequest?.email, lookupRequest?.phone]
+        .filter(v => typeof v === 'string')
+        .map(v => v.trim())
+        .filter(Boolean);
+
+    const emailSet = new Set();
+    const phoneSet = new Set();
+
+    for (const value of values) {
+          const emails = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+          for (const email of emails) emailSet.add(email.toLowerCase());
+
+          const phones = value.match(/\+?\d[\d\s().-]{8,}\d/g) || [];
+          for (const phone of phones) {
+                const digits = phone.replace(/\D/g, '');
+                if (digits.length >= 10) phoneSet.add(phone.trim());
+          }
+
+          if (emails.length === 0 && phones.length === 0) {
+                if (value.includes('@')) emailSet.add(value.toLowerCase());
+                else phoneSet.add(value);
+          }
+    }
+
+    return [...emailSet, ...phoneSet];
+}
+
 function sanitizeRecoveredHistory(history) {
     if (!Array.isArray(history)) return [];
 
@@ -173,12 +201,15 @@ export async function POST(request) {
             addMessage(sessionId, 'assistant', visibleAck);
 
             // Attempt Boulevard lookup
-            const contactValue = lookupRequest.email || lookupRequest.phone || '';
               const fullName = `${lookupRequest.firstName || ''} ${lookupRequest.lastName || ''}`.trim();
+              const contacts = buildLookupCandidates(lookupRequest);
 
             let profile = null;
               try {
-                        profile = await lookupMember(fullName, contactValue);
+                        for (const contact of contacts) {
+                                      profile = await lookupMember(fullName, contact);
+                                      if (profile) break;
+                        }
               } catch (err) {
                         console.error('Boulevard lookup error:', err);
               }
