@@ -21,8 +21,8 @@ const MAX_RECOVERY_MESSAGES = 40;
 const MAX_RECOVERY_MESSAGE_CHARS = 2000;
 const MAX_RECOVERY_TOTAL_CHARS = 30000;
 
-function buildLookupCandidates(lookupRequest) {
-    const values = [lookupRequest?.email, lookupRequest?.phone]
+function buildLookupCandidates(lookupRequest, rawUserMessage) {
+    const values = [lookupRequest?.email, lookupRequest?.phone, rawUserMessage]
         .filter(v => typeof v === 'string')
         .map(v => v.trim())
         .filter(Boolean);
@@ -47,6 +47,34 @@ function buildLookupCandidates(lookupRequest) {
     }
 
     return [...emailSet, ...phoneSet];
+}
+
+function buildLookupNameCandidates(lookupRequest, rawUserMessage) {
+    const names = [];
+
+    const structuredFirst = String(lookupRequest?.firstName || '').trim();
+    const structuredLast = String(lookupRequest?.lastName || '').trim();
+    if (structuredFirst && structuredLast) {
+          names.push(`${structuredFirst} ${structuredLast}`);
+    }
+
+    if (typeof rawUserMessage === 'string' && rawUserMessage.trim()) {
+          let scrubbed = rawUserMessage;
+          scrubbed = scrubbed.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ');
+          scrubbed = scrubbed.replace(/\+?\d[\d\s().-]{8,}\d/g, ' ');
+          const parts = scrubbed.match(/[A-Za-z][A-Za-z'-]*/g) || [];
+          if (parts.length >= 2) names.push(`${parts[0]} ${parts[1]}`);
+    }
+
+    const seen = new Set();
+    const unique = [];
+    for (const name of names) {
+          const key = name.trim().toLowerCase();
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          unique.push(name.trim());
+    }
+    return unique;
 }
 
 function sanitizeRecoveredHistory(history) {
@@ -201,13 +229,16 @@ export async function POST(request) {
             addMessage(sessionId, 'assistant', visibleAck);
 
             // Attempt Boulevard lookup
-              const fullName = `${lookupRequest.firstName || ''} ${lookupRequest.lastName || ''}`.trim();
-              const contacts = buildLookupCandidates(lookupRequest);
+              const contacts = buildLookupCandidates(lookupRequest, sanitizedMessage);
+              const nameCandidates = buildLookupNameCandidates(lookupRequest, sanitizedMessage);
 
             let profile = null;
               try {
-                        for (const contact of contacts) {
-                                      profile = await lookupMember(fullName, contact);
+                        for (const nameCandidate of nameCandidates) {
+                                      for (const contact of contacts) {
+                                                    profile = await lookupMember(nameCandidate, contact);
+                                                    if (profile) break;
+                                      }
                                       if (profile) break;
                         }
               } catch (err) {
