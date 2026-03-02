@@ -233,11 +233,17 @@ export async function POST(request) {
               const nameCandidates = buildLookupNameCandidates(lookupRequest, sanitizedMessage);
 
             let profile = null;
+              let matchedName = null;
+              let matchedContact = null;
               try {
                         for (const nameCandidate of nameCandidates) {
                                       for (const contact of contacts) {
                                                     profile = await lookupMember(nameCandidate, contact);
-                                                    if (profile) break;
+                                                    if (profile) {
+                                                              matchedName = nameCandidate;
+                                                              matchedContact = contact;
+                                                              break;
+                                                    }
                                       }
                                       if (profile) break;
                         }
@@ -246,7 +252,23 @@ export async function POST(request) {
               }
 
             // Verify identity before exposing profile data
-            if (profile && !verifyMemberIdentity(lookupRequest, profile)) {
+              const verificationLookup = (() => {
+                        if (!matchedName && !matchedContact) return lookupRequest;
+
+                        const parts = String(matchedName || '').trim().split(/\s+/).filter(Boolean);
+                        const firstName = parts[0] || lookupRequest.firstName || '';
+                        const lastName = parts.slice(1).join(' ') || lookupRequest.lastName || '';
+                        const isEmailContact = typeof matchedContact === 'string' && matchedContact.includes('@');
+
+                        return {
+                                      ...lookupRequest,
+                                      firstName,
+                                      lastName,
+                                      email: isEmailContact ? matchedContact : (lookupRequest.email || ''),
+                                      phone: isEmailContact ? (lookupRequest.phone || '') : (matchedContact || lookupRequest.phone || ''),
+                        };
+              })();
+            if (profile && !verifyMemberIdentity(verificationLookup, profile)) {
                       console.warn('Identity verification failed \u2014 treating as lookup miss');
                       profile = null;
             }
