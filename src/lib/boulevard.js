@@ -85,6 +85,34 @@ function normalizePhone(phone) {
   return digits;
 }
 
+function toIsoDate(value) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function isFiniteNumber(v) {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function parseTierFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.match(/\b(30|50|90)\s*[- ]?minute\b/i);
+  return match ? match[1] : null;
+}
+
+function monthsBetween(startIsoDate, endDate = new Date()) {
+  if (!startIsoDate) return null;
+  const start = new Date(startIsoDate);
+  if (Number.isNaN(start.getTime())) return null;
+
+  let months = (endDate.getUTCFullYear() - start.getUTCFullYear()) * 12;
+  months += endDate.getUTCMonth() - start.getUTCMonth();
+  if (endDate.getUTCDate() < start.getUTCDate()) months -= 1;
+  return Math.max(0, months);
+}
+
 function verifyMemberIdentity(lookupRequest, profile) {
   if (!lookupRequest || !profile) return false;
 
@@ -164,7 +192,19 @@ async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {
     const query = `
       query FindClientsByPhoneScan($after: String) {
         clients(first: ${PHONE_SCAN_PAGE_SIZE}, after: $after) {
-          edges { node { id firstName lastName email mobilePhone } }
+          edges {
+            node {
+              id
+              firstName
+              lastName
+              email
+              mobilePhone
+              createdAt
+              appointmentCount
+              active
+              primaryLocation { name }
+            }
+          }
           pageInfo { hasNextPage endCursor }
         }
       }
@@ -215,7 +255,19 @@ async function lookupMember(name, emailOrPhone) {
       const query = `
         query FindClientByEmail($emails: [String!]) {
           clients(first: 5, emails: $emails) {
-            edges { node { id firstName lastName email mobilePhone } }
+            edges {
+              node {
+                id
+                firstName
+                lastName
+                email
+                mobilePhone
+                createdAt
+                appointmentCount
+                active
+                primaryLocation { name }
+              }
+            }
           }
         }
       `;
@@ -249,67 +301,112 @@ async function lookupMember(name, emailOrPhone) {
 }
 
 function buildProfile(d) {
+  const clientSince = toIsoDate(d.createdAt);
+  const memberSince = toIsoDate(d.membershipStartDate || d.startOn);
+  const tier =
+    (d.membershipTier && String(d.membershipTier).trim()) ||
+    parseTierFromText(d.membershipName || d.membershipPlanName || null);
+  const monthlyRate = isFiniteNumber(d.monthlyRate)
+    ? d.monthlyRate
+    : isFiniteNumber(d.unitPrice)
+    ? Math.round(d.unitPrice) / 100
+    : null;
+  const tenureMonths = isFiniteNumber(d.tenureMonths) ? d.tenureMonths : monthsBetween(memberSince);
+
   const profile = {
     name: `${d.firstName} ${d.lastName}`, firstName: d.firstName, email: d.email,
-    phone: d.mobilePhone || null, location: d.location || 'Unknown',
-    tier: d.membershipTier || '50', monthlyRate: d.monthlyRate || 139,
-    memberSince: d.membershipStartDate || null, tenureMonths: d.tenureMonths || 0,
-    accountStatus: d.accountStatus || 'active', paymentsProcessed: d.paymentsProcessed || 0,
-    totalDuesPaid: d.totalDuesPaid || 0, totalRetailPurchases: d.totalRetailPurchases || 0,
-    totalAddonPurchases: d.totalAddonPurchases || 0, facialsRedeemed: d.facialsRedeemed || 0,
-    avgVisitsPerMonth: d.avgVisitsPerMonth || 0, lastVisitDate: d.lastVisitDate || null,
+    phone: d.mobilePhone || null, location: d.location || d.primaryLocation?.name || 'Unknown',
+    tier: tier || null, monthlyRate,
+    clientSince, memberSince, tenureMonths,
+    accountStatus: d.accountStatus || (d.active === false ? 'inactive' : d.active === true ? 'active' : null),
+    paymentsProcessed: isFiniteNumber(d.paymentsProcessed) ? d.paymentsProcessed : null,
+    totalDuesPaid: isFiniteNumber(d.totalDuesPaid) ? d.totalDuesPaid : null,
+    totalRetailPurchases: isFiniteNumber(d.totalRetailPurchases) ? d.totalRetailPurchases : null,
+    totalAddonPurchases: isFiniteNumber(d.totalAddonPurchases) ? d.totalAddonPurchases : null,
+    facialsRedeemed: isFiniteNumber(d.facialsRedeemed) ? d.facialsRedeemed : null,
+    appointmentCount: isFiniteNumber(d.appointmentCount) ? d.appointmentCount : null,
+    avgVisitsPerMonth: isFiniteNumber(d.avgVisitsPerMonth) ? d.avgVisitsPerMonth : null,
+    lastVisitDate: toIsoDate(d.lastVisitDate) || null,
     mostPurchasedAddon: d.mostPurchasedAddon || null, upcomingAppointments: d.upcomingAppointments || [],
-    loyaltyPoints: d.loyaltyPoints || 0, loyaltyEnrolled: d.loyaltyEnrolled || false,
-    perksClaimed: d.perksClaimed || [], unusedCredits: d.unusedCredits || 0,
-    lastBillDate: d.lastBillDate || null,
+    loyaltyPoints: isFiniteNumber(d.loyaltyPoints) ? d.loyaltyPoints : null,
+    loyaltyEnrolled: typeof d.loyaltyEnrolled === 'boolean' ? d.loyaltyEnrolled : null,
+    perksClaimed: d.perksClaimed || [], unusedCredits: isFiniteNumber(d.unusedCredits) ? d.unusedCredits : null,
+    lastBillDate: toIsoDate(d.lastBillDate) || null,
   };
   profile.computed = computeValues(profile);
   return profile;
 }
 
 function computeValues(p) {
-  const wp = WALKIN_PRICES[p.tier] || 169;
-  const ws = p.facialsRedeemed * wp - p.totalDuesPaid;
-  const cr = CURRENT_RATES[p.tier] || 139;
-  const rd = cr - p.monthlyRate;
+  const wp = p.tier && WALKIN_PRICES[p.tier] ? WALKIN_PRICES[p.tier] : null;
+  const ws = wp !== null && isFiniteNumber(p.facialsRedeemed) && isFiniteNumber(p.totalDuesPaid)
+    ? p.facialsRedeemed * wp - p.totalDuesPaid
+    : null;
+  const cr = p.tier && CURRENT_RATES[p.tier] ? CURRENT_RATES[p.tier] : null;
+  const rd = cr !== null && isFiniteNumber(p.monthlyRate) ? cr - p.monthlyRate : null;
   let nextPerk = null;
-  for (const pk of PERKS) { if (pk.month > p.tenureMonths) { nextPerk = pk; break; } }
+  if (isFiniteNumber(p.tenureMonths) && p.memberSince) {
+    for (const pk of PERKS) { if (pk.month > p.tenureMonths) { nextPerk = pk; break; } }
+  }
   let loyaltyRedeemable = null, loyaltyNextTier = null;
-  if (p.loyaltyEnrolled && p.loyaltyPoints > 0) {
+  if (p.loyaltyEnrolled === true && isFiniteNumber(p.loyaltyPoints) && p.loyaltyPoints > 0) {
     for (const lt of LOYALTY_TIERS) { if (p.loyaltyPoints >= lt.points) loyaltyRedeemable = lt; }
     for (const lt of LOYALTY_TIERS) { if (p.loyaltyPoints < lt.points) { loyaltyNextTier = { ...lt, pointsNeeded: lt.points - p.loyaltyPoints }; break; } }
   }
   return {
-    walkinSavings: ws > 0 ? ws : null, walkinPrice: wp, currentNewMemberRate: cr, rateDiff: rd,
-    rateLockAnnual: rd > 0 ? rd * 12 : null, nextPerk, loyaltyRedeemable, loyaltyNextTier,
-    creditExpiryNote: p.unusedCredits > 0 ? `${p.unusedCredits} unused credits — expire 90 days from last bill date` : null,
+    walkinSavings: ws !== null && ws > 0 ? ws : null,
+    walkinPrice: wp,
+    currentNewMemberRate: cr,
+    rateDiff: rd,
+    rateLockAnnual: rd !== null && rd > 0 ? rd * 12 : null,
+    nextPerk,
+    loyaltyRedeemable,
+    loyaltyNextTier,
+    creditExpiryNote: isFiniteNumber(p.unusedCredits) && p.unusedCredits > 0
+      ? `${p.unusedCredits} unused credits — expire 90 days from last bill date`
+      : null,
   };
 }
 
 function formatProfileForPrompt(profile) {
   const c = profile.computed;
   const lines = [
+    'IMPORTANT DATA RULES: Only use fields marked as known. If a field is UNKNOWN, do not infer or state a value.',
+    'Never claim someone "just started" unless Member Since is known and recent.',
+    '',
     `Name: ${profile.name}`, `Email: ${profile.email}`, `Phone: ${profile.phone || 'Not provided'}`,
-    `Location: ${profile.location}`, `Membership Tier: ${profile.tier}-Minute`,
-    `Monthly Rate: $${profile.monthlyRate}/month`, `Current New-Member Rate: $${c.currentNewMemberRate}/month`,
-    `Rate Difference: ${c.rateDiff > 0 ? `$${c.rateDiff}/month ($${c.rateLockAnnual}/year) in grandfathered savings` : 'Rate matches current pricing'}`,
-    `Member Since: ${profile.memberSince || 'Unknown'}`, `Tenure: ${profile.tenureMonths} months`,
-    `Account Status: ${profile.accountStatus}`, `Payments Processed: ${profile.paymentsProcessed}`,
-    '', `Total Membership Dues Paid: $${profile.totalDuesPaid}`,
-    `Total Retail Purchases: $${profile.totalRetailPurchases}`, `Total Add-on Purchases: $${profile.totalAddonPurchases}`,
-    '', `Facials Redeemed: ${profile.facialsRedeemed}`, `Average Visits/Month: ${profile.avgVisitsPerMonth}`,
+    `Location: ${profile.location || 'UNKNOWN'}`,
+    `Client Record Created: ${profile.clientSince || 'UNKNOWN'}`,
+    `Membership Tier: ${profile.tier ? `${profile.tier}-Minute (known)` : 'UNKNOWN — do not state tier'}`,
+    `Monthly Rate: ${isFiniteNumber(profile.monthlyRate) ? `$${profile.monthlyRate}/month` : 'UNKNOWN — do not state monthly rate'}`,
+    `Member Since: ${profile.memberSince || 'UNKNOWN — do not state join date/tenure'}`,
+    `Tenure: ${isFiniteNumber(profile.tenureMonths) ? `${profile.tenureMonths} months` : 'UNKNOWN — do not state tenure'}`,
+    `Account Status: ${profile.accountStatus || 'UNKNOWN'}`,
+    `Appointment Count: ${isFiniteNumber(profile.appointmentCount) ? profile.appointmentCount : 'UNKNOWN'}`,
+    '',
+    `Current New-Member Rate: ${isFiniteNumber(c.currentNewMemberRate) ? `$${c.currentNewMemberRate}/month` : 'UNKNOWN'}`,
+    `Rate Difference: ${isFiniteNumber(c.rateDiff) ? (c.rateDiff > 0 ? `$${c.rateDiff}/month ($${c.rateLockAnnual}/year) in grandfathered savings` : 'Rate matches current pricing') : 'UNKNOWN — do not mention rate lock savings'}`,
+    `Total Membership Dues Paid: ${isFiniteNumber(profile.totalDuesPaid) ? `$${profile.totalDuesPaid}` : 'UNKNOWN'}`,
+    `Total Retail Purchases: ${isFiniteNumber(profile.totalRetailPurchases) ? `$${profile.totalRetailPurchases}` : 'UNKNOWN'}`,
+    `Total Add-on Purchases: ${isFiniteNumber(profile.totalAddonPurchases) ? `$${profile.totalAddonPurchases}` : 'UNKNOWN'}`,
+    '',
+    `Facials Redeemed: ${isFiniteNumber(profile.facialsRedeemed) ? profile.facialsRedeemed : 'UNKNOWN'}`,
+    `Average Visits/Month: ${isFiniteNumber(profile.avgVisitsPerMonth) ? profile.avgVisitsPerMonth : 'UNKNOWN'}`,
     `Last Visit: ${profile.lastVisitDate || 'Unknown'}`, `Most Purchased Add-on: ${profile.mostPurchasedAddon || 'None'}`,
     `Upcoming Appointments: ${profile.upcomingAppointments.length > 0 ? profile.upcomingAppointments.join(', ') : 'None'}`,
-    '', `Walk-in Savings: ${c.walkinSavings ? `$${c.walkinSavings} saved vs. walk-in pricing` : 'NEGATIVE OR ZERO — do NOT mention savings'}`,
-    `Walk-in Price for Tier: $${c.walkinPrice}/facial`,
-    '', `Loyalty Points: ${profile.loyaltyEnrolled ? `${profile.loyaltyPoints} points` : 'Not enrolled — do not mention loyalty program'}`,
+    '', `Walk-in Savings: ${isFiniteNumber(c.walkinSavings) ? `$${c.walkinSavings} saved vs. walk-in pricing` : 'UNKNOWN — do not mention walk-in savings'}`,
+    `Walk-in Price for Tier: ${isFiniteNumber(c.walkinPrice) ? `$${c.walkinPrice}/facial` : 'UNKNOWN'}`,
+    '', `Loyalty Points: ${profile.loyaltyEnrolled === true && isFiniteNumber(profile.loyaltyPoints) ? `${profile.loyaltyPoints} points` : 'UNKNOWN — do not mention loyalty points'}`,
   ];
   if (c.loyaltyRedeemable) lines.push(`Loyalty Redeemable: ${c.loyaltyRedeemable.service} (${c.loyaltyRedeemable.points} points = $${c.loyaltyRedeemable.value} value)`);
   if (c.loyaltyNextTier) lines.push(`Next Loyalty Tier: ${c.loyaltyNextTier.pointsNeeded} more points for ${c.loyaltyNextTier.service}`);
-  lines.push('', `Unused Credits: ${profile.unusedCredits}`);
+  lines.push('', `Unused Credits: ${isFiniteNumber(profile.unusedCredits) ? profile.unusedCredits : 'UNKNOWN'}`);
   if (profile.lastBillDate) lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
   lines.push('', `Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
-  if (c.nextPerk) { lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name} ($${c.nextPerk.value} value)`); lines.push(`Months Until Next Perk: ${c.nextPerk.month - profile.tenureMonths}`); }
+  if (c.nextPerk && isFiniteNumber(profile.tenureMonths) && profile.memberSince) {
+    lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name} ($${c.nextPerk.value} value)`);
+    lines.push(`Months Until Next Perk: ${c.nextPerk.month - profile.tenureMonths}`);
+  }
   return lines.join('\n');
 }
 
