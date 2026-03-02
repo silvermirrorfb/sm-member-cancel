@@ -236,7 +236,15 @@ async function lookupMember(name, emailOrPhone) {
   const apiKey = process.env.BOULEVARD_API_KEY;
   const apiSecret = process.env.BOULEVARD_API_SECRET;
   const businessId = process.env.BOULEVARD_BUSINESS_ID;
-  if (!apiKey) { console.warn('BOULEVARD_API_KEY not set — using mock data'); return mockLookup(name, emailOrPhone); }
+  const allowMock = process.env.BOULEVARD_ALLOW_MOCK === 'true' && process.env.NODE_ENV !== 'production';
+  if (!apiKey) {
+    if (allowMock) {
+      console.warn('BOULEVARD_API_KEY not set — using mock data (BOULEVARD_ALLOW_MOCK=true)');
+      return mockLookup(name, emailOrPhone);
+    }
+    console.error('BOULEVARD_API_KEY not set — member lookup disabled');
+    return null;
+  }
   if (!apiSecret || !businessId) { console.error('Boulevard auth requires BOULEVARD_API_SECRET and BOULEVARD_BUSINESS_ID when BOULEVARD_API_KEY is set'); return null; }
   const apiUrl = normalizeBoulevardApiUrl(process.env.BOULEVARD_API_URL || DEFAULT_API_URL);
   try {

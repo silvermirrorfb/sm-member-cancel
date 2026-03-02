@@ -294,7 +294,7 @@ export default function ChatWidget() {
 
           if (data.conversationEnding) {
                     // Include history + summary for serverless recovery (P1-3)
-                    const allMessages = [...messages, { role: 'user', content: input }, { role: 'bot', content: botMessage }];
+                    const allMessages = [...messages, { role: 'user', content: text }, { role: 'bot', content: botMessage }];
                     await fetch(`${API_BASE}/end`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
@@ -332,14 +332,14 @@ export default function ChatWidget() {
         setLoading(true);
         try {
                 // Include history for serverless recovery (P1-3)
-                await fetch(`${API_BASE}/end`, {
+                const res = await fetch(`${API_BASE}/end`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({
                                     sessionId,
                                     history: messages,
                           }),
-                })
+                });
                 const data = await res.json();
 
           if (data.error) {
