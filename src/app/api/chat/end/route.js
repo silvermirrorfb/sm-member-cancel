@@ -3,6 +3,30 @@ import { getSession, createSession, addMessage, completeSession } from '../../..
 import { sendMessage, parseSessionSummary, stripSummaryFromResponse } from '../../../../lib/claude';
 import { processConversationEnd } from '../../../../lib/notify';
 
+const MAX_RECOVERY_MESSAGES = 60;
+const MAX_RECOVERY_MESSAGE_CHARS = 4000;
+
+function sanitizeRecoveredHistory(history) {
+  if (!Array.isArray(history)) return [];
+
+  const cleaned = [];
+  for (const item of history.slice(-MAX_RECOVERY_MESSAGES)) {
+    if (!item || typeof item !== 'object') continue;
+    const roleRaw = String(item.role || '').toLowerCase();
+    const role = roleRaw === 'bot' || roleRaw === 'assistant'
+      ? 'assistant'
+      : roleRaw === 'user'
+      ? 'user'
+      : null;
+    if (!role) continue;
+    if (typeof item.content !== 'string') continue;
+    const content = item.content.trim().slice(0, MAX_RECOVERY_MESSAGE_CHARS);
+    if (!content) continue;
+    cleaned.push({ role, content });
+  }
+  return cleaned;
+}
+
 export async function POST(request) {
   try {
     const body = await request.json();
@@ -14,12 +38,14 @@ export async function POST(request) {
 
     let session = getSession(sessionId);
 
+    const recoveredHistory = sanitizeRecoveredHistory(body.history);
+
     // P1-3: Recover session from client history on serverless rotation
-    if (!session && body.history && Array.isArray(body.history)) {
+    if (!session && recoveredHistory.length > 0) {
       console.warn(`End session ${sessionId} not found \u2014 recovering from client history`);
       session = createSession(null, null, sessionId);
-      for (const msg of body.history) {
-        addMessage(session.id, msg.role === 'bot' ? 'assistant' : msg.role, msg.content);
+      for (const msg of recoveredHistory) {
+        addMessage(session.id, msg.role, msg.content);
       }
       // Restore member profile if provided by client
       if (body.memberProfile) {
@@ -33,7 +59,12 @@ export async function POST(request) {
     }
 
     if (!session) {
-      return NextResponse.json({ error: 'Session not found.' }, { status: 404 });
+      // Graceful no-op close for expired sessions with no recoverable history.
+      return NextResponse.json({
+        completed: true,
+        outcome: 'GENERAL',
+        sessionMissing: true,
+      });
     }
 
     // For general conversations (no member identified), just close cleanly
@@ -77,14 +108,14 @@ export async function POST(request) {
           phone: session.memberProfile?.phone || null,
           location: session.memberProfile?.location || 'Unknown',
           membership_tier: session.memberProfile?.tier || 'Unknown',
-          monthly_rate: session.memberProfile?.monthlyRate || 0,
-          tenure_months: session.memberProfile?.tenureMonths || 0,
+          monthly_rate: Number.isFinite(session.memberProfile?.monthlyRate) ? session.memberProfile.monthlyRate : null,
+          tenure_months: Number.isFinite(session.memberProfile?.tenureMonths) ? session.memberProfile.tenureMonths : null,
           account_status: session.memberProfile?.accountStatus || 'unknown',
-          loyalty_points: session.memberProfile?.loyaltyPoints || 0,
+          loyalty_points: Number.isFinite(session.memberProfile?.loyaltyPoints) ? session.memberProfile.loyaltyPoints : null,
           loyalty_redeemable: null,
           walkin_savings: null,
           rate_lock_savings_annual: null,
-          unused_credits: session.memberProfile?.unusedCredits || 0,
+          unused_credits: Number.isFinite(session.memberProfile?.unusedCredits) ? session.memberProfile.unusedCredits : null,
           next_perk_month: null,
           next_perk_name: null,
           next_perk_value: null,

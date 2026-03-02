@@ -21,6 +21,78 @@ const MAX_RECOVERY_MESSAGES = 40;
 const MAX_RECOVERY_MESSAGE_CHARS = 2000;
 const MAX_RECOVERY_TOTAL_CHARS = 30000;
 const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
+const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
+
+function formatMoney(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    return `$${Math.round(value)}`;
+}
+
+function pluralizeMonths(months) {
+    return `${months} month${months === 1 ? '' : 's'}`;
+}
+
+function formatMonthYear(isoDate) {
+    if (!isoDate) return null;
+    const d = new Date(isoDate);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+
+function buildPostLookupGreeting(profile, rawUserMessage) {
+    const firstName = String(profile?.firstName || profile?.name?.split(' ')[0] || 'there').trim();
+    const sentences = [];
+
+    const tierRateParts = [];
+    if (profile?.tier) tierRateParts.push(`${profile.tier}-Minute Membership`);
+    if (typeof profile?.monthlyRate === 'number') tierRateParts.push(`at ${formatMoney(profile.monthlyRate)}/month`);
+    const location = profile?.location && profile.location !== 'Unknown' ? profile.location : null;
+
+    if (tierRateParts.length > 0 && location) {
+          sentences.push(`Thanks, ${firstName}. I found your account. You have a ${tierRateParts.join(' ')} at ${location}.`);
+    } else if (tierRateParts.length > 0) {
+          sentences.push(`Thanks, ${firstName}. I found your account. You have a ${tierRateParts.join(' ')}.`);
+    } else if (location) {
+          sentences.push(`Thanks, ${firstName}. I found your account at ${location}.`);
+    } else {
+          sentences.push(`Thanks, ${firstName}. I found your account.`);
+    }
+
+    const memberSince = formatMonthYear(profile?.memberSince);
+    if (memberSince && typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
+          sentences.push(`You joined in ${memberSince} (about ${pluralizeMonths(profile.tenureMonths)} ago).`);
+    } else if (memberSince) {
+          sentences.push(`You joined in ${memberSince}.`);
+    } else if (typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
+          sentences.push(`You've been a member for about ${pluralizeMonths(profile.tenureMonths)}.`);
+    }
+
+    const computed = profile?.computed || {};
+    if (typeof computed.rateLockAnnual === 'number' && computed.rateLockAnnual > 0) {
+          sentences.push(`Your current rate saves about ${formatMoney(computed.rateLockAnnual)}/year versus today's new-member pricing.`);
+    } else if (typeof computed.walkinSavings === 'number' && computed.walkinSavings > 0) {
+          sentences.push(`You've saved about ${formatMoney(computed.walkinSavings)} versus walk-in pricing so far.`);
+    } else if (profile?.loyaltyEnrolled === true && typeof profile?.loyaltyPoints === 'number' && Number.isFinite(profile.loyaltyPoints)) {
+          sentences.push(`You currently have ${profile.loyaltyPoints} loyalty points.`);
+    }
+
+    if (computed.nextPerk && typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
+          const monthsUntilPerk = computed.nextPerk.month - profile.tenureMonths;
+          if (monthsUntilPerk === 0) {
+                sentences.push(`You're at your Month ${computed.nextPerk.month} perk milestone: ${computed.nextPerk.name}.`);
+          } else if (monthsUntilPerk > 0 && monthsUntilPerk <= 6) {
+                sentences.push(`Your next perk is Month ${computed.nextPerk.month} (${computed.nextPerk.name}) in about ${pluralizeMonths(monthsUntilPerk)}.`);
+          }
+    }
+
+    if (CANCELLATION_KEYWORDS.test(String(rawUserMessage || '').toLowerCase())) {
+          sentences.push("Before we finalize anything, what's driving the cancellation?");
+    } else {
+          sentences.push('How can I help with your membership today?');
+    }
+
+    return sentences.join(' ');
+}
 
 function buildLookupFailureMessage(firstName, attempt) {
     const namePrefix = firstName ? `${firstName}, ` : '';
@@ -242,12 +314,6 @@ export async function POST(request) {
       const lookupIsValid = hasName && hasContact;
 
       if (lookupRequest && lookupIsValid && !session.memberProfile) {
-              // Claude wants to look up a member \u2014 strip the lookup tag for visible response
-            const visibleAck = stripAllSystemTags(response);
-
-            // Store CLEANED response in history (not raw with tags)
-            addMessage(sessionId, 'assistant', visibleAck);
-
             // Attempt Boulevard lookup
               const contacts = buildLookupCandidates(lookupRequest, sanitizedMessage);
               const nameCandidates = buildLookupNameCandidates(lookupRequest, sanitizedMessage);
@@ -304,37 +370,18 @@ export async function POST(request) {
                       session.mode = 'membership';
                       session.lookupFailureCount = 0;
 
-                // Send a system-level message to Claude so it knows the profile is loaded
-                addMessage(sessionId, 'user',
-                                     '[SYSTEM] Member profile has been loaded. You are now in Membership Mode. Greet the member by first name, confirm their details, and ask how you can help with their membership.'
-                                   );
-
-                const memberResponse = await safeSendMessage(memberSystemPrompt, session.messages);
-
-                if (memberResponse === null) {
-                            // Claude rate-limited after profile load \u2014 still return the ack + a helpful message
-                        const fallbackMsg = visibleAck + '\n\n' + RATE_LIMIT_USER_MESSAGE;
-                            addMessage(sessionId, 'assistant', RATE_LIMIT_USER_MESSAGE);
-                            return NextResponse.json({
-                                          message: fallbackMsg,
-                                          sessionId,
-                                          memberIdentified: true,
-                                          rateLimited: true,
-                            });
-                }
-
-                const cleanMemberResponse = stripAllSystemTags(memberResponse);
-                      addMessage(sessionId, 'assistant', cleanMemberResponse);
-
-                const combinedResponse = visibleAck + '\n\n' + cleanMemberResponse;
+                // Use deterministic post-lookup greeting so we always show known
+                // tier/rate/tenure data and avoid contradictory pre-lookup text.
+                const greeting = buildPostLookupGreeting(profile, sanitizedMessage);
+                addMessage(sessionId, 'assistant', greeting);
 
                 // Log bot response to chatbot log
-                logChatMessage(sessionId, sessionCreated, 'assistant', combinedResponse).catch(err =>
+                logChatMessage(sessionId, sessionCreated, 'assistant', greeting).catch(err =>
                             console.warn('Chatlog failed for member greeting:', err)
                                                                                                        );
 
                 return NextResponse.json({
-                            message: combinedResponse,
+                            message: greeting,
                             sessionId,
                             memberIdentified: true,
                 });
@@ -344,16 +391,15 @@ export async function POST(request) {
                       session.lookupFailureCount = Number(session.lookupFailureCount || 0) + 1;
                       const firstName = String(verificationLookup?.firstName || lookupRequest.firstName || '').trim();
                       const failureMessage = buildLookupFailureMessage(firstName, session.lookupFailureCount);
-                const combinedFail = visibleAck + '\n\n' + failureMessage;
-                      addMessage(sessionId, 'assistant', combinedFail);
+                      addMessage(sessionId, 'assistant', failureMessage);
 
                 // Log bot response to chatbot log
-                logChatMessage(sessionId, sessionCreated, 'assistant', combinedFail).catch(err =>
+                logChatMessage(sessionId, sessionCreated, 'assistant', failureMessage).catch(err =>
                             console.warn('Chatlog failed for lookup fail response:', err)
                                                                                                    );
 
                 return NextResponse.json({
-                            message: combinedFail,
+                            message: failureMessage,
                             sessionId,
                             memberIdentified: false,
                 });

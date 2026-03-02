@@ -8,7 +8,7 @@ import crypto from 'crypto';
 const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin';
 const BOULEVARD_TIMEOUT_MS = 15000;
 const PHONE_SCAN_PAGE_SIZE = 100;
-const PHONE_SCAN_MAX_PAGES = 20;
+const PHONE_SCAN_MAX_PAGES = 120;
 const MEMBERSHIP_SCAN_PAGE_SIZE = 200;
 const MEMBERSHIP_SCAN_MAX_PAGES = 120;
 const MEMBERSHIP_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -211,12 +211,19 @@ function monthsBetween(startIsoDate, endDate = new Date()) {
 function verifyMemberIdentity(lookupRequest, profile) {
   if (!lookupRequest || !profile) return false;
 
-  const reqFirst = (lookupRequest.firstName || '').trim().toLowerCase();
-  const reqLast = (lookupRequest.lastName || '').trim().toLowerCase();
-  const profileFirst = (profile.firstName || '').trim().toLowerCase();
-  const profileLast = ((profile.name || '').split(' ').slice(1).join(' ') || '').trim().toLowerCase();
+  const reqFirst = String(lookupRequest.firstName || '').trim();
+  const reqLast = String(lookupRequest.lastName || '').trim();
+  const profileName = String(profile.name || '').trim();
+  const profileTokens = profileName.split(/\s+/).filter(Boolean);
+  const profileFirst = String(profile.firstName || profileTokens[0] || '').trim();
+  const profileLast = String(
+    (profile.lastName || '') ||
+    (profileTokens.length > 1 ? profileTokens.slice(1).join(' ') : '')
+  ).trim();
 
-  const nameMatches = reqFirst === profileFirst && reqLast.length > 0 && profileLast.includes(reqLast);
+  if (!reqFirst || !reqLast || !profileFirst || !profileLast) return false;
+  const requestedName = `${reqFirst} ${reqLast}`;
+  const nameMatches = namesLikelyMatch(requestedName, profileFirst, profileLast);
   if (!nameMatches) return false;
 
   const reqEmail = (lookupRequest.email || '').trim().toLowerCase();
@@ -609,6 +616,7 @@ function mockLookup(name, emailOrPhone) {
 export {
   lookupMember,
   verifyMemberIdentity,
+  levenshtein,
   buildProfile,
   computeValues,
   formatProfileForPrompt,

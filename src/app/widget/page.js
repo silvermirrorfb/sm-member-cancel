@@ -171,37 +171,39 @@ export default function ChatWidget() {
         scrollToBottom();
   }, [messages, loading, scrollToBottom]);
 
+  const startChatSession = useCallback(async () => {
+        try {
+                const res = await fetch(`${API_BASE}/start`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({}),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error || !data.sessionId || !data.message) {
+                        throw new Error(data?.error || 'Failed to start session');
+                }
+                setSessionId(data.sessionId);
+                setMessages([{ role: 'bot', content: data.message }]);
+                setPhase('chat');
+                return true;
+        } catch (err) {
+                setSessionId(null);
+                setMessages([{
+                          role: 'bot',
+                          content: 'Unable to connect. Please call (888) 677-0055 for help.',
+                }]);
+                setPhase('chat');
+                return false;
+        }
+  }, []);
+
   // ── Initialize session on mount ──
   useEffect(() => {
         async function init() {
-                try {
-                          const res = await fetch(`${API_BASE}/start`, {
-                                      method: 'POST',
-                                      headers: { 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({}),
-                          });
-                          const data = await res.json();
-                          if (data.error) {
-                                      setMessages([{
-                                                    role: 'bot',
-                                                    content: 'Something went wrong starting the chat. Please call (888) 677-0055 for help.',
-                                      }]);
-                                      setPhase('chat');
-                                      return;
-                          }
-                          setSessionId(data.sessionId);
-                          setMessages([{ role: 'bot', content: data.message }]);
-                          setPhase('chat');
-                } catch (err) {
-                          setMessages([{
-                                      role: 'bot',
-                                      content: 'Unable to connect. Please call (888) 677-0055 for help.',
-                          }]);
-                          setPhase('chat');
-                }
+                await startChatSession();
         }
         init();
-  }, []);
+  }, [startChatSession]);
 
   useEffect(() => {
         if (phase === 'chat' && inputRef.current) {
@@ -270,9 +272,31 @@ export default function ChatWidget() {
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({ sessionId, message: text, history: messages.map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.content })) }),
                 });
-                const data = await res.json();
+                const data = await res.json().catch(() => ({}));
 
-          if (data.error) {
+          if (!res.ok || data.error) {
+                    if (res.status === 404 || res.status === 409) {
+                              const restarted = await startChatSession();
+                              if (restarted) {
+                                        setMessages(prev => [
+                                                    ...prev,
+                                            {
+                                                          role: 'bot',
+                                                          content: 'I refreshed the chat after a connection reset. Please resend your last message.',
+                                            },
+                                                    ]);
+                              } else {
+                                        setMessages(prev => [
+                                                    ...prev,
+                                            {
+                                                          role: 'bot',
+                                                          content: 'Your session expired and I could not reconnect. Please call (888) 677-0055 for immediate help.',
+                                            },
+                                                    ]);
+                              }
+                              setLoading(false);
+                              return;
+                    }
                     setMessages(prev => [
                                 ...prev,
                       {
@@ -328,41 +352,45 @@ export default function ChatWidget() {
   };
 
   const handleEndChat = async () => {
-        if (!sessionId) return;
+        if (loading) return;
         setLoading(true);
+
+        const history = messages.map(m => ({
+                role: m.role === 'bot' ? 'assistant' : 'user',
+                content: m.content,
+        }));
+
         try {
-                // Include history for serverless recovery (P1-3)
-                const res = await fetch(`${API_BASE}/end`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                                    sessionId,
-                                    history: messages,
-                          }),
-                });
-                const data = await res.json();
+                if (sessionId) {
+                          await fetch(`${API_BASE}/end`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                              sessionId,
+                                              history,
+                                    }),
+                          });
+                }
+        } catch {
+                // End endpoint failures should not block chat reset.
+        }
 
-          if (data.error) {
-                    setMessages([{
-                                role: 'bot',
-                                content: 'Something went wrong starting a new chat. Please call (888) 677-0055 for help.',
-                    }]);
-                    setPhase('chat');
-                    setLoading(false);
-                    return;
-          }
-
-          setSessionId(data.sessionId);
-                setMessages([{ role: 'bot', content: data.message }]);
-                setPhase('chat');
-        } catch (err) {
+        const restarted = await startChatSession();
+        if (!restarted) {
                 setMessages([{
                           role: 'bot',
-                          content: 'Unable to connect. Please call (888) 677-0055 for help.',
+                          content: 'Chat ended, but I could not start a new session. Please call (888) 677-0055 for help.',
                 }]);
                 setPhase('chat');
         }
 
+        setLoading(false);
+  };
+
+  const handleNewChat = async () => {
+        if (loading) return;
+        setLoading(true);
+        await startChatSession();
         setLoading(false);
   };
 
