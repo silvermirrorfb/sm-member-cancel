@@ -1,6 +1,6 @@
 export const metadata = {
-  title: 'Silver Mirror Membership Assistant',
-  description: 'Talk to us about your membership',
+  title: 'Silver Mirror Virtual Assistant',
+  description: 'Get help with facials, memberships, products, and skincare',
 };
 
 export const viewport = {
