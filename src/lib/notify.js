@@ -43,13 +43,16 @@ async function getSheetsClient() {
   return google.sheets({ version: 'v4', auth });
 }
 
-async function getFirstSheetTitle(sheets, spreadsheetId) {
+async function getFirstSheetMeta(sheets, spreadsheetId) {
   const meta = await sheets.spreadsheets.get({
     spreadsheetId,
-    fields: 'sheets(properties(title,index))',
+    fields: 'sheets(properties(title,index,sheetId))',
   });
-  const sheet = meta?.data?.sheets?.[0];
-  return sheet?.properties?.title || 'Sheet1';
+  const sheet = meta?.data?.sheets?.[0]?.properties;
+  return {
+    title: sheet?.title || 'Sheet1',
+    sheetId: sheet?.sheetId ?? 0,
+  };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -423,7 +426,8 @@ async function logSupportIncidentToGoogleSheets(incident) {
     const sheets = await getSheetsClient();
     if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
 
-    const tabTitle = await getFirstSheetTitle(sheets, sheetId);
+    const sheetMeta = await getFirstSheetMeta(sheets, sheetId);
+    await ensureSupportIncidentSheetLayout(sheets, sheetId, sheetMeta);
     const row = [
       toSheetValue(incident.date),           // A: Date
       toSheetValue(incident.session_id),     // B: Session ID
@@ -441,7 +445,7 @@ async function logSupportIncidentToGoogleSheets(incident) {
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
-      range: `${tabTitle}!A:L`,
+      range: `${sheetMeta.title}!A:L`,
       valueInputOption: 'USER_ENTERED',
       requestBody: { values: [row] },
     });
@@ -451,6 +455,178 @@ async function logSupportIncidentToGoogleSheets(incident) {
     console.error('Support incident sheet logging failed:', err);
     return { logged: false, reason: err.message };
   }
+}
+
+async function ensureSupportIncidentSheetLayout(sheets, spreadsheetId, sheetMeta) {
+  const headers = [
+    'Date (UTC)',
+    'Session ID',
+    'Issue Type',
+    'Guest Name',
+    'Guest Email',
+    'Guest Phone',
+    'Location Mentioned',
+    'Guest Message',
+    'Status',
+    'Source',
+    'Response SLA',
+    'Fastest Contact',
+  ];
+
+  const headerRange = `${sheetMeta.title}!A1:L1`;
+  const currentHeader = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: headerRange,
+  });
+  const currentRow = currentHeader?.data?.values?.[0] || [];
+  const hasHeader = String(currentRow[0] || '').trim() === headers[0]
+    && String(currentRow[1] || '').trim() === headers[1];
+  const hasAnyContent = currentRow.some(v => String(v || '').trim().length > 0);
+
+  if (!hasHeader) {
+    // Preserve existing first row data by shifting it down once before writing headers.
+    if (hasAnyContent) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{
+            insertDimension: {
+              range: {
+                sheetId: sheetMeta.sheetId,
+                dimension: 'ROWS',
+                startIndex: 0,
+                endIndex: 1,
+              },
+              inheritFromBefore: false,
+            },
+          }],
+        },
+      });
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: headerRange,
+      valueInputOption: 'RAW',
+      requestBody: { values: [headers] },
+    });
+  }
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: {
+              sheetId: sheetMeta.sheetId,
+              gridProperties: { frozenRowCount: 1 },
+            },
+            fields: 'gridProperties.frozenRowCount',
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 12,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.09, green: 0.21, blue: 0.36 },
+                textFormat: {
+                  bold: true,
+                  foregroundColor: { red: 1, green: 1, blue: 1 },
+                  fontSize: 10,
+                },
+                horizontalAlignment: 'CENTER',
+                verticalAlignment: 'MIDDLE',
+              },
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+          },
+        },
+        {
+          setBasicFilter: {
+            filter: {
+              range: {
+                sheetId: sheetMeta.sheetId,
+                startRowIndex: 0,
+                startColumnIndex: 0,
+                endColumnIndex: 12,
+              },
+            },
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              dimension: 'COLUMNS',
+              startIndex: 0,
+              endIndex: 12,
+            },
+            properties: { pixelSize: 150 },
+            fields: 'pixelSize',
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              dimension: 'COLUMNS',
+              startIndex: 7,
+              endIndex: 8,
+            },
+            properties: { pixelSize: 420 },
+            fields: 'pixelSize',
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 12,
+            },
+            cell: {
+              userEnteredFormat: {
+                wrapStrategy: 'WRAP',
+                verticalAlignment: 'TOP',
+              },
+            },
+            fields: 'userEnteredFormat(wrapStrategy,verticalAlignment)',
+          },
+        },
+        {
+          setDataValidation: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 8,
+              endColumnIndex: 9,
+            },
+            rule: {
+              condition: {
+                type: 'ONE_OF_LIST',
+                values: [
+                  { userEnteredValue: 'Open' },
+                  { userEnteredValue: 'In Progress' },
+                  { userEnteredValue: 'Resolved' },
+                ],
+              },
+              strict: true,
+              showCustomUi: true,
+            },
+          },
+        },
+      ],
+    },
+  });
 }
 
 async function logSupportIncident(incident) {
