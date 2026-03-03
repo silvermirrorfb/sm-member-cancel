@@ -43,15 +43,22 @@ function buildPostLookupGreeting(profile, rawUserMessage) {
     const firstName = String(profile?.firstName || profile?.name?.split(' ')[0] || 'there').trim();
     const sentences = [];
 
-    const tierRateParts = [];
-    if (profile?.tier) tierRateParts.push(`${profile.tier}-Minute Membership`);
-    if (typeof profile?.monthlyRate === 'number') tierRateParts.push(`at ${formatMoney(profile.monthlyRate)}/month`);
+    const tierLabel = profile?.tier ? `${profile.tier}-Minute Membership` : null;
+    const rateLabel = typeof profile?.monthlyRate === 'number' ? `${formatMoney(profile.monthlyRate)}/month` : null;
     const location = profile?.location && profile.location !== 'Unknown' ? profile.location : null;
 
-    if (tierRateParts.length > 0 && location) {
-          sentences.push(`Thanks, ${firstName}. I found your account. You have a ${tierRateParts.join(' ')} at ${location}.`);
-    } else if (tierRateParts.length > 0) {
-          sentences.push(`Thanks, ${firstName}. I found your account. You have a ${tierRateParts.join(' ')}.`);
+    if (tierLabel && rateLabel && location) {
+          sentences.push(`Thanks, ${firstName}. I found your membership.`);
+          sentences.push(`You're on the ${tierLabel} at ${location} for ${rateLabel}.`);
+    } else if (tierLabel && rateLabel) {
+          sentences.push(`Thanks, ${firstName}. I found your membership.`);
+          sentences.push(`You're on the ${tierLabel} for ${rateLabel}.`);
+    } else if (tierLabel && location) {
+          sentences.push(`Thanks, ${firstName}. I found your membership.`);
+          sentences.push(`You're on the ${tierLabel} at ${location}.`);
+    } else if (tierLabel) {
+          sentences.push(`Thanks, ${firstName}. I found your membership.`);
+          sentences.push(`You're on the ${tierLabel}.`);
     } else if (location) {
           sentences.push(`Thanks, ${firstName}. I found your account at ${location}.`);
     } else {
@@ -60,16 +67,16 @@ function buildPostLookupGreeting(profile, rawUserMessage) {
 
     const memberSince = formatMonthYear(profile?.memberSince);
     if (memberSince && typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
-          sentences.push(`You joined in ${memberSince} (about ${pluralizeMonths(profile.tenureMonths)} ago).`);
+          sentences.push(`You joined in ${memberSince}, so you've been with us about ${pluralizeMonths(profile.tenureMonths)}.`);
     } else if (memberSince) {
           sentences.push(`You joined in ${memberSince}.`);
     } else if (typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
-          sentences.push(`You've been a member for about ${pluralizeMonths(profile.tenureMonths)}.`);
+          sentences.push(`You've been with us about ${pluralizeMonths(profile.tenureMonths)}.`);
     }
 
     const computed = profile?.computed || {};
     if (typeof computed.rateLockAnnual === 'number' && computed.rateLockAnnual > 0) {
-          sentences.push(`Your current rate saves about ${formatMoney(computed.rateLockAnnual)}/year versus today's new-member pricing.`);
+          sentences.push(`Your current rate is about ${formatMoney(computed.rateLockAnnual)}/year lower than today's new-member pricing.`);
     } else if (typeof computed.walkinSavings === 'number' && computed.walkinSavings > 0) {
           sentences.push(`You've saved about ${formatMoney(computed.walkinSavings)} versus walk-in pricing so far.`);
     } else if (profile?.loyaltyEnrolled === true && typeof profile?.loyaltyPoints === 'number' && Number.isFinite(profile.loyaltyPoints)) {
@@ -79,16 +86,16 @@ function buildPostLookupGreeting(profile, rawUserMessage) {
     if (computed.nextPerk && typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
           const monthsUntilPerk = computed.nextPerk.month - profile.tenureMonths;
           if (monthsUntilPerk === 0) {
-                sentences.push(`You're at your Month ${computed.nextPerk.month} perk milestone: ${computed.nextPerk.name}.`);
+                sentences.push(`You're right at your Month ${computed.nextPerk.month} perk milestone: ${computed.nextPerk.name}.`);
           } else if (monthsUntilPerk > 0 && monthsUntilPerk <= 6) {
-                sentences.push(`Your next perk is Month ${computed.nextPerk.month} (${computed.nextPerk.name}) in about ${pluralizeMonths(monthsUntilPerk)}.`);
+                sentences.push(`You're about ${pluralizeMonths(monthsUntilPerk)} away from your Month ${computed.nextPerk.month} perk: ${computed.nextPerk.name}.`);
           }
     }
 
     if (CANCELLATION_KEYWORDS.test(String(rawUserMessage || '').toLowerCase())) {
-          sentences.push("Before we finalize anything, what's driving the cancellation?");
+          sentences.push("If you're open to sharing, what's making you think about canceling?");
     } else {
-          sentences.push('How can I help with your membership today?');
+          sentences.push('What can I help with on your membership today?');
     }
 
     return sentences.join(' ');
@@ -98,10 +105,10 @@ function buildLookupFailureMessage(firstName, attempt) {
     const namePrefix = firstName ? `${firstName}, ` : '';
 
     if (attempt <= 1) {
-          return `${namePrefix}I couldn't find your account with that info yet.\n\nLet's try one quick re-check. Please send one of these:\n- A different email you may have used at signup\n- Your mobile number only (digits are fine)\n\nIf you'd rather skip this step, email ${MEMBERSHIP_EMAIL} with your full name and phone number.`;
+          return `${namePrefix}I couldn't find your account just yet. Sometimes a different email or phone format does the trick.\n\nCould you send one of these so I can re-check quickly?\n- A different email you may have used at signup\n- Your mobile number only (digits are fine)\n\nIf it's easier, you can also email ${MEMBERSHIP_EMAIL} with your full name and phone number.`;
     }
 
-    return `${namePrefix}I still can't locate the account in chatbot search.\n\nPlease email ${MEMBERSHIP_EMAIL} and include:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team replies within 24-48 hours and can complete the cancellation process.`;
+    return `${namePrefix}I still can't locate the account from chatbot search.\n\nPlease email ${MEMBERSHIP_EMAIL} and include:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team replies within 24-48 hours and can complete the cancellation process for you.`;
 }
 
 function buildLookupCandidates(lookupRequest, rawUserMessage) {
