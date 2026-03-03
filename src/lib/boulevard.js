@@ -659,6 +659,13 @@ function buildProfile(d) {
     totalServiceDiscounts: readFirstFinite(d, ['totalServiceDiscounts', 'serviceDiscountTotal']) || null,
     totalRetailDiscounts: readFirstFinite(d, ['totalRetailDiscounts', 'retailDiscountTotal', 'productDiscountTotal']) || null,
     totalAddonDiscounts: readFirstFinite(d, ['totalAddonDiscounts', 'addOnDiscountTotal', 'addonDiscountTotal']) || null,
+    firstTimePromoDiscounts: readFirstFinite(d, [
+      'firstTimePromoDiscounts',
+      'firstTimeUserPromoDiscounts',
+      'totalFirstTimePromoDiscounts',
+      'firstTimeDiscountTotal',
+      'firstVisitPromoDiscount',
+    ]) || null,
     facialsRedeemed: isFiniteNumber(d.facialsRedeemed) ? d.facialsRedeemed : null,
     appointmentCount: isFiniteNumber(d.appointmentCount) ? d.appointmentCount : null,
     avgVisitsPerMonth: isFiniteNumber(d.avgVisitsPerMonth) ? d.avgVisitsPerMonth : null,
@@ -707,7 +714,11 @@ function computeValues(p) {
   const retailDiscountSavings = isFiniteNumber(p.totalRetailDiscounts) ? roundCurrency(p.totalRetailDiscounts) : retailDiscountEstimate;
   const addonDiscountSavings = isFiniteNumber(p.totalAddonDiscounts) ? roundCurrency(p.totalAddonDiscounts) : addonDiscountEstimate;
   const serviceDiscountSavings = isFiniteNumber(p.totalServiceDiscounts) ? roundCurrency(p.totalServiceDiscounts) : serviceDiscountEstimate;
-  const explicitDiscountTotal = isFiniteNumber(p.totalDiscounts) ? roundCurrency(p.totalDiscounts) : null;
+  const firstTimePromoDiscounts = isFiniteNumber(p.firstTimePromoDiscounts) ? roundCurrency(p.firstTimePromoDiscounts) : 0;
+  const explicitDiscountTotalRaw = isFiniteNumber(p.totalDiscounts) ? roundCurrency(p.totalDiscounts) : null;
+  const explicitDiscountTotal = explicitDiscountTotalRaw !== null
+    ? Math.max(roundCurrency(explicitDiscountTotalRaw - firstTimePromoDiscounts) || 0, 0)
+    : null;
   const memberDiscountSavingsTotal = explicitDiscountTotal !== null
     ? explicitDiscountTotal
     : sumPositive([serviceDiscountSavings, retailDiscountSavings, addonDiscountSavings]);
@@ -722,6 +733,7 @@ function computeValues(p) {
     serviceDiscountSavings: serviceDiscountSavings !== null && serviceDiscountSavings > 0 ? serviceDiscountSavings : null,
     retailDiscountSavings: retailDiscountSavings !== null && retailDiscountSavings > 0 ? retailDiscountSavings : null,
     addonDiscountSavings: addonDiscountSavings !== null && addonDiscountSavings > 0 ? addonDiscountSavings : null,
+    excludedFirstTimePromoDiscounts: firstTimePromoDiscounts > 0 ? firstTimePromoDiscounts : null,
     discountSavingsConfidence: explicitDiscountTotal !== null ? 'high' : (memberDiscountSavingsTotal !== null ? 'estimated' : 'unknown'),
     nextPerk,
     loyaltyRedeemable,
@@ -758,6 +770,7 @@ function formatProfileForPrompt(profile) {
     `Service Discount Savings: ${isFiniteNumber(c.serviceDiscountSavings) ? `$${c.serviceDiscountSavings}` : 'UNKNOWN'}`,
     `Retail Discount Savings: ${isFiniteNumber(c.retailDiscountSavings) ? `$${c.retailDiscountSavings}` : 'UNKNOWN'}`,
     `Add-on Discount Savings: ${isFiniteNumber(c.addonDiscountSavings) ? `$${c.addonDiscountSavings}` : 'UNKNOWN'}`,
+    `Excluded First-Time Promo Discounts: ${isFiniteNumber(c.excludedFirstTimePromoDiscounts) ? `$${c.excludedFirstTimePromoDiscounts}` : 'None or unknown'}`,
     '',
     `Facials Redeemed: ${isFiniteNumber(profile.facialsRedeemed) ? profile.facialsRedeemed : 'UNKNOWN'}`,
     `Average Visits/Month: ${isFiniteNumber(profile.avgVisitsPerMonth) ? profile.avgVisitsPerMonth : 'UNKNOWN'}`,
