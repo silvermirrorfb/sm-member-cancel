@@ -22,6 +22,7 @@ const MAX_RECOVERY_MESSAGE_CHARS = 2000;
 const MAX_RECOVERY_TOTAL_CHARS = 30000;
 const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
+const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
 
 function formatMoney(value) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -30,6 +31,25 @@ function formatMoney(value) {
 
 function pluralizeMonths(months) {
     return `${months} month${months === 1 ? '' : 's'}`;
+}
+
+function hashText(text) {
+    const source = String(text || '');
+    let hash = 0;
+    for (let i = 0; i < source.length; i++) {
+          hash = (hash * 31 + source.charCodeAt(i)) >>> 0;
+    }
+    return hash;
+}
+
+function pickVariant(options, seed) {
+    if (!Array.isArray(options) || options.length === 0) return '';
+    const index = hashText(seed) % options.length;
+    return options[index];
+}
+
+function hasSensitiveContext(text) {
+    return SENSITIVE_CONTEXT_KEYWORDS.test(String(text || '').toLowerCase());
 }
 
 function formatMonthYear(isoDate) {
@@ -41,28 +61,53 @@ function formatMonthYear(isoDate) {
 
 function buildPostLookupGreeting(profile, rawUserMessage) {
     const firstName = String(profile?.firstName || profile?.name?.split(' ')[0] || 'there').trim();
+    const rawText = String(rawUserMessage || '');
+    const seed = `${firstName}|${profile?.email || ''}|${profile?.phone || ''}|${profile?.memberSince || ''}|${rawText.toLowerCase()}`;
     const sentences = [];
 
     const tierLabel = profile?.tier ? `${profile.tier}-Minute Membership` : null;
     const rateLabel = typeof profile?.monthlyRate === 'number' ? `${formatMoney(profile.monthlyRate)}/month` : null;
     const location = profile?.location && profile.location !== 'Unknown' ? profile.location : null;
+    const intro = pickVariant([
+          `Thanks, ${firstName}. I found your membership.`,
+          `Thanks, ${firstName}. I pulled up your membership details.`,
+          `Great, ${firstName}. I found your membership.`,
+    ], `${seed}|intro`);
+    const detailLead = pickVariant([
+          'Quick snapshot:',
+          'Here is what I am seeing:',
+          'Current details:',
+    ], `${seed}|detail`);
+    const membershipVerb = pickVariant([
+          'You are on',
+          'You are currently on',
+          'Right now you are on',
+    ], `${seed}|membership_verb`);
 
     if (tierLabel && rateLabel && location) {
-          sentences.push(`Thanks, ${firstName}. I found your membership.`);
-          sentences.push(`You're on the ${tierLabel} at ${location} for ${rateLabel}.`);
+          sentences.push(intro);
+          sentences.push(`${detailLead} ${membershipVerb} the ${tierLabel} at ${location} for ${rateLabel}.`);
     } else if (tierLabel && rateLabel) {
-          sentences.push(`Thanks, ${firstName}. I found your membership.`);
-          sentences.push(`You're on the ${tierLabel} for ${rateLabel}.`);
+          sentences.push(intro);
+          sentences.push(`${detailLead} ${membershipVerb} the ${tierLabel} for ${rateLabel}.`);
     } else if (tierLabel && location) {
-          sentences.push(`Thanks, ${firstName}. I found your membership.`);
-          sentences.push(`You're on the ${tierLabel} at ${location}.`);
+          sentences.push(intro);
+          sentences.push(`${detailLead} ${membershipVerb} the ${tierLabel} at ${location}.`);
     } else if (tierLabel) {
-          sentences.push(`Thanks, ${firstName}. I found your membership.`);
-          sentences.push(`You're on the ${tierLabel}.`);
+          sentences.push(intro);
+          sentences.push(`${detailLead} ${membershipVerb} the ${tierLabel}.`);
     } else if (location) {
-          sentences.push(`Thanks, ${firstName}. I found your account at ${location}.`);
+          sentences.push(pickVariant([
+                `Thanks, ${firstName}. I found your account at ${location}.`,
+                `Thanks, ${firstName}. I located your account at ${location}.`,
+                `Great, ${firstName}. I found your account at ${location}.`,
+          ], `${seed}|location_only`));
     } else {
-          sentences.push(`Thanks, ${firstName}. I found your account.`);
+          sentences.push(pickVariant([
+                `Thanks, ${firstName}. I found your account.`,
+                `Great, ${firstName}. I located your account.`,
+                `Thanks, ${firstName}. I pulled up your account.`,
+          ], `${seed}|account_only`));
     }
 
     const memberSince = formatMonthYear(profile?.memberSince);
@@ -105,10 +150,25 @@ function buildPostLookupGreeting(profile, rawUserMessage) {
           }
     }
 
-    if (CANCELLATION_KEYWORDS.test(String(rawUserMessage || '').toLowerCase())) {
-          sentences.push("If you're open to sharing, what's making you think about canceling?");
+    if (CANCELLATION_KEYWORDS.test(rawText.toLowerCase())) {
+          if (hasSensitiveContext(rawText)) {
+                sentences.push(pickVariant([
+                      'Thanks for sharing that. If you are comfortable sharing more, what is the biggest reason you are considering cancellation right now?',
+                      'I hear you. If you are open to it, what is the main thing pushing you toward cancellation?',
+                ], `${seed}|cancel_sensitive`));
+          } else {
+                sentences.push(pickVariant([
+                      "If you're open to sharing, what's making you think about canceling?",
+                      'If you are open to sharing, what is the main reason you are considering cancellation?',
+                      'When you are ready, what is driving the cancellation decision for you?',
+                ], `${seed}|cancel`));
+          }
     } else {
-          sentences.push('What can I help with on your membership today?');
+          sentences.push(pickVariant([
+                'What can I help with on your membership today?',
+                'What would you like to handle on your membership today?',
+                'What can I support you with on your membership today?',
+          ], `${seed}|general`));
     }
 
     return sentences.join(' ');
@@ -116,12 +176,19 @@ function buildPostLookupGreeting(profile, rawUserMessage) {
 
 function buildLookupFailureMessage(firstName, attempt) {
     const namePrefix = firstName ? `${firstName}, ` : '';
+    const seed = `${firstName}|${attempt}`;
 
     if (attempt <= 1) {
-          return `${namePrefix}I couldn't find your account just yet. Sometimes a different email or phone format does the trick.\n\nCould you send one of these so I can re-check quickly?\n- A different email you may have used at signup\n- Your mobile number only (digits are fine)\n\nIf it's easier, you can also email ${MEMBERSHIP_EMAIL} with your full name and phone number.`;
+          return pickVariant([
+                `${namePrefix}I could not find your account just yet. Sometimes a different email or phone format does the trick.\n\nCould you send one of these so I can re-check quickly?\n- A different email you may have used at signup\n- Your mobile number only (digits are fine)\n\nIf it is easier, you can also email ${MEMBERSHIP_EMAIL} with your full name and phone number.`,
+                `${namePrefix}I am not seeing a match yet, but this usually resolves with one more try.\n\nPlease send one of these:\n- Another email you may have used\n- Your mobile number only (digits are fine)\n\nIf you prefer, email ${MEMBERSHIP_EMAIL} with your full name and phone number and the team can help.`,
+          ], `${seed}|fail_first`);
     }
 
-    return `${namePrefix}I still can't locate the account from chatbot search.\n\nPlease email ${MEMBERSHIP_EMAIL} and include:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team replies within 24-48 hours and can complete the cancellation process for you.`;
+    return pickVariant([
+          `${namePrefix}I still cannot locate the account in chatbot search.\n\nPlease email ${MEMBERSHIP_EMAIL} and include:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team replies within 24-48 hours and can complete the cancellation process for you.`,
+          `${namePrefix}I still do not see a reliable account match here.\n\nPlease email ${MEMBERSHIP_EMAIL} with:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team can locate the account and handle cancellation within 24-48 hours.`,
+    ], `${seed}|fail_second`);
 }
 
 function buildLookupCandidates(lookupRequest, rawUserMessage) {

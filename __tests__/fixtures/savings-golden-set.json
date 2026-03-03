@@ -1,0 +1,110 @@
+[
+  {
+    "id": "explicit_discounts_with_first_time_promo_excluded",
+    "profile": {
+      "tier": "30",
+      "monthlyRate": 79,
+      "facialsRedeemed": 10,
+      "totalDuesPaid": 790,
+      "totalDiscounts": 500,
+      "firstTimePromoDiscounts": 100
+    },
+    "expected": {
+      "rateLockAnnual": 240,
+      "memberDiscountSavingsTotal": 400,
+      "discountSavingsConfidence": "high"
+    }
+  },
+  {
+    "id": "explicit_discounts_without_promo",
+    "profile": {
+      "tier": "50",
+      "monthlyRate": 129,
+      "totalDiscounts": 220
+    },
+    "expected": {
+      "rateLockAnnual": 120,
+      "memberDiscountSavingsTotal": 220,
+      "discountSavingsConfidence": "high"
+    }
+  },
+  {
+    "id": "detailed_estimate_from_component_totals",
+    "profile": {
+      "tier": "30",
+      "monthlyRate": 79,
+      "facialsRedeemed": 6,
+      "totalRetailDiscounts": 55,
+      "totalAddonDiscounts": 45,
+      "totalServiceDiscounts": 120
+    },
+    "expected": {
+      "rateLockAnnual": 240,
+      "memberDiscountSavingsTotal": 220,
+      "discountSavingsConfidence": "estimated"
+    }
+  },
+  {
+    "id": "simple_20pct_fallback_from_known_spend",
+    "profile": {
+      "tier": "30",
+      "monthlyRate": 99,
+      "totalDuesPaid": 1000
+    },
+    "expected": {
+      "rateLockAnnual": null,
+      "memberDiscountSavingsTotal": 200,
+      "discountSavingsConfidence": "estimated_simple_20pct"
+    }
+  },
+  {
+    "id": "walkin_savings_positive",
+    "profile": {
+      "tier": "30",
+      "monthlyRate": 79,
+      "facialsRedeemed": 10,
+      "totalDuesPaid": 900
+    },
+    "expected": {
+      "walkinSavings": 290,
+      "rateLockAnnual": 240
+    }
+  },
+  {
+    "id": "walkin_savings_negative_hidden",
+    "profile": {
+      "tier": "30",
+      "monthlyRate": 99,
+      "facialsRedeemed": 5,
+      "totalDuesPaid": 2000
+    },
+    "expected": {
+      "walkinSavings": null,
+      "rateLockAnnual": null
+    }
+  },
+  {
+    "id": "first_time_promo_cannot_make_negative_total",
+    "profile": {
+      "tier": "30",
+      "monthlyRate": 99,
+      "totalDiscounts": 50,
+      "firstTimePromoDiscounts": 100
+    },
+    "expected": {
+      "memberDiscountSavingsTotal": null,
+      "discountSavingsConfidence": "high"
+    }
+  },
+  {
+    "id": "no_savings_data",
+    "profile": {
+      "tier": "30",
+      "monthlyRate": 99
+    },
+    "expected": {
+      "memberDiscountSavingsTotal": null,
+      "discountSavingsConfidence": "unknown"
+    }
+  }
+]
