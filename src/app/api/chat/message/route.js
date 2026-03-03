@@ -391,6 +391,7 @@ export async function POST(request) {
                             message: greeting,
                             sessionId,
                             memberIdentified: true,
+                            memberProfile: profile,
                 });
 
             } else {
@@ -430,6 +431,9 @@ export async function POST(request) {
               message: visibleResponse,
               sessionId,
       };
+      if (session.memberProfile) {
+              result.memberProfile = session.memberProfile;
+      }
 
       // If a session summary was generated, the membership conversation is ending
       if (summary) {

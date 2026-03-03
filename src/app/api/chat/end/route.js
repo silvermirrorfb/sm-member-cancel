@@ -6,6 +6,11 @@ import { processConversationEnd } from '../../../../lib/notify';
 const MAX_RECOVERY_MESSAGES = 60;
 const MAX_RECOVERY_MESSAGE_CHARS = 4000;
 
+function toFiniteNumberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function sanitizeRecoveredHistory(history) {
   if (!Array.isArray(history)) return [];
 
@@ -48,13 +53,25 @@ export async function POST(request) {
         addMessage(session.id, msg.role, msg.content);
       }
       // Restore member profile if provided by client
-      if (body.memberProfile) {
+      if (body.memberProfile && typeof body.memberProfile === 'object') {
         session.memberProfile = body.memberProfile;
         session.mode = 'membership';
       }
       // Use client-provided summary if available (avoids redundant Claude call)
-      if (body.summary) {
+      if (body.summary && typeof body.summary === 'object') {
         session.summary = body.summary;
+        if (!session.memberProfile) {
+          session.memberProfile = {
+            name: body.summary.client_name || 'Unknown',
+            email: body.summary.email || null,
+            phone: body.summary.phone || null,
+            location: body.summary.location || 'Unknown',
+            tier: body.summary.membership_tier || null,
+            monthlyRate: toFiniteNumberOrNull(body.summary.monthly_rate),
+            tenureMonths: toFiniteNumberOrNull(body.summary.tenure_months),
+          };
+          session.mode = 'membership';
+        }
       }
     }
 
@@ -65,6 +82,24 @@ export async function POST(request) {
         outcome: 'GENERAL',
         sessionMissing: true,
       });
+    }
+
+    // Also accept profile/summary hints on an existing session to avoid false GENERAL fallback.
+    if (!session.memberProfile && body.memberProfile && typeof body.memberProfile === 'object') {
+      session.memberProfile = body.memberProfile;
+      session.mode = 'membership';
+    } else if (!session.memberProfile && body.summary && typeof body.summary === 'object') {
+      session.memberProfile = {
+        name: body.summary.client_name || 'Unknown',
+        email: body.summary.email || null,
+        phone: body.summary.phone || null,
+        location: body.summary.location || 'Unknown',
+        tier: body.summary.membership_tier || null,
+        monthlyRate: toFiniteNumberOrNull(body.summary.monthly_rate),
+        tenureMonths: toFiniteNumberOrNull(body.summary.tenure_months),
+      };
+      session.mode = 'membership';
+      if (!session.summary) session.summary = body.summary;
     }
 
     // For general conversations (no member identified), just close cleanly

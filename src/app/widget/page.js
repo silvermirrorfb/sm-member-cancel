@@ -157,6 +157,7 @@ const styles = {
 export default function ChatWidget() {
     const [phase, setPhase] = useState('loading'); // loading, chat, ended
   const [sessionId, setSessionId] = useState(null);
+    const [memberProfile, setMemberProfile] = useState(null);
     const [messages, setMessages] = useState([]);
     const [inputVal, setInputVal] = useState('');
     const [loading, setLoading] = useState(false);
@@ -183,11 +184,13 @@ export default function ChatWidget() {
                         throw new Error(data?.error || 'Failed to start session');
                 }
                 setSessionId(data.sessionId);
+                setMemberProfile(null);
                 setMessages([{ role: 'bot', content: data.message }]);
                 setPhase('chat');
                 return true;
         } catch (err) {
                 setSessionId(null);
+                setMemberProfile(null);
                 setMessages([{
                           role: 'bot',
                           content: 'Unable to connect. Please call (888) 677-0055 for help.',
@@ -315,10 +318,16 @@ export default function ChatWidget() {
                     "I'm sorry, I wasn't able to generate a response. Please try again or call (888) 677-0055.";
 
           setMessages(prev => [...prev, { role: 'bot', content: botMessage }]);
+          if (data.memberProfile && typeof data.memberProfile === 'object') {
+                    setMemberProfile(data.memberProfile);
+          }
 
           if (data.conversationEnding) {
                     // Include history + summary for serverless recovery (P1-3)
                     const allMessages = [...messages, { role: 'user', content: text }, { role: 'bot', content: botMessage }];
+                    const profileForEnd = (data.memberProfile && typeof data.memberProfile === 'object')
+                              ? data.memberProfile
+                              : memberProfile;
                     await fetch(`${API_BASE}/end`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
@@ -326,6 +335,7 @@ export default function ChatWidget() {
                                           sessionId,
                                           history: allMessages,
                                           summary: data.summary || null,
+                                          memberProfile: profileForEnd || null,
                                 }),
                     });
                     setPhase('ended');
@@ -368,6 +378,7 @@ export default function ChatWidget() {
                                     body: JSON.stringify({
                                               sessionId,
                                               history,
+                                              memberProfile: memberProfile || null,
                                     }),
                           });
                 }
