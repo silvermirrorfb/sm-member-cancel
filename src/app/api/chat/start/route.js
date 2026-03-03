@@ -3,7 +3,7 @@ import { createSession } from '../../../../lib/sessions';
 import { logChatMessage } from '../../../../lib/notify';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
-const OPENING_MESSAGE = `Hi, I'm Silver Mirror's virtual assistant. I can help with facials, products, and memberships.\nHow can I help today?\n\nFor time sensitive help, call (888) 677-0055. For bookings, please use the "Book A Facial" button at silvermirror.com.`;
+const OPENING_MESSAGE = `Hi, I'm Silver Mirror's virtual assistant. I can help with facials, products, and memberships.\nHow can I help today?`;
 
 export async function POST(request) {
   try {
