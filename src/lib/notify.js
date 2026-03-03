@@ -1,5 +1,32 @@
 import nodemailer from 'nodemailer';
 
+function isNilLike(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed === '' || trimmed === 'null' || trimmed === 'undefined' || trimmed === 'nan';
+}
+
+function toSheetValue(value) {
+  return isNilLike(value) ? '' : value;
+}
+
+function toCurrencyCell(value, suffix = '') {
+  if (isNilLike(value)) return '';
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const n = Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
+    return `$${n}${suffix}`;
+  }
+
+  const s = String(value);
+  const match = s.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  if (!match) return '';
+  const parsed = Number(match[0]);
+  if (!Number.isFinite(parsed)) return '';
+  const n = Number.isInteger(parsed) ? String(parsed) : String(Number(parsed.toFixed(2)));
+  return `$${n}${suffix}`;
+}
+
 // ── Helper: Get authenticated Google Sheets client ──
 async function getSheetsClient() {
   const credentials = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -74,6 +101,9 @@ function buildSubjectLine(summary) {
 }
 
 function buildEmailBody(summary, transcript) {
+  const walkinSavingsText = toCurrencyCell(summary.walkin_savings) || 'N/A';
+  const rateLockSavingsText = toCurrencyCell(summary.rate_lock_savings_annual, '/year') || 'Rate matches current';
+
   return `
 ======================================
 SILVER MIRROR — CANCELLATION SESSION SUMMARY
@@ -91,8 +121,8 @@ Account Status: ${summary.account_status}
 
 MEMBER VALUE AT TIME OF CONVERSATION:
 - Loyalty points: ${summary.loyalty_points} points${summary.loyalty_redeemable ? ` (redeemable for ${summary.loyalty_redeemable})` : ''}
-- Walk-in savings: ${summary.walkin_savings ? `$${summary.walkin_savings}` : 'N/A'}
-- Rate lock savings: ${summary.rate_lock_savings_annual ? `$${summary.rate_lock_savings_annual}/year` : 'Rate matches current'}
+- Walk-in savings: ${walkinSavingsText}
+- Rate lock savings: ${rateLockSavingsText}
 - Unused credits: ${summary.unused_credits}
 - Next perk: Month ${summary.next_perk_month} — ${summary.next_perk_name} ($${summary.next_perk_value})
 - Perks claimed: ${summary.perks_claimed || 'None'}
@@ -128,12 +158,15 @@ ${transcript}
 
 function buildEmailHtml(summary, transcript) {
   const esc = (str) => String(str || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const walkinSavingsText = toCurrencyCell(summary.walkin_savings) || 'N/A';
+  const rateLockSavingsText = toCurrencyCell(summary.rate_lock_savings_annual, '/year') || 'Matches current';
 
   const outcomeColor = {
     'RETAINED': '#4CAF50',
     'CANCELLED': '#F44336',
     'MANAGER_CALLBACK': '#FF9800',
     'REFERRED': '#2196F3',
+    'INCOMPLETE': '#666',
   }[summary.outcome] || '#666';
 
   return `
@@ -176,8 +209,8 @@ function buildEmailHtml(summary, transcript) {
     <h3>Value at Risk</h3>
     <table>
       <tr><td class="label">Loyalty Points</td><td>${esc(summary.loyalty_points)}${summary.loyalty_redeemable ? ` (${esc(summary.loyalty_redeemable)})` : ''}</td></tr>
-      <tr><td class="label">Walk-in Savings</td><td>${summary.walkin_savings ? `$${esc(summary.walkin_savings)}` : 'N/A'}</td></tr>
-      <tr><td class="label">Rate Lock Savings</td><td>${summary.rate_lock_savings_annual ? `$${esc(summary.rate_lock_savings_annual)}/year` : 'Matches current'}</td></tr>
+      <tr><td class="label">Walk-in Savings</td><td>${esc(walkinSavingsText)}</td></tr>
+      <tr><td class="label">Rate Lock Savings</td><td>${esc(rateLockSavingsText)}</td></tr>
       <tr><td class="label">Unused Credits</td><td>${esc(summary.unused_credits)}</td></tr>
       <tr><td class="label">Next Perk</td><td>Month ${esc(summary.next_perk_month)}: ${esc(summary.next_perk_name)} ($${esc(summary.next_perk_value)})</td></tr>
     </table>
@@ -236,28 +269,28 @@ async function logToGoogleSheets(summary) {
 
     // 22 columns: A-V matching headers in the Cancellations sheet
     const row = [
-      summary.date || new Date().toISOString(),                              // A: Date
-      summary.sheet_month || new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }), // B: Month
-      summary.client_name || '',                                              // C: Client Name
-      summary.phone || '',                                                    // D: Phone
-      summary.location || '',                                                 // E: Location
-      summary.membership_tier || '',                                          // F: Tier
-      summary.monthly_rate || '',                                             // G: Monthly Rate
-      summary.tenure_months || '',                                            // H: Tenure (Months)
-      summary.reason_primary || '',                                           // I: V1 (Primary Reason)
-      summary.reason_secondary || '',                                         // J: Secondary Reason
-      summary.reason_verbatim || '',                                          // K: Member's Words
-      summary.outcome || '',                                                  // L: Outcome
-      summary.offer_accepted || '',                                           // M: Offer Accepted
-      (summary.offers_presented || []).join(' → ') || '',                      // N: Offers Presented
-      summary.action_required || '',                                          // O: Action Required
-      summary.cost_to_company || '',                                          // P: Cost to SM
-      summary.member_sentiment || '',                                         // Q: Member Sentiment
-      summary.loyalty_points || '',                                           // R: Loyalty Points
-      summary.walkin_savings ? `$${summary.walkin_savings}` : '',             // S: Walk-in Savings
-      summary.rate_lock_savings_annual ? `$${summary.rate_lock_savings_annual}/yr` : '', // T: Rate Lock Savings
-      summary.unused_credits || '',                                           // U: Unused Credits
-      summary.lead_recommended || '',                                         // V: Lead Recommended
+      toSheetValue(summary.date) || new Date().toISOString(),                 // A: Date
+      toSheetValue(summary.sheet_month) || new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }), // B: Month
+      toSheetValue(summary.client_name),                                      // C: Client Name
+      toSheetValue(summary.phone),                                            // D: Phone
+      toSheetValue(summary.location),                                         // E: Location
+      toSheetValue(summary.membership_tier),                                  // F: Tier
+      toSheetValue(summary.monthly_rate),                                     // G: Monthly Rate
+      toSheetValue(summary.tenure_months),                                    // H: Tenure (Months)
+      toSheetValue(summary.reason_primary),                                   // I: V1 (Primary Reason)
+      toSheetValue(summary.reason_secondary),                                 // J: Secondary Reason
+      toSheetValue(summary.reason_verbatim),                                  // K: Member's Words
+      toSheetValue(summary.outcome),                                          // L: Outcome
+      toSheetValue(summary.offer_accepted),                                   // M: Offer Accepted
+      toSheetValue((summary.offers_presented || []).join(' → ')),             // N: Offers Presented
+      toSheetValue(summary.action_required),                                  // O: Action Required
+      toSheetValue(summary.cost_to_company),                                  // P: Cost to SM
+      toSheetValue(summary.member_sentiment),                                 // Q: Member Sentiment
+      toSheetValue(summary.loyalty_points),                                   // R: Loyalty Points
+      toCurrencyCell(summary.walkin_savings),                                 // S: Walk-in Savings
+      toCurrencyCell(summary.rate_lock_savings_annual, '/yr'),                // T: Rate Lock Savings
+      toSheetValue(summary.unused_credits),                                   // U: Unused Credits
+      toSheetValue(summary.lead_recommended),                                 // V: Lead Recommended
     ];
 
     await sheets.spreadsheets.values.append({

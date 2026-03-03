@@ -123,7 +123,7 @@ export async function POST(request) {
           reason_primary: 'Session ended without clear reason',
           reason_secondary: null,
           reason_verbatim: 'Conversation incomplete or abandoned',
-          outcome: 'REFERRED',
+          outcome: 'INCOMPLETE',
           offer_accepted: null,
           commitment_disclosed: false,
           lead_recommended: null,
@@ -133,7 +133,7 @@ export async function POST(request) {
           cost_to_company: '$0',
           member_sentiment: 'unknown',
           sheet_month: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }),
-          sheet_solution: 'Referred to team \u2014 incomplete session',
+          sheet_solution: 'Incomplete session \u2014 review transcript and follow up',
         };
       }
     }
