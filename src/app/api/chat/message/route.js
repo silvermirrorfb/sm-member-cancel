@@ -25,7 +25,7 @@ const SUPPORT_PHONE = '(888) 677-0055';
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
 const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
 const BOOKING_CONTEXT_KEYWORDS = /\b(book|booking|appointment|calendar|checkout|payment|credit card|billing|cvv|cvc|zip(?:\s*code)?|widget)\b/i;
-const ISSUE_CONTEXT_KEYWORDS = /\b(error|issue|problem|fail(?:ed)?|freeze|frozen|not loading|cannot|can't|wont|won't|stuck|broken)\b/i;
+const ISSUE_CONTEXT_KEYWORDS = /\b(error|issue|problem|fail(?:ed|s|ing)?|freez(?:e[sd]?|ing)|frozen|not loading|cannot|can't|wont|won't|stuck|broken|crash(?:e[sd]?|ing)?|glitch(?:e[sd]?|ing)?)\b/i;
 const LOCATION_CANDIDATES = [
   'Upper East Side', 'Flatiron', 'Bryant Park', 'Manhattan West', 'Upper West Side',
   'Dupont Circle', 'Navy Yard', 'Penn Quarter', 'Brickell', 'Coral Gables',
