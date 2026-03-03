@@ -9,7 +9,7 @@ import {
     stripAllSystemTags,
 } from '../../../../lib/claude';
 import { lookupMember, formatProfileForPrompt, verifyMemberIdentity } from '../../../../lib/boulevard';
-import { logChatMessage } from '../../../../lib/notify';
+import { logChatMessage, logSupportIncident } from '../../../../lib/notify';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
 // Friendly message shown when Claude API is rate-limited
@@ -21,8 +21,15 @@ const MAX_RECOVERY_MESSAGES = 40;
 const MAX_RECOVERY_MESSAGE_CHARS = 2000;
 const MAX_RECOVERY_TOTAL_CHARS = 30000;
 const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
+const SUPPORT_PHONE = '(888) 677-0055';
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
 const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
+const BOOKING_CONTEXT_KEYWORDS = /\b(book|booking|appointment|calendar|checkout|payment|credit card|billing|cvv|cvc|zip(?:\s*code)?|widget)\b/i;
+const ISSUE_CONTEXT_KEYWORDS = /\b(error|issue|problem|fail(?:ed)?|freeze|frozen|not loading|cannot|can't|wont|won't|stuck|broken)\b/i;
+const LOCATION_CANDIDATES = [
+  'Upper East Side', 'Flatiron', 'Bryant Park', 'Manhattan West', 'Upper West Side',
+  'Dupont Circle', 'Navy Yard', 'Penn Quarter', 'Brickell', 'Coral Gables',
+];
 
 function formatMoney(value) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -57,6 +64,45 @@ function formatMonthYear(isoDate) {
     const d = new Date(isoDate);
     if (Number.isNaN(d.getTime())) return null;
     return d.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+
+function isBookingPaymentIncident(text) {
+    const input = String(text || '').toLowerCase();
+    return BOOKING_CONTEXT_KEYWORDS.test(input) && ISSUE_CONTEXT_KEYWORDS.test(input);
+}
+
+function extractEmail(text) {
+    const match = String(text || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    return match ? match[0].toLowerCase() : null;
+}
+
+function extractPhone(text) {
+    const match = String(text || '').match(/\+?\d[\d\s().-]{8,}\d/);
+    if (!match) return null;
+    const digits = match[0].replace(/\D/g, '');
+    return digits.length >= 10 ? digits : null;
+}
+
+function extractName(text) {
+    const input = String(text || '');
+    const explicit = input.match(/\bmy name is\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i);
+    if (explicit) return explicit[1].trim();
+    const pair = input.match(/\b([A-Z][a-zA-Z'-]{1,})\s+([A-Z][a-zA-Z'-]{1,})\b/);
+    return pair ? `${pair[1]} ${pair[2]}` : null;
+}
+
+function extractLocation(text) {
+    const input = String(text || '').toLowerCase();
+    const hit = LOCATION_CANDIDATES.find(loc => input.includes(loc.toLowerCase()));
+    return hit || null;
+}
+
+function buildSupportIncidentResponse() {
+    return [
+      "Thanks for flagging this. I've alerted our QA team and logged this issue for follow-up.",
+      `We aim to respond within 48 hours. The fastest way to get help is to call ${SUPPORT_PHONE}.`,
+      'If you can, please share your location, device/browser, and a screenshot so we can troubleshoot faster.',
+    ].join(' ');
 }
 
 function buildPostLookupGreeting(profile, rawUserMessage) {
@@ -370,6 +416,40 @@ export async function POST(request) {
           logChatMessage(sessionId, sessionCreated, 'user', sanitizedMessage).catch(err =>
                   console.warn('Chatlog failed for user message:', err)
                                                                                );
+
+      // Booking/payment incident fast-path: auto-alert QA + write to support sheet
+      if (!session.memberProfile && session.mode !== 'membership' && isBookingPaymentIncident(sanitizedMessage)) {
+            const incident = {
+                  date: new Date().toISOString(),
+                  session_id: sessionId,
+                  issue_type: 'booking_payment_issue',
+                  name: extractName(sanitizedMessage),
+                  email: extractEmail(sanitizedMessage),
+                  phone: extractPhone(sanitizedMessage),
+                  location: extractLocation(sanitizedMessage),
+                  user_message: sanitizedMessage,
+            };
+
+            let supportNotifications = null;
+            try {
+                  supportNotifications = await logSupportIncident(incident);
+            } catch (err) {
+                  console.error('Support incident logging failed:', err);
+            }
+
+            const supportResponse = buildSupportIncidentResponse();
+            addMessage(sessionId, 'assistant', supportResponse);
+            logChatMessage(sessionId, sessionCreated, 'assistant', supportResponse).catch(err =>
+                console.warn('Chatlog failed for support incident response:', err)
+            );
+
+            return NextResponse.json({
+                  message: supportResponse,
+                  sessionId,
+                  supportIncident: true,
+                  supportNotifications,
+            });
+      }
 
       // Determine which system prompt to use
       const systemPrompt = session.systemPrompt || getSystemPrompt();

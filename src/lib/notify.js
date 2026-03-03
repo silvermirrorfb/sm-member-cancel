@@ -1,5 +1,7 @@
 import nodemailer from 'nodemailer';
 
+const DEFAULT_SUPPORT_INCIDENT_SHEET_ID = '15Wame-TJbihEAKEnlL51rhSWRsiVpehz7RO1Gsa9s4c';
+
 function isNilLike(value) {
   if (value === null || value === undefined) return true;
   if (typeof value !== 'string') return false;
@@ -39,6 +41,15 @@ async function getSheetsClient() {
   });
 
   return google.sheets({ version: 'v4', auth });
+}
+
+async function getFirstSheetTitle(sheets, spreadsheetId) {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets(properties(title,index))',
+  });
+  const sheet = meta?.data?.sheets?.[0];
+  return sheet?.properties?.title || 'Sheet1';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -85,6 +96,59 @@ async function sendSummaryEmail(summary, transcript) {
     return { sent: true };
   } catch (err) {
     console.error('Email send failed:', err);
+    return { sent: false, reason: err.message };
+  }
+}
+
+async function sendSupportIncidentEmail(incident) {
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT || '587');
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.EMAIL_FROM || 'info@silvermirror.com';
+  const to = process.env.EMAIL_QA_ALERT || 'qatesting@silvermirror.com';
+
+  if (!host || !user || !pass) {
+    console.warn('SMTP not configured — support incident email not sent for session:', incident.session_id);
+    return { sent: false, reason: 'SMTP not configured' };
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+
+  const subject = `[Chatbot Incident] ${incident.issue_type} — session ${incident.session_id}`;
+  const body = `
+New chatbot booking/payment incident detected.
+
+Date: ${incident.date}
+Session ID: ${incident.session_id}
+Issue Type: ${incident.issue_type}
+Name: ${incident.name || 'Not provided'}
+Email: ${incident.email || 'Not provided'}
+Phone: ${incident.phone || 'Not provided'}
+Location Mentioned: ${incident.location || 'Not provided'}
+User Message:
+${incident.user_message}
+
+SLA Shared With Guest: 48 hours
+Fastest Path Shared With Guest: Call (888) 677-0055
+`.trim();
+
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text: body,
+      html: `<pre style="font-family:Arial, sans-serif; white-space:pre-wrap;">${body.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`,
+    });
+    return { sent: true };
+  } catch (err) {
+    console.error('Support incident email send failed:', err);
     return { sent: false, reason: err.message };
   }
 }
@@ -348,6 +412,59 @@ async function logChatMessage(sessionId, sessionCreated, role, content) {
   }
 }
 
+async function logSupportIncidentToGoogleSheets(incident) {
+  const sheetId = process.env.GOOGLE_SUPPORT_INCIDENT_SHEET_ID || DEFAULT_SUPPORT_INCIDENT_SHEET_ID;
+  if (!sheetId) {
+    console.warn('GOOGLE_SUPPORT_INCIDENT_SHEET_ID not configured — skipping support incident log');
+    return { logged: false, reason: 'Not configured' };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
+
+    const tabTitle = await getFirstSheetTitle(sheets, sheetId);
+    const row = [
+      toSheetValue(incident.date),           // A: Date
+      toSheetValue(incident.session_id),     // B: Session ID
+      toSheetValue(incident.issue_type),     // C: Issue Type
+      toSheetValue(incident.name),           // D: Name
+      toSheetValue(incident.email),          // E: Email
+      toSheetValue(incident.phone),          // F: Phone
+      toSheetValue(incident.location),       // G: Location Mentioned
+      toSheetValue(incident.user_message),   // H: User Message
+      'Open',                                // I: Status
+      'Chatbot',                             // J: Source
+      '48 hours',                            // K: SLA Shared
+      '(888) 677-0055',                      // L: Fastest Path
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: `${tabTitle}!A:L`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [row] },
+    });
+
+    return { logged: true };
+  } catch (err) {
+    console.error('Support incident sheet logging failed:', err);
+    return { logged: false, reason: err.message };
+  }
+}
+
+async function logSupportIncident(incident) {
+  const [emailResult, sheetResult] = await Promise.allSettled([
+    sendSupportIncidentEmail(incident),
+    logSupportIncidentToGoogleSheets(incident),
+  ]);
+
+  return {
+    email: emailResult.status === 'fulfilled' ? emailResult.value : { sent: false, reason: emailResult.reason?.message },
+    sheet: sheetResult.status === 'fulfilled' ? sheetResult.value : { logged: false, reason: sheetResult.reason?.message },
+  };
+}
+
 // ══════════════════════════════════════════════════════════════
 // COMBINED: Process end of membership conversation
 // ══════════════════════════════════════════════════════════════
@@ -368,5 +485,6 @@ export {
   sendSummaryEmail,
   logToGoogleSheets,
   logChatMessage,
+  logSupportIncident,
   processConversationEnd,
 };
