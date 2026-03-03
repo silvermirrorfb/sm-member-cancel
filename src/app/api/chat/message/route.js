@@ -75,11 +75,20 @@ function buildPostLookupGreeting(profile, rawUserMessage) {
     }
 
     const computed = profile?.computed || {};
+    let highlightedValue = false;
     if (typeof computed.rateLockAnnual === 'number' && computed.rateLockAnnual > 0) {
           sentences.push(`Your current rate is about ${formatMoney(computed.rateLockAnnual)}/year lower than today's new-member pricing.`);
+          highlightedValue = true;
+    }
+    if (typeof computed.memberDiscountSavingsTotal === 'number' && computed.memberDiscountSavingsTotal > 0) {
+          const estimateSuffix = computed.discountSavingsConfidence === 'estimated' ? ' (estimated)' : '';
+          sentences.push(`You've also saved about ${formatMoney(computed.memberDiscountSavingsTotal)} through member discounts on services and products${estimateSuffix}.`);
+          highlightedValue = true;
     } else if (typeof computed.walkinSavings === 'number' && computed.walkinSavings > 0) {
           sentences.push(`You've saved about ${formatMoney(computed.walkinSavings)} versus walk-in pricing so far.`);
-    } else if (profile?.loyaltyEnrolled === true && typeof profile?.loyaltyPoints === 'number' && Number.isFinite(profile.loyaltyPoints)) {
+          highlightedValue = true;
+    }
+    if (!highlightedValue && profile?.loyaltyEnrolled === true && typeof profile?.loyaltyPoints === 'number' && Number.isFinite(profile.loyaltyPoints)) {
           sentences.push(`You currently have ${profile.loyaltyPoints} loyalty points.`);
     }
 

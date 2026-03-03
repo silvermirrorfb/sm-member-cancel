@@ -13,8 +13,10 @@ const MEMBERSHIP_SCAN_PAGE_SIZE = 200;
 const MEMBERSHIP_SCAN_MAX_PAGES = 120;
 const MEMBERSHIP_CACHE_TTL_MS = 30 * 60 * 1000;
 const MEMBERSHIP_NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
+const CLIENT_FIELD_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 const membershipCache = new Map();
+const clientFieldCache = new Map();
 
 const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
 const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
@@ -112,6 +114,32 @@ function toIsoDate(value) {
 
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
+}
+
+function roundCurrency(value) {
+  if (!isFiniteNumber(value)) return null;
+  return Math.round(value * 100) / 100;
+}
+
+function readFirstFinite(source, keys) {
+  for (const key of keys) {
+    const raw = source?.[key];
+    const num = typeof raw === 'string' ? Number(raw) : raw;
+    if (isFiniteNumber(num)) return num;
+  }
+  return null;
+}
+
+function sumPositive(values) {
+  let total = 0;
+  let found = false;
+  for (const value of values) {
+    if (isFiniteNumber(value) && value > 0) {
+      total += value;
+      found = true;
+    }
+  }
+  return found ? roundCurrency(total) : null;
 }
 
 function parseTierFromText(text) {
@@ -280,7 +308,7 @@ function verifyMemberIdentity(lookupRequest, profile) {
   return Boolean(emailMatches || phoneMatches);
 }
 
-async function fetchBoulevardGraphQL(apiUrl, headers, query, variables) {
+async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options = {}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
   let response;
@@ -315,7 +343,9 @@ async function fetchBoulevardGraphQL(apiUrl, headers, query, variables) {
   }
 
   if (data.errors) {
-    console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
+    if (!options.silentErrors) {
+      console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
+    }
     return null;
   }
 
@@ -432,6 +462,84 @@ async function findMembershipForClient(apiUrl, headers, clientId) {
   return best || null;
 }
 
+async function getClientTypeFieldSet(apiUrl, headers) {
+  const cached = clientFieldCache.get(apiUrl);
+  if (cached && cached.expiresAt > Date.now()) return cached.fields;
+
+  const query = `
+    query IntrospectClientType {
+      __type(name: "Client") {
+        fields {
+          name
+        }
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(apiUrl, headers, query, {}, { silentErrors: true });
+  const fields = data?.data?.__type?.fields;
+
+  if (!Array.isArray(fields) || fields.length === 0) {
+    clientFieldCache.set(apiUrl, { fields: null, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
+    return null;
+  }
+
+  const fieldSet = new Set(fields.map(f => String(f?.name || '').trim()).filter(Boolean));
+  clientFieldCache.set(apiUrl, { fields: fieldSet, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
+  return fieldSet;
+}
+
+async function fetchClientCommerceMetrics(apiUrl, headers, clientNode) {
+  const clientEmail = String(clientNode?.email || '').trim().toLowerCase();
+  if (!clientEmail) return null;
+
+  const fieldSet = await getClientTypeFieldSet(apiUrl, headers);
+  if (!fieldSet) return null;
+
+  const preferredFields = [
+    'totalDuesPaid',
+    'totalRetailPurchases',
+    'totalAddonPurchases',
+    'facialsRedeemed',
+    'paymentsProcessed',
+    'loyaltyPoints',
+    'loyaltyEnrolled',
+    'avgVisitsPerMonth',
+    'lastVisitDate',
+    'mostPurchasedAddon',
+    'unusedCredits',
+  ];
+  const discountFields = [...fieldSet].filter(name => /(discount|saving)/i.test(name));
+  const selected = [...new Set([...preferredFields, ...discountFields])].filter(name => fieldSet.has(name));
+  if (selected.length === 0) return null;
+
+  const query = `
+    query FetchClientCommerceByEmail($emails: [String!]) {
+      clients(first: 5, emails: $emails) {
+        edges {
+          node {
+            id
+            ${selected.join('\n            ')}
+          }
+        }
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(
+    apiUrl,
+    headers,
+    query,
+    { emails: [clientEmail] },
+    { silentErrors: true },
+  );
+  if (!data) return null;
+
+  const edges = data?.data?.clients?.edges || [];
+  const matched =
+    edges.find(edge => String(edge?.node?.id || '') === String(clientNode?.id || '')) ||
+    edges[0];
+  return matched?.node || null;
+}
+
 async function lookupMember(name, emailOrPhone) {
   const apiKey = process.env.BOULEVARD_API_KEY;
   const apiSecret = process.env.BOULEVARD_API_SECRET;
@@ -505,8 +613,10 @@ async function lookupMember(name, emailOrPhone) {
     if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
     console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName}`);
     const membership = await findMembershipForClient(apiUrl, headers, match.node.id);
+    const commerce = await fetchClientCommerceMetrics(apiUrl, headers, match.node);
     const source = membership ? {
       ...match.node,
+      ...(commerce || {}),
       membershipName: membership.name,
       membershipStartDate: membership.startOn,
       membershipStatus: membership.status,
@@ -514,7 +624,10 @@ async function lookupMember(name, emailOrPhone) {
       nextChargeDate: membership.nextChargeDate,
       unitPrice: membership.unitPrice,
       location: membership?.location?.name || match.node?.primaryLocation?.name || match.node.location,
-    } : match.node;
+    } : {
+      ...match.node,
+      ...(commerce || {}),
+    };
     return buildProfile(source);
   } catch (err) { console.error('Boulevard API error:', err.message || err); return null; }
 }
@@ -542,6 +655,10 @@ function buildProfile(d) {
     totalDuesPaid: isFiniteNumber(d.totalDuesPaid) ? d.totalDuesPaid : null,
     totalRetailPurchases: isFiniteNumber(d.totalRetailPurchases) ? d.totalRetailPurchases : null,
     totalAddonPurchases: isFiniteNumber(d.totalAddonPurchases) ? d.totalAddonPurchases : null,
+    totalDiscounts: readFirstFinite(d, ['totalDiscounts', 'totalDiscountAmount', 'discountTotal', 'lifetimeDiscountTotal', 'totalSavings']) || null,
+    totalServiceDiscounts: readFirstFinite(d, ['totalServiceDiscounts', 'serviceDiscountTotal']) || null,
+    totalRetailDiscounts: readFirstFinite(d, ['totalRetailDiscounts', 'retailDiscountTotal', 'productDiscountTotal']) || null,
+    totalAddonDiscounts: readFirstFinite(d, ['totalAddonDiscounts', 'addOnDiscountTotal', 'addonDiscountTotal']) || null,
     facialsRedeemed: isFiniteNumber(d.facialsRedeemed) ? d.facialsRedeemed : null,
     appointmentCount: isFiniteNumber(d.appointmentCount) ? d.appointmentCount : null,
     avgVisitsPerMonth: isFiniteNumber(d.avgVisitsPerMonth) ? d.avgVisitsPerMonth : null,
@@ -570,12 +687,42 @@ function computeValues(p) {
     for (const lt of LOYALTY_TIERS) { if (p.loyaltyPoints >= lt.points) loyaltyRedeemable = lt; }
     for (const lt of LOYALTY_TIERS) { if (p.loyaltyPoints < lt.points) { loyaltyNextTier = { ...lt, pointsNeeded: lt.points - p.loyaltyPoints }; break; } }
   }
+
+  // Conservative purchase-based discount estimates when explicit totals are unavailable.
+  // retail: assume 10% effective discount baseline
+  // add-ons: member discount baseline is 20%
+  const retailDiscountEstimate = isFiniteNumber(p.totalRetailPurchases)
+    ? roundCurrency(p.totalRetailPurchases * (0.10 / 0.90))
+    : null;
+  const addonDiscountEstimate = isFiniteNumber(p.totalAddonPurchases)
+    ? roundCurrency(p.totalAddonPurchases * (0.20 / 0.80))
+    : null;
+  const perFacialServiceDiscount = wp !== null && isFiniteNumber(p.monthlyRate)
+    ? Math.max(wp - p.monthlyRate, 0)
+    : null;
+  const serviceDiscountEstimate = isFiniteNumber(perFacialServiceDiscount) && isFiniteNumber(p.facialsRedeemed)
+    ? roundCurrency(perFacialServiceDiscount * p.facialsRedeemed)
+    : null;
+
+  const retailDiscountSavings = isFiniteNumber(p.totalRetailDiscounts) ? roundCurrency(p.totalRetailDiscounts) : retailDiscountEstimate;
+  const addonDiscountSavings = isFiniteNumber(p.totalAddonDiscounts) ? roundCurrency(p.totalAddonDiscounts) : addonDiscountEstimate;
+  const serviceDiscountSavings = isFiniteNumber(p.totalServiceDiscounts) ? roundCurrency(p.totalServiceDiscounts) : serviceDiscountEstimate;
+  const explicitDiscountTotal = isFiniteNumber(p.totalDiscounts) ? roundCurrency(p.totalDiscounts) : null;
+  const memberDiscountSavingsTotal = explicitDiscountTotal !== null
+    ? explicitDiscountTotal
+    : sumPositive([serviceDiscountSavings, retailDiscountSavings, addonDiscountSavings]);
+
   return {
     walkinSavings: ws !== null && ws > 0 ? ws : null,
     walkinPrice: wp,
     currentNewMemberRate: cr,
     rateDiff: rd,
     rateLockAnnual: rd !== null && rd > 0 ? rd * 12 : null,
+    memberDiscountSavingsTotal: memberDiscountSavingsTotal !== null && memberDiscountSavingsTotal > 0 ? memberDiscountSavingsTotal : null,
+    serviceDiscountSavings: serviceDiscountSavings !== null && serviceDiscountSavings > 0 ? serviceDiscountSavings : null,
+    retailDiscountSavings: retailDiscountSavings !== null && retailDiscountSavings > 0 ? retailDiscountSavings : null,
+    addonDiscountSavings: addonDiscountSavings !== null && addonDiscountSavings > 0 ? addonDiscountSavings : null,
+    discountSavingsConfidence: explicitDiscountTotal !== null ? 'high' : (memberDiscountSavingsTotal !== null ? 'estimated' : 'unknown'),
     nextPerk,
     loyaltyRedeemable,
     loyaltyNextTier,
@@ -607,6 +754,10 @@ function formatProfileForPrompt(profile) {
     `Total Membership Dues Paid: ${isFiniteNumber(profile.totalDuesPaid) ? `$${profile.totalDuesPaid}` : 'UNKNOWN'}`,
     `Total Retail Purchases: ${isFiniteNumber(profile.totalRetailPurchases) ? `$${profile.totalRetailPurchases}` : 'UNKNOWN'}`,
     `Total Add-on Purchases: ${isFiniteNumber(profile.totalAddonPurchases) ? `$${profile.totalAddonPurchases}` : 'UNKNOWN'}`,
+    `Member Discount Savings: ${isFiniteNumber(c.memberDiscountSavingsTotal) ? `$${c.memberDiscountSavingsTotal}${c.discountSavingsConfidence === 'estimated' ? ' (estimated from known purchase totals)' : ''}` : 'UNKNOWN — do not mention total discount savings'}`,
+    `Service Discount Savings: ${isFiniteNumber(c.serviceDiscountSavings) ? `$${c.serviceDiscountSavings}` : 'UNKNOWN'}`,
+    `Retail Discount Savings: ${isFiniteNumber(c.retailDiscountSavings) ? `$${c.retailDiscountSavings}` : 'UNKNOWN'}`,
+    `Add-on Discount Savings: ${isFiniteNumber(c.addonDiscountSavings) ? `$${c.addonDiscountSavings}` : 'UNKNOWN'}`,
     '',
     `Facials Redeemed: ${isFiniteNumber(profile.facialsRedeemed) ? profile.facialsRedeemed : 'UNKNOWN'}`,
     `Average Visits/Month: ${isFiniteNumber(profile.avgVisitsPerMonth) ? profile.avgVisitsPerMonth : 'UNKNOWN'}`,
@@ -650,6 +801,7 @@ function mockLookup(name, emailOrPhone) {
     location: 'Flatiron', membershipTier: '50', monthlyRate: 129, membershipStartDate: '2025-01-15',
     tenureMonths: 13, accountStatus: 'active', paymentsProcessed: 13, totalDuesPaid: 1677,
     totalRetailPurchases: 340, totalAddonPurchases: 285, facialsRedeemed: 11, avgVisitsPerMonth: 0.85,
+    totalRetailDiscounts: 37.78, totalAddonDiscounts: 71.25,
     lastVisitDate: '2026-02-10', mostPurchasedAddon: 'Dermaplaning', upcomingAppointments: ['2026-03-05 at 2pm'],
     loyaltyPoints: 1360, loyaltyEnrolled: true,
     perksClaimed: ['Month 2: Moisturizer', 'Month 4: HA Serum', 'Month 5: Hat', 'Month 6: Microcurrent', 'Month 9: Cleanser', 'Month 12: Formulas Bundle'],
