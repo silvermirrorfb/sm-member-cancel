@@ -390,6 +390,7 @@ Walk-in savings = (facials redeemed x walk-in price) - total dues paid. If posit
 Rate lock savings = (current new-member rate - their rate) x 12. If grandfathered, highlight. If matches, say rate is locked.
 Member discount savings = known or estimated savings from member pricing/discounts on services, add-ons, and products. Mention only when a numeric value is provided in profile data; if marked estimated, say it is an estimate.
 When available, first-time promo discounts are excluded from member discount savings.
+If only a simple estimate is available, use the provided "20% of known spend" estimate and label it as estimated.
 
 ---
 

@@ -719,9 +719,12 @@ function computeValues(p) {
   const explicitDiscountTotal = explicitDiscountTotalRaw !== null
     ? Math.max(roundCurrency(explicitDiscountTotalRaw - firstTimePromoDiscounts) || 0, 0)
     : null;
+  const detailedEstimateTotal = sumPositive([serviceDiscountSavings, retailDiscountSavings, addonDiscountSavings]);
+  const simpleSpendBasis = sumPositive([p.totalDuesPaid, p.totalRetailPurchases, p.totalAddonPurchases]);
+  const simpleTwentyPctSavingsEstimate = simpleSpendBasis !== null ? roundCurrency(simpleSpendBasis * 0.2) : null;
   const memberDiscountSavingsTotal = explicitDiscountTotal !== null
     ? explicitDiscountTotal
-    : sumPositive([serviceDiscountSavings, retailDiscountSavings, addonDiscountSavings]);
+    : (detailedEstimateTotal !== null ? detailedEstimateTotal : simpleTwentyPctSavingsEstimate);
 
   return {
     walkinSavings: ws !== null && ws > 0 ? ws : null,
@@ -734,7 +737,10 @@ function computeValues(p) {
     retailDiscountSavings: retailDiscountSavings !== null && retailDiscountSavings > 0 ? retailDiscountSavings : null,
     addonDiscountSavings: addonDiscountSavings !== null && addonDiscountSavings > 0 ? addonDiscountSavings : null,
     excludedFirstTimePromoDiscounts: firstTimePromoDiscounts > 0 ? firstTimePromoDiscounts : null,
-    discountSavingsConfidence: explicitDiscountTotal !== null ? 'high' : (memberDiscountSavingsTotal !== null ? 'estimated' : 'unknown'),
+    simpleTwentyPctSavingsEstimate: simpleTwentyPctSavingsEstimate !== null && simpleTwentyPctSavingsEstimate > 0 ? simpleTwentyPctSavingsEstimate : null,
+    discountSavingsConfidence: explicitDiscountTotal !== null
+      ? 'high'
+      : (detailedEstimateTotal !== null ? 'estimated' : (simpleTwentyPctSavingsEstimate !== null ? 'estimated_simple_20pct' : 'unknown')),
     nextPerk,
     loyaltyRedeemable,
     loyaltyNextTier,
@@ -766,10 +772,11 @@ function formatProfileForPrompt(profile) {
     `Total Membership Dues Paid: ${isFiniteNumber(profile.totalDuesPaid) ? `$${profile.totalDuesPaid}` : 'UNKNOWN'}`,
     `Total Retail Purchases: ${isFiniteNumber(profile.totalRetailPurchases) ? `$${profile.totalRetailPurchases}` : 'UNKNOWN'}`,
     `Total Add-on Purchases: ${isFiniteNumber(profile.totalAddonPurchases) ? `$${profile.totalAddonPurchases}` : 'UNKNOWN'}`,
-    `Member Discount Savings: ${isFiniteNumber(c.memberDiscountSavingsTotal) ? `$${c.memberDiscountSavingsTotal}${c.discountSavingsConfidence === 'estimated' ? ' (estimated from known purchase totals)' : ''}` : 'UNKNOWN — do not mention total discount savings'}`,
+    `Member Discount Savings: ${isFiniteNumber(c.memberDiscountSavingsTotal) ? `$${c.memberDiscountSavingsTotal}${c.discountSavingsConfidence === 'estimated_simple_20pct' ? ' (estimated as 20% of known spend)' : (c.discountSavingsConfidence === 'estimated' ? ' (estimated from known purchase totals)' : '')}` : 'UNKNOWN — do not mention total discount savings'}`,
     `Service Discount Savings: ${isFiniteNumber(c.serviceDiscountSavings) ? `$${c.serviceDiscountSavings}` : 'UNKNOWN'}`,
     `Retail Discount Savings: ${isFiniteNumber(c.retailDiscountSavings) ? `$${c.retailDiscountSavings}` : 'UNKNOWN'}`,
     `Add-on Discount Savings: ${isFiniteNumber(c.addonDiscountSavings) ? `$${c.addonDiscountSavings}` : 'UNKNOWN'}`,
+    `Simple 20% Savings Estimate: ${isFiniteNumber(c.simpleTwentyPctSavingsEstimate) ? `$${c.simpleTwentyPctSavingsEstimate}` : 'UNKNOWN'}`,
     `Excluded First-Time Promo Discounts: ${isFiniteNumber(c.excludedFirstTimePromoDiscounts) ? `$${c.excludedFirstTimePromoDiscounts}` : 'None or unknown'}`,
     '',
     `Facials Redeemed: ${isFiniteNumber(profile.facialsRedeemed) ? profile.facialsRedeemed : 'UNKNOWN'}`,
