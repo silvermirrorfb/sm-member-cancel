@@ -7,9 +7,8 @@ import crypto from 'crypto';
 
 const DEFAULT_API_URL = 'https://dashboard.boulevard.io/api/2020-01/admin';
 const BOULEVARD_TIMEOUT_MS = 15000;
-const PHONE_SCAN_PAGE_SIZE = 100;
-const PHONE_SCAN_MAX_PAGES = 120;
-const PHONE_SCAN_FALLBACK_PAGES = 25;
+const PHONE_SCAN_PAGE_SIZE = Number(process.env.BOULEVARD_PHONE_SCAN_PAGE_SIZE || 100);
+const PHONE_SCAN_MAX_PAGES = Number(process.env.BOULEVARD_PHONE_SCAN_MAX_PAGES || 300);
 const MEMBERSHIP_SCAN_PAGE_SIZE = 200;
 const MEMBERSHIP_SCAN_MAX_PAGES = 120;
 const MEMBERSHIP_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -329,11 +328,11 @@ function findNameMatch(name, clients) {
   ) || null;
 }
 
-async function findClientsByPhoneScan(apiUrl, headers, cleanPhone, maxPages = PHONE_SCAN_MAX_PAGES) {
+async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {
   const found = [];
   let after = null;
 
-  for (let page = 0; page < maxPages; page++) {
+  for (let page = 0; page < PHONE_SCAN_MAX_PAGES; page++) {
     const query = `
       query FindClientsByPhoneScan($after: String) {
         clients(first: ${PHONE_SCAN_PAGE_SIZE}, after: $after) {
@@ -376,58 +375,6 @@ async function findClientsByPhoneScan(apiUrl, headers, cleanPhone, maxPages = PH
 
   return found;
 }
-
-async function findClientsByPhoneDirect(apiUrl, headers, cleanPhone) {
-  const variants = [];
-  const addVariant = (value) => {
-    const v = String(value || '').trim();
-    if (!v) return;
-    if (!variants.includes(v)) variants.push(v);
-  };
-
-  addVariant(cleanPhone);
-  if (cleanPhone.length === 11 && cleanPhone.startsWith('1')) {
-    const local = cleanPhone.slice(1);
-    addVariant(local);
-    addVariant('+1' + local);
-    addVariant('+' + cleanPhone);
-  }
-
-  const query = `
-    query FindClientByQuery($query: String!) {
-      clients(first: 10, query: $query) {
-        edges {
-          node {
-            id
-            firstName
-            lastName
-            email
-            mobilePhone
-            createdAt
-            appointmentCount
-            active
-            primaryLocation { name }
-          }
-        }
-      }
-    }
-  `;
-
-  let supported = false;
-  for (const queryValue of variants) {
-    const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { query: queryValue });
-    if (!data) continue;
-
-    supported = true;
-    const edges = data?.data?.clients?.edges || [];
-    const exact = edges.filter(edge => normalizePhone(edge?.node?.mobilePhone || '') === cleanPhone);
-    if (exact.length > 0) return exact;
-  }
-
-  return supported ? [] : null;
-}
-
-
 async function findMembershipForClient(apiUrl, headers, clientId) {
   if (!clientId) return null;
 
@@ -544,18 +491,9 @@ async function lookupMember(name, emailOrPhone) {
         return null;
       }
       console.log(`Boulevard lookup: phone = ${cleanPhone} at ${apiUrl}`);
-      const directMatches = await findClientsByPhoneDirect(apiUrl, headers, cleanPhone);
-      if (Array.isArray(directMatches) && directMatches.length > 0) {
-        clients = directMatches;
-      } else if (Array.isArray(directMatches)) {
-        const fallback = await findClientsByPhoneScan(apiUrl, headers, cleanPhone, PHONE_SCAN_FALLBACK_PAGES);
-        if (!fallback) return null;
-        clients = fallback;
-      } else {
-        const scanned = await findClientsByPhoneScan(apiUrl, headers, cleanPhone);
-        if (!scanned) return null;
-        clients = scanned;
-      }
+      const scanned = await findClientsByPhoneScan(apiUrl, headers, cleanPhone);
+      if (!scanned) return null;
+      clients = scanned;
     }
 
     if (clients.length === 0) {
