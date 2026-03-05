@@ -24,6 +24,8 @@ const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
 const SUPPORT_PHONE = '(888) 677-0055';
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
 const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
+const PAUSE_CREDIT_KEYWORDS = /\b(credit|credits)\b/i;
+const PAUSE_HOLD_KEYWORDS = /\b(pause|paused|hold|on hold)\b/i;
 const BOOKING_CONTEXT_KEYWORDS = /\b(book|booking|appointment|calendar|checkout|payment|credit card|billing|cvv|cvc|zip(?:\s*code)?|widget)\b/i;
 const ISSUE_CONTEXT_KEYWORDS = /\b(error|issue|problem|fail(?:ed|s|ing)?|freez(?:e[sd]?|ing)|frozen|not loading|cannot|can't|wont|won't|stuck|broken|crash(?:e[sd]?|ing)?|glitch(?:e[sd]?|ing)?)\b/i;
 const LOCATION_CANDIDATES = [
@@ -105,10 +107,67 @@ function buildSupportIncidentResponse() {
     ].join(' ');
 }
 
-function buildPostLookupGreeting(profile, rawUserMessage) {
+function isInactiveAccountStatus(status) {
+    const normalized = String(status || '').toLowerCase();
+    if (!normalized) return false;
+    return /(inactive|canceled|cancelled|terminated|ended|closed|lapsed)/i.test(normalized);
+}
+
+function collectRecentUserText(messages, limit = 6) {
+    if (!Array.isArray(messages)) return '';
+    const recent = messages
+      .filter(m => m && m.role === 'user' && typeof m.content === 'string')
+      .slice(-limit)
+      .map(m => m.content.trim())
+      .filter(Boolean);
+    return recent.join(' ');
+}
+
+function hasCancellationIntent(text) {
+    return CANCELLATION_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function isPauseCreditsQuestion(text) {
+    const input = String(text || '').toLowerCase();
+    return PAUSE_CREDIT_KEYWORDS.test(input) && PAUSE_HOLD_KEYWORDS.test(input);
+}
+
+function buildPauseCreditsAnswer(profile) {
+    const credits = Number.isFinite(profile?.unusedCredits) ? profile.unusedCredits : null;
+    const base = "Yes — if your membership is on an approved pause, your existing unused credits can still be used while they are valid.";
+    const expiry = "Credits still follow the normal 90-day validity window from the bill date.";
+
+    if (credits !== null) {
+      const noun = credits === 1 ? 'credit' : 'credits';
+      return `${base} You currently have ${credits} unused ${noun}. ${expiry}`;
+    }
+
+    return `${base} ${expiry}`;
+}
+
+function stripEndFollowUpQuestions(text) {
+    if (typeof text !== 'string') return '';
+    const patterns = [
+      /\s*is there anything else i can help you with today\??\s*$/i,
+      /\s*is there anything else i can help with today\??\s*$/i,
+      /\s*anything else i can help with\??\s*$/i,
+    ];
+    let cleaned = text;
+    for (const pattern of patterns) {
+      cleaned = cleaned.replace(pattern, '');
+    }
+    return cleaned.trim();
+}
+
+function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     const firstName = String(profile?.firstName || profile?.name?.split(' ')[0] || 'there').trim();
     const rawText = String(rawUserMessage || '');
-    const seed = `${firstName}|${profile?.email || ''}|${profile?.phone || ''}|${profile?.memberSince || ''}|${rawText.toLowerCase()}`;
+    const recentUserText = String(options.recentUserText || '');
+    const contextText = `${recentUserText} ${rawText}`.trim();
+    const cancelIntent = hasCancellationIntent(contextText);
+    const sensitiveContext = hasSensitiveContext(contextText);
+    const inactiveAccount = isInactiveAccountStatus(profile?.accountStatus);
+    const seed = `${firstName}|${profile?.email || ''}|${profile?.phone || ''}|${profile?.memberSince || ''}|${contextText.toLowerCase()}`;
     const sentences = [];
 
     const tierLabel = profile?.tier ? `${profile.tier}-Minute Membership` : null;
@@ -196,8 +255,14 @@ function buildPostLookupGreeting(profile, rawUserMessage) {
           }
     }
 
-    if (CANCELLATION_KEYWORDS.test(rawText.toLowerCase())) {
-          if (hasSensitiveContext(rawText)) {
+    if (cancelIntent && inactiveAccount) {
+          sentences.push("I can see this account is currently inactive, so there may not be an active membership left to cancel.");
+          sentences.push("I'll pass this to our memberships manager to confirm the status in the backend and send you a confirmation email within 48 hours.");
+          return sentences.join(' ');
+    }
+
+    if (cancelIntent) {
+          if (sensitiveContext) {
                 sentences.push(pickVariant([
                       'Thanks for sharing that. If you are comfortable sharing more, what is the biggest reason you are considering cancellation right now?',
                       'I hear you. If you are open to it, what is the main thing pushing you toward cancellation?',
@@ -417,6 +482,19 @@ export async function POST(request) {
                   console.warn('Chatlog failed for user message:', err)
                                                                                );
 
+      // Direct FAQ answer for a common question: credits during pause/hold.
+      if (isPauseCreditsQuestion(sanitizedMessage)) {
+            const pauseCreditsResponse = buildPauseCreditsAnswer(session.memberProfile || null);
+            addMessage(sessionId, 'assistant', pauseCreditsResponse);
+            logChatMessage(sessionId, sessionCreated, 'assistant', pauseCreditsResponse).catch(err =>
+                console.warn('Chatlog failed for pause-credit response:', err)
+            );
+            return NextResponse.json({
+                message: pauseCreditsResponse,
+                sessionId,
+            });
+      }
+
       // Booking/payment incident fast-path: auto-alert QA + write to support sheet
       if (!session.memberProfile && session.mode !== 'membership' && isBookingPaymentIncident(sanitizedMessage)) {
             const incident = {
@@ -539,7 +617,8 @@ export async function POST(request) {
 
                 // Use deterministic post-lookup greeting so we always show known
                 // tier/rate/tenure data and avoid contradictory pre-lookup text.
-                const greeting = buildPostLookupGreeting(profile, sanitizedMessage);
+                const recentUserText = collectRecentUserText(session.messages);
+                const greeting = buildPostLookupGreeting(profile, sanitizedMessage, { recentUserText });
                 addMessage(sessionId, 'assistant', greeting);
 
                 // Log bot response to chatbot log
@@ -577,7 +656,13 @@ export async function POST(request) {
       // \u2500\u2500 Normal response (no lookup) \u2500\u2500
       // Only accept session_summary in membership mode to prevent stray tags
       const summary = session.mode === 'membership' ? parseSessionSummary(response) : null;
-          const visibleResponse = stripAllSystemTags(response);
+      let visibleResponse = stripAllSystemTags(response);
+      if (summary) {
+            visibleResponse = stripEndFollowUpQuestions(visibleResponse);
+            if (!visibleResponse) {
+                  visibleResponse = 'Thanks again. We have documented this conversation and our team will follow up.';
+            }
+      }
 
       // Store CLEANED response in history (not raw with tags)
       addMessage(sessionId, 'assistant', visibleResponse);
