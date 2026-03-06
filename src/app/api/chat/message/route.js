@@ -21,11 +21,13 @@ const MAX_RECOVERY_MESSAGES = 40;
 const MAX_RECOVERY_MESSAGE_CHARS = 2000;
 const MAX_RECOVERY_TOTAL_CHARS = 30000;
 const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
+const HELLO_EMAIL = 'hello@silvermirror.com';
 const SUPPORT_PHONE = '(888) 677-0055';
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
 const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
 const PAUSE_CREDIT_KEYWORDS = /\b(credit|credits)\b/i;
 const PAUSE_HOLD_KEYWORDS = /\b(pause|paused|hold|on hold)\b/i;
+const UNRESOLVED_KEYWORDS = /\b(not resolved|still not resolved|this (isn't|is not|wasn't|was not) resolved|didn't resolve|did not resolve|not fixed|still broken)\b/i;
 const BOOKING_CONTEXT_KEYWORDS = /\b(book|booking|appointment|calendar|checkout|payment|credit card|billing|cvv|cvc|zip(?:\s*code)?|widget)\b/i;
 const ISSUE_CONTEXT_KEYWORDS = /\b(error|issue|problem|fail(?:ed|s|ing)?|freez(?:e[sd]?|ing)|frozen|not loading|cannot|can't|wont|won't|stuck|broken|crash(?:e[sd]?|ing)?|glitch(?:e[sd]?|ing)?)\b/i;
 const LOCATION_CANDIDATES = [
@@ -103,6 +105,7 @@ function buildSupportIncidentResponse() {
     return [
       "Thanks for flagging this. I've alerted our QA team and logged this issue for follow-up.",
       `We aim to respond within 48 hours. The fastest way to get help is to call ${SUPPORT_PHONE}.`,
+      `For non-urgent follow-up, email ${HELLO_EMAIL}.`,
       'If you can, please share your location, device/browser, and a screenshot so we can troubleshoot faster.',
     ].join(' ');
 }
@@ -135,7 +138,7 @@ function isPauseCreditsQuestion(text) {
 function buildPauseCreditsAnswer(profile) {
     const credits = Number.isFinite(profile?.unusedCredits) ? profile.unusedCredits : null;
     const base = "Yes — if your membership is on an approved pause, your existing unused credits can still be used while they are valid.";
-    const expiry = "Credits still follow the normal 90-day validity window from the bill date.";
+    const expiry = 'Credits expire 90 days from their initial bill date.';
 
     if (credits !== null) {
       const noun = credits === 1 ? 'credit' : 'credits';
@@ -143,6 +146,18 @@ function buildPauseCreditsAnswer(profile) {
     }
 
     return `${base} ${expiry}`;
+}
+
+function isUnresolvedIssueMessage(text) {
+    return UNRESOLVED_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function buildUnresolvedEscalationResponse() {
+    return [
+      "Understood — this issue is still not resolved, so I'm escalating it to our team now.",
+      `For the fastest help, call ${SUPPORT_PHONE}.`,
+      `For non-urgent follow-up, email ${HELLO_EMAIL}.`,
+    ].join(' ');
 }
 
 function stripEndFollowUpQuestions(text) {
@@ -256,8 +271,7 @@ function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     }
 
     if (cancelIntent && inactiveAccount) {
-          sentences.push("I can see this account is currently inactive, so there may not be an active membership left to cancel.");
-          sentences.push("I'll pass this to our memberships manager to confirm the status in the backend and send you a confirmation email within 48 hours.");
+          sentences.push(`It seems your account is currently inactive. Please email ${MEMBERSHIP_EMAIL} to pay any outstanding balances and move forward with the cancellation.`);
           return sentences.join(' ');
     }
 
@@ -492,6 +506,21 @@ export async function POST(request) {
             return NextResponse.json({
                 message: pauseCreditsResponse,
                 sessionId,
+            });
+      }
+
+      // For unresolved general support issues, escalate and end chat immediately.
+      if (session.mode !== 'membership' && isUnresolvedIssueMessage(sanitizedMessage)) {
+            const unresolvedResponse = buildUnresolvedEscalationResponse();
+            addMessage(sessionId, 'assistant', unresolvedResponse);
+            logChatMessage(sessionId, sessionCreated, 'assistant', unresolvedResponse).catch(err =>
+                console.warn('Chatlog failed for unresolved escalation response:', err)
+            );
+            return NextResponse.json({
+                message: unresolvedResponse,
+                sessionId,
+                conversationEnding: true,
+                unresolvedEscalation: true,
             });
       }
 

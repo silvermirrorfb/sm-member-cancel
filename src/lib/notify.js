@@ -29,6 +29,27 @@ function toCurrencyCell(value, suffix = '') {
   return `$${n}${suffix}`;
 }
 
+function parseEmailList(value) {
+  return String(value || '')
+    .split(/[;,]/)
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function mergeRecipientLists(...lists) {
+  const seen = new Set();
+  const merged = [];
+  for (const list of lists) {
+    for (const email of list || []) {
+      const key = String(email || '').trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(email.trim());
+    }
+  }
+  return merged;
+}
+
 // ── Helper: Get authenticated Google Sheets client ──
 async function getSheetsClient() {
   const credentials = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -76,7 +97,16 @@ async function sendSummaryEmail(summary, transcript) {
 
   const primaryTo = process.env.EMAIL_TO || 'memberships@silvermirror.com';
   const escalationTo = process.env.EMAIL_ESCALATION || 'hello@silvermirror.com';
-  const to = isUpset ? `${primaryTo}, ${escalationTo}` : primaryTo;
+  const reasonPrimary = String(summary.reason_primary || '').toLowerCase();
+  const isReactionCase = /\breaction\b/.test(reasonPrimary);
+  const reactionEscalation = process.env.EMAIL_REACTION_ALERTS || '';
+  const recipients = mergeRecipientLists(
+    parseEmailList(primaryTo),
+    isUpset ? parseEmailList(escalationTo) : [],
+    isReactionCase ? parseEmailList(escalationTo) : [],
+    isReactionCase ? parseEmailList(reactionEscalation) : []
+  );
+  const to = recipients.length > 0 ? recipients.join(', ') : primaryTo;
 
   if (!host || !user || !pass) {
     console.warn('SMTP not configured \u2014 email not sent for session:', summary.client_name, '| outcome:', summary.outcome);
