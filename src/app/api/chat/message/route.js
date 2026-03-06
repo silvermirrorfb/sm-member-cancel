@@ -271,7 +271,9 @@ function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     }
 
     if (cancelIntent && inactiveAccount) {
-          sentences.push(`It seems your account is currently inactive. Please email ${MEMBERSHIP_EMAIL} to pay any outstanding balances and move forward with the cancellation.`);
+          sentences.push(`It looks like your account is currently inactive and has an outstanding balance.`);
+          sentences.push(`The memberships team can help with either path once the balance is settled: reactivate your membership if you want to keep benefits active, or finalize cancellation if you want to close it out.`);
+          sentences.push(`Please email ${MEMBERSHIP_EMAIL} with your full name and best callback number, and they will follow up within 24-48 hours.`);
           return sentences.join(' ');
     }
 
