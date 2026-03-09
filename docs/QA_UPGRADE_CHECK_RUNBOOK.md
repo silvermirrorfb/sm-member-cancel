@@ -138,6 +138,9 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
 - `processQueued` (default `true`): when in-window, automatically drain due queued items and process them.
 - `useQueuedOnly` (default `false`): process only queued items (no direct candidates required).
 - `maxQueueDrain`: cap number of queued items processed in one run.
+- `enableOneHourReminder` (default `true`): enables one follow-up reminder near one hour before appointment, only if prior offer exists and no YES/NO outcome was recorded.
+- `reminderLeadMinutes` (default `60`): target lead time for reminder.
+- `reminderToleranceMinutes` (default `15`): acceptable drift window around `reminderLeadMinutes`.
 
 ### Klaviyo opt-in source of truth (required)
 - Outbound SMS route checks Klaviyo profile `subscriptions.sms.marketing`.
@@ -152,3 +155,15 @@ Required env vars:
 - `KLAVIYO_REVISION` (optional override, default `2026-01-15`)
 - `SMS_REQUIRE_KLAVIYO_OPT_IN` (optional, default `true`)
 - `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` (optional, default `true`)
+- `SMS_ENABLE_ONE_HOUR_REMINDER` (optional, default `true`)
+- `SMS_REMINDER_LEAD_MINUTES` (optional, default `60`)
+- `SMS_REMINDER_TOLERANCE_MINUTES` (optional, default `15`)
+
+### Reminder suppression behavior
+- Reminder is skipped if appointment state is already resolved:
+  - `already_upgraded`
+  - `offer_declined`
+  - `reminder_already_sent`
+- Initial offer is skipped if:
+  - `offer_already_pending`
+  - `offer_already_sent`

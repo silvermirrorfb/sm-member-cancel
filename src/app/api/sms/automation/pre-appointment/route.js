@@ -6,9 +6,19 @@ import {
   formatProfileForPrompt,
   lookupMember,
 } from '../../../../../lib/boulevard';
-import { bindPhoneToSession, getSessionIdForPhone } from '../../../../../lib/sms-sessions';
+import {
+  bindPhoneToSession,
+  getSessionIdForPhone,
+  getUpgradeOfferState,
+  markUpgradeOfferEvent,
+} from '../../../../../lib/sms-sessions';
 import { sendTwilioSms } from '../../../../../lib/twilio';
-import { getNextWindowStartIso, isWithinSendWindow, parseHour } from '../../../../../lib/sms-window';
+import {
+  getNextWindowStartIso,
+  getTimePartsInZone,
+  isWithinSendWindow,
+  parseHour,
+} from '../../../../../lib/sms-window';
 import {
   enqueueOutboundCandidate,
   getOutboundQueueSnapshot,
@@ -62,8 +72,9 @@ function formatTimeForGuest(iso) {
   });
 }
 
-function buildOutboundOfferMessage(opportunity) {
+function buildOutboundOfferMessage(opportunity, options = {}) {
   if (!opportunity?.pricing) return null;
+  const reminder = options.reminder === true;
   const isMember = opportunity.isMember === true;
   const pricing = opportunity.pricing;
   const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
@@ -71,10 +82,63 @@ function buildOutboundOfferMessage(opportunity) {
   const currentDuration = opportunity.currentDurationMinutes;
   const targetDuration = opportunity.targetDurationMinutes;
   const timeText = formatTimeForGuest(opportunity.startOn);
+  const opener = reminder
+    ? `Silver Mirror reminder: we still have room after your ${timeText} appointment.`
+    : `Silver Mirror: we have room after your ${timeText} appointment.`;
   const priceLine = isMember
     ? `Upgrading from ${currentDuration} to ${targetDuration} minutes would be $${total} total (+$${delta}).`
     : `Upgrading from ${currentDuration} to ${targetDuration} minutes would be +$${delta} (new total $${total}).`;
-  return `Silver Mirror: we have room after your ${timeText} appointment. ${priceLine} Reply YES within ${OFFER_WINDOW_MINUTES} minutes to confirm, or NO to keep your current booking.`;
+  return `${opener} ${priceLine} Reply YES within ${OFFER_WINDOW_MINUTES} minutes to confirm, or NO to keep your current booking.`;
+}
+
+function isSameLocalDay(aIso, bIso, timeZone) {
+  const a = getTimePartsInZone(aIso, timeZone);
+  const b = getTimePartsInZone(bIso, timeZone);
+  if (!a || !b) return false;
+  return a.year === b.year && a.month === b.month && a.day === b.day;
+}
+
+function resolveOfferTiming({
+  startOn,
+  runNow,
+  sendTimezone,
+  sendStartHour,
+  sendEndHour,
+  reminderLeadMinutes,
+  reminderToleranceMinutes,
+}) {
+  const startMs = new Date(startOn || '').getTime();
+  const nowMs = new Date(runNow || Date.now()).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(nowMs)) {
+    return { isReminderWindow: false, reminderMode: null, minutesUntilStart: null };
+  }
+
+  const minutesUntilStart = Math.round((startMs - nowMs) / (60 * 1000));
+  const minLead = Math.max(1, reminderLeadMinutes - reminderToleranceMinutes);
+  const maxLead = reminderLeadMinutes + reminderToleranceMinutes;
+  const scheduledReminderWindow = minutesUntilStart >= minLead && minutesUntilStart <= maxLead;
+  if (scheduledReminderWindow) {
+    return { isReminderWindow: true, reminderMode: 'scheduled', minutesUntilStart };
+  }
+
+  const oneHourMark = new Date(startMs - reminderLeadMinutes * 60 * 1000).toISOString();
+  const oneHourMarkInWindow = isWithinSendWindow(oneHourMark, {
+    timeZone: sendTimezone,
+    startHour: sendStartHour,
+    endHour: sendEndHour,
+  }).allowed;
+  const nowParts = getTimePartsInZone(runNow, sendTimezone);
+  const finalSendHour = (sendEndHour + 23) % 24;
+  const lastCallWindow =
+    !oneHourMarkInWindow &&
+    isSameLocalDay(startOn, runNow, sendTimezone) &&
+    nowParts?.hour === finalSendHour &&
+    minutesUntilStart > reminderLeadMinutes;
+  if (lastCallWindow) {
+    return { isReminderWindow: true, reminderMode: 'last_call_before_close', minutesUntilStart };
+  }
+
+  return { isReminderWindow: false, reminderMode: null, minutesUntilStart };
 }
 
 function resolveCandidates(body) {
@@ -143,6 +207,18 @@ export async function POST(request) {
     const enforceKlaviyoOptIn = asBool(
       body.enforceKlaviyoOptIn,
       asBool(process.env.SMS_REQUIRE_KLAVIYO_OPT_IN, true),
+    );
+    const enableOneHourReminder = asBool(
+      body.enableOneHourReminder,
+      asBool(process.env.SMS_ENABLE_ONE_HOUR_REMINDER, true),
+    );
+    const reminderLeadMinutes = Math.max(
+      15,
+      asInt(body.reminderLeadMinutes, asInt(process.env.SMS_REMINDER_LEAD_MINUTES, 60)),
+    );
+    const reminderToleranceMinutes = Math.max(
+      0,
+      asInt(body.reminderToleranceMinutes, asInt(process.env.SMS_REMINDER_TOLERANCE_MINUTES, 15)),
     );
     const directCandidates = useQueuedOnly ? [] : resolveCandidates(body);
 
@@ -394,6 +470,36 @@ export async function POST(request) {
         continue;
       }
 
+      const session = getOrCreateSmsSession(profile);
+      const appointmentId = opportunity.appointmentId || null;
+      const offerState = appointmentId ? getUpgradeOfferState(profilePhone, appointmentId) : null;
+      if (offerState?.upgradedAt || offerState?.acceptedAt) {
+        results.push({
+          candidate: { firstName, lastName, email: email || null, phone: phone || null },
+          profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+          status: 'skipped',
+          reason: 'already_upgraded',
+          appointmentId,
+          matchedContact,
+          source: work.source,
+          queueId: work.queueId,
+        });
+        continue;
+      }
+      if (offerState?.declinedAt) {
+        results.push({
+          candidate: { firstName, lastName, email: email || null, phone: phone || null },
+          profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+          status: 'skipped',
+          reason: 'offer_declined',
+          appointmentId,
+          matchedContact,
+          source: work.source,
+          queueId: work.queueId,
+        });
+        continue;
+      }
+
       let klaviyoGate = {
         allowed: true,
         reason: null,
@@ -426,21 +532,61 @@ export async function POST(request) {
         continue;
       }
 
-      const session = getOrCreateSmsSession(profile);
       const pending = session.pendingUpgradeOffer;
-      if (
+      const hasPendingForAppointment =
         pending &&
         !isPendingOfferExpired(pending) &&
         pending.appointmentId &&
-        pending.appointmentId === opportunity.appointmentId
-      ) {
+        pending.appointmentId === appointmentId;
+      const timing = resolveOfferTiming({
+        startOn: opportunity.startOn,
+        runNow,
+        sendTimezone,
+        sendStartHour,
+        sendEndHour,
+        reminderLeadMinutes,
+        reminderToleranceMinutes,
+      });
+      const hasPriorOffer = Boolean(offerState?.initialSentAt || hasPendingForAppointment);
+      const shouldUseReminder = enableOneHourReminder && timing.isReminderWindow && hasPriorOffer;
+      const offerType = shouldUseReminder ? 'reminder' : 'initial';
+
+      if (offerType === 'initial' && hasPendingForAppointment) {
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
           status: 'skipped',
           reason: 'offer_already_pending',
           sessionId: session.id,
-          appointmentId: opportunity.appointmentId || null,
+          appointmentId,
+          matchedContact,
+          source: work.source,
+          queueId: work.queueId,
+        });
+        continue;
+      }
+      if (offerType === 'initial' && offerState?.initialSentAt) {
+        results.push({
+          candidate: { firstName, lastName, email: email || null, phone: phone || null },
+          profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+          status: 'skipped',
+          reason: 'offer_already_sent',
+          sessionId: session.id,
+          appointmentId,
+          matchedContact,
+          source: work.source,
+          queueId: work.queueId,
+        });
+        continue;
+      }
+      if (offerType === 'reminder' && offerState?.reminderSentAt) {
+        results.push({
+          candidate: { firstName, lastName, email: email || null, phone: phone || null },
+          profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+          status: 'skipped',
+          reason: 'reminder_already_sent',
+          sessionId: session.id,
+          appointmentId,
           matchedContact,
           source: work.source,
           queueId: work.queueId,
@@ -448,7 +594,9 @@ export async function POST(request) {
         continue;
       }
 
-      const offerMessage = buildOutboundOfferMessage(opportunity);
+      const offerMessage = buildOutboundOfferMessage(opportunity, {
+        reminder: offerType === 'reminder',
+      });
       if (!offerMessage) {
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
@@ -463,13 +611,6 @@ export async function POST(request) {
         continue;
       }
 
-      session.pendingUpgradeOffer = {
-        appointmentId: opportunity.appointmentId || null,
-        targetDurationMinutes: opportunity.targetDurationMinutes || null,
-        createdAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
-      };
-
       if (sentCount >= maxSends) {
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
@@ -477,7 +618,7 @@ export async function POST(request) {
           status: 'skipped',
           reason: 'max_sends_reached',
           sessionId: session.id,
-          appointmentId: opportunity.appointmentId || null,
+          appointmentId,
           matchedContact,
           source: work.source,
           queueId: work.queueId,
@@ -491,8 +632,11 @@ export async function POST(request) {
           profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
           status: 'dry_run',
           sessionId: session.id,
-          appointmentId: opportunity.appointmentId || null,
+          appointmentId,
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
+          offerType,
+          reminderMode: offerType === 'reminder' ? timing.reminderMode : null,
+          minutesUntilStart: timing.minutesUntilStart,
           message: offerMessage,
           matchedContact,
           source: work.source,
@@ -514,14 +658,28 @@ export async function POST(request) {
           from: effectiveFromNumber || undefined,
           statusCallback: effectiveStatusCallback || undefined,
         });
+        if (appointmentId) {
+          markUpgradeOfferEvent(profilePhone, appointmentId, offerType === 'reminder' ? 'reminder_sent' : 'initial_sent');
+        }
+        const nowIso = new Date().toISOString();
+        session.pendingUpgradeOffer = {
+          appointmentId,
+          targetDurationMinutes: opportunity.targetDurationMinutes || null,
+          createdAt: pending?.createdAt || nowIso,
+          expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
+          reminderSentAt: offerType === 'reminder' ? nowIso : pending?.reminderSentAt || null,
+        };
         sentCount += 1;
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
           status: 'sent',
           sessionId: session.id,
-          appointmentId: opportunity.appointmentId || null,
+          appointmentId,
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
+          offerType,
+          reminderMode: offerType === 'reminder' ? timing.reminderMode : null,
+          minutesUntilStart: timing.minutesUntilStart,
           twilioSid: sms?.sid || null,
           matchedContact,
           source: work.source,

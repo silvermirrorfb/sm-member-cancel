@@ -1,8 +1,10 @@
 const PHONE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_SID_TTL_MS = 24 * 60 * 60 * 1000;
+const UPGRADE_OFFER_STATE_TTL_MS = 48 * 60 * 60 * 1000;
 
 const phoneToSession = new Map();
 const sidToReply = new Map();
+const offerStateByKey = new Map();
 
 function normalizePhone(raw) {
   const digits = String(raw || '').replace(/\D/g, '');
@@ -56,6 +58,55 @@ function getReplyForMessageSid(messageSid) {
   return row.twiml;
 }
 
+function buildOfferStateKey(phone, appointmentId) {
+  const normalizedPhone = normalizePhone(phone);
+  const appt = String(appointmentId || '').trim();
+  if (!normalizedPhone || !appt) return '';
+  return `${normalizedPhone}::${appt}`;
+}
+
+function getUpgradeOfferState(phone, appointmentId) {
+  const key = buildOfferStateKey(phone, appointmentId);
+  if (!key) return null;
+  const row = offerStateByKey.get(key);
+  if (!row) return null;
+  if (Date.now() - row.updatedAt > UPGRADE_OFFER_STATE_TTL_MS) {
+    offerStateByKey.delete(key);
+    return null;
+  }
+  row.updatedAt = Date.now();
+  return { ...row };
+}
+
+function markUpgradeOfferEvent(phone, appointmentId, eventName, atIso = null) {
+  const key = buildOfferStateKey(phone, appointmentId);
+  if (!key) return null;
+  const nowIso = atIso || new Date().toISOString();
+  const row = offerStateByKey.get(key) || {
+    key,
+    phone: normalizePhone(phone),
+    appointmentId: String(appointmentId),
+    createdAt: nowIso,
+    updatedAt: Date.now(),
+    initialSentAt: null,
+    reminderSentAt: null,
+    acceptedAt: null,
+    upgradedAt: null,
+    declinedAt: null,
+    unavailableAt: null,
+  };
+
+  if (eventName === 'initial_sent') row.initialSentAt = nowIso;
+  if (eventName === 'reminder_sent') row.reminderSentAt = nowIso;
+  if (eventName === 'accepted') row.acceptedAt = nowIso;
+  if (eventName === 'upgraded') row.upgradedAt = nowIso;
+  if (eventName === 'declined') row.declinedAt = nowIso;
+  if (eventName === 'unavailable') row.unavailableAt = nowIso;
+  row.updatedAt = Date.now();
+  offerStateByKey.set(key, row);
+  return { ...row };
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [key, row] of phoneToSession.entries()) {
@@ -63,6 +114,9 @@ setInterval(() => {
   }
   for (const [sid, row] of sidToReply.entries()) {
     if (now - row.updatedAt > MESSAGE_SID_TTL_MS) sidToReply.delete(sid);
+  }
+  for (const [key, row] of offerStateByKey.entries()) {
+    if (now - row.updatedAt > UPGRADE_OFFER_STATE_TTL_MS) offerStateByKey.delete(key);
   }
 }, 5 * 60 * 1000);
 
@@ -72,4 +126,6 @@ export {
   getSessionIdForPhone,
   storeReplyForMessageSid,
   getReplyForMessageSid,
+  getUpgradeOfferState,
+  markUpgradeOfferEvent,
 };

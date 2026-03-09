@@ -8,6 +8,8 @@ const mockBuildSystemPromptWithProfile = vi.fn();
 const mockFormatProfileForPrompt = vi.fn();
 const mockBindPhoneToSession = vi.fn();
 const mockGetSessionIdForPhone = vi.fn();
+const mockGetUpgradeOfferState = vi.fn();
+const mockMarkUpgradeOfferEvent = vi.fn();
 const mockSendTwilioSms = vi.fn();
 const mockEnqueueOutboundCandidate = vi.fn();
 const mockPopDueCandidates = vi.fn();
@@ -32,6 +34,8 @@ vi.mock('../src/lib/claude.js', () => ({
 vi.mock('../src/lib/sms-sessions.js', () => ({
   bindPhoneToSession: (...args) => mockBindPhoneToSession(...args),
   getSessionIdForPhone: (...args) => mockGetSessionIdForPhone(...args),
+  getUpgradeOfferState: (...args) => mockGetUpgradeOfferState(...args),
+  markUpgradeOfferEvent: (...args) => mockMarkUpgradeOfferEvent(...args),
 }));
 
 vi.mock('../src/lib/twilio.js', () => ({
@@ -58,6 +62,8 @@ describe('sms automation route', () => {
     mockFormatProfileForPrompt.mockReturnValue('profile');
     mockBuildSystemPromptWithProfile.mockReturnValue('prompt');
     mockCreateSession.mockReturnValue({ id: 'sess-1', status: 'active' });
+    mockGetUpgradeOfferState.mockReturnValue(null);
+    mockMarkUpgradeOfferEvent.mockReturnValue(null);
     mockEnqueueOutboundCandidate.mockReturnValue({
       id: 'q-1',
       runAfter: '2026-03-09T14:00:00Z',
@@ -371,5 +377,118 @@ describe('sms automation route', () => {
     expect(body.error).toContain('locked');
     expect(mockSendTwilioSms).not.toHaveBeenCalled();
     expect(mockLookupMember).not.toHaveBeenCalled();
+  });
+
+  it('uses reminder offer type around one-hour window when initial offer already sent', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '30',
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+      email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      isMember: true,
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    mockGetUpgradeOfferState.mockReturnValue({
+      initialSentAt: '2026-03-09T12:00:00Z',
+      reminderSentAt: null,
+    });
+    mockCreateSession.mockReturnValue({
+      id: 'sess-1',
+      status: 'active',
+      pendingUpgradeOffer: {
+        appointmentId: 'appt-1',
+        createdAt: '2026-03-09T12:00:00Z',
+        expiresAt: '2026-03-09T12:10:00Z',
+      },
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T17:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbie@example.com',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].offerType).toBe('reminder');
+  });
+
+  it('skips offers when appointment was already declined', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '30',
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+      email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      isMember: true,
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    mockGetUpgradeOfferState.mockReturnValue({
+      initialSentAt: '2026-03-09T12:00:00Z',
+      declinedAt: '2026-03-09T12:05:00Z',
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T17:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbie@example.com',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('skipped');
+    expect(body.results[0].reason).toBe('offer_declined');
   });
 });

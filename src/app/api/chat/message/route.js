@@ -17,6 +17,7 @@ import {
 } from '../../../../lib/boulevard';
 import { logChatMessage, logSupportIncident } from '../../../../lib/notify';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
+import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
 
 // Friendly message shown when Claude API is rate-limited
 const RATE_LIMIT_USER_MESSAGE =
@@ -647,10 +648,19 @@ export async function POST(request) {
       // YES/NO handling for an active pending upgrade offer
       if (session.pendingUpgradeOffer && session.memberProfile) {
             if (isAffirmativeUpgradeReply(sanitizedMessage)) {
+                  const appointmentId = session.pendingUpgradeOffer?.appointmentId || null;
+                  const profilePhone = session.memberProfile?.phone || null;
                   const upgradeResult = await reverifyAndApplyUpgradeForProfile(
                     session.memberProfile,
                     session.pendingUpgradeOffer,
                   );
+                  if (profilePhone && appointmentId) {
+                        markUpgradeOfferEvent(
+                          profilePhone,
+                          appointmentId,
+                          upgradeResult.success ? 'upgraded' : 'unavailable',
+                        );
+                  }
                   const upgradeMessage = upgradeResult.success
                     ? buildUpgradeSuccessMessage(upgradeResult)
                     : buildUpgradeUnavailableMessage();
@@ -674,6 +684,11 @@ export async function POST(request) {
             }
 
             if (isNegativeUpgradeReply(sanitizedMessage)) {
+                  const appointmentId = session.pendingUpgradeOffer?.appointmentId || null;
+                  const profilePhone = session.memberProfile?.phone || null;
+                  if (profilePhone && appointmentId) {
+                        markUpgradeOfferEvent(profilePhone, appointmentId, 'declined');
+                  }
                   const declineMessage = 'No problem at all — we will keep your appointment as-is.';
                   addMessage(sessionId, 'assistant', declineMessage);
                   logChatMessage(sessionId, sessionCreated, 'assistant', declineMessage).catch(err =>
