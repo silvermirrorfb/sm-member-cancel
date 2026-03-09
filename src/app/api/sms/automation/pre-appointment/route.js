@@ -8,7 +8,12 @@ import {
 } from '../../../../../lib/boulevard';
 import { bindPhoneToSession, getSessionIdForPhone } from '../../../../../lib/sms-sessions';
 import { sendTwilioSms } from '../../../../../lib/twilio';
-import { isWithinSendWindow, parseHour } from '../../../../../lib/sms-window';
+import { getNextWindowStartIso, isWithinSendWindow, parseHour } from '../../../../../lib/sms-window';
+import {
+  enqueueOutboundCandidate,
+  getOutboundQueueSnapshot,
+  popDueCandidates,
+} from '../../../../../lib/sms-outbound-queue';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 10);
 
@@ -26,6 +31,16 @@ function asText(value) {
 function asInt(value, fallback = null) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function asBool(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return fallback;
 }
 
 function isPendingOfferExpired(offer) {
@@ -115,14 +130,11 @@ export async function POST(request) {
     const sendStartHour = parseHour(body.sendStartHour, parseHour(process.env.SMS_OUTBOUND_START_HOUR, 9));
     const sendEndHour = parseHour(body.sendEndHour, parseHour(process.env.SMS_OUTBOUND_END_HOUR, 17));
     const enforceSendWindow = body.enforceSendWindow !== false;
-    const candidates = resolveCandidates(body);
-
-    if (candidates.length === 0) {
-      return NextResponse.json(
-        { error: 'Provide candidates[] or one candidate with firstName, lastName, and email/phone.' },
-        { status: 400 },
-      );
-    }
+    const queueWhenOutsideWindow = asBool(body.queueWhenOutsideWindow, true);
+    const processQueued = asBool(body.processQueued, true);
+    const useQueuedOnly = asBool(body.useQueuedOnly, false);
+    const maxQueueDrain = Math.max(0, asInt(body.maxQueueDrain, maxSends));
+    const directCandidates = useQueuedOnly ? [] : resolveCandidates(body);
 
     const results = [];
     let sentCount = 0;
@@ -133,18 +145,83 @@ export async function POST(request) {
     });
 
     if (enforceSendWindow && !sendWindow.allowed) {
-      for (const candidate of candidates) {
-        results.push({
-          candidate: {
-            firstName: asText(candidate.firstName) || null,
-            lastName: asText(candidate.lastName) || null,
-            email: asText(candidate.email).toLowerCase() || null,
-            phone: asText(candidate.phone) || null,
-          },
-          status: 'skipped',
-          reason: 'outside_send_window',
-        });
+      const runAfter = getNextWindowStartIso(runNow, {
+        timeZone: sendTimezone,
+        startHour: sendStartHour,
+        endHour: sendEndHour,
+      }) || new Date().toISOString();
+
+      for (const candidate of directCandidates) {
+        const queuedCandidate = {
+          firstName: asText(candidate.firstName),
+          lastName: asText(candidate.lastName),
+          email: asText(candidate.email).toLowerCase(),
+          phone: asText(candidate.phone),
+          appointmentId: asText(candidate.appointmentId),
+          targetDurationMinutes: asInt(candidate.targetDurationMinutes, null),
+          locationId: asText(candidate.locationId),
+        };
+        if (!queuedCandidate.firstName || !queuedCandidate.lastName || (!queuedCandidate.email && !queuedCandidate.phone)) {
+          results.push({
+            candidate: {
+              firstName: queuedCandidate.firstName || null,
+              lastName: queuedCandidate.lastName || null,
+              email: queuedCandidate.email || null,
+              phone: queuedCandidate.phone || null,
+            },
+            status: 'skipped',
+            reason: 'missing_candidate_fields',
+          });
+          continue;
+        }
+
+        if (queueWhenOutsideWindow) {
+          const queued = enqueueOutboundCandidate(
+            {
+              candidate: queuedCandidate,
+              options: {
+                windowHours,
+                fallbackLocationId,
+                targetDurationMinutes,
+                fromNumber,
+                statusCallback,
+              },
+            },
+            { runAfter },
+          );
+          results.push({
+            candidate: {
+              firstName: queuedCandidate.firstName,
+              lastName: queuedCandidate.lastName,
+              email: queuedCandidate.email || null,
+              phone: queuedCandidate.phone || null,
+            },
+            status: 'queued',
+            reason: 'queued_outside_send_window',
+            queueId: queued.id,
+            runAfter: queued.runAfter,
+            deduped: queued.deduped === true,
+          });
+        } else {
+          results.push({
+            candidate: {
+              firstName: queuedCandidate.firstName,
+              lastName: queuedCandidate.lastName,
+              email: queuedCandidate.email || null,
+              phone: queuedCandidate.phone || null,
+            },
+            status: 'skipped',
+            reason: 'outside_send_window',
+          });
+        }
       }
+
+      const summary = results.reduce((acc, row) => {
+        acc.total += 1;
+        acc[row.status] = (acc[row.status] || 0) + 1;
+        return acc;
+      }, { total: 0 });
+
       return NextResponse.json({
         ok: true,
         dryRun,
@@ -156,17 +233,76 @@ export async function POST(request) {
           startHour: sendWindow.startHour,
           endHour: sendWindow.endHour,
         },
-        summary: { total: results.length, skipped: results.length },
+        queue: getOutboundQueueSnapshot(),
+        summary,
         results,
       });
     }
 
-    for (const candidate of candidates) {
+    const queuedItems = processQueued
+      ? popDueCandidates({ now: runNow, limit: maxQueueDrain > 0 ? maxQueueDrain : maxSends })
+      : [];
+    const queuedCandidates = queuedItems.map(row => ({
+      source: 'queued',
+      queueId: row.id,
+      candidate: row.payload?.candidate || {},
+      queuedOptions: row.payload?.options || {},
+    }));
+    const directWorkItems = directCandidates.map(candidate => ({
+      source: 'direct',
+      queueId: null,
+      candidate,
+      queuedOptions: {},
+    }));
+    const workItems = useQueuedOnly
+      ? queuedCandidates
+      : [...directWorkItems, ...queuedCandidates];
+
+    if (workItems.length === 0) {
+      if (directCandidates.length === 0 && queuedCandidates.length === 0) {
+        return NextResponse.json({
+          ok: true,
+          dryRun,
+          sendWindow: {
+            enforced: enforceSendWindow,
+            allowed: sendWindow.allowed,
+            timeZone: sendWindow.timeZone,
+            hour: sendWindow.hour,
+            startHour: sendWindow.startHour,
+            endHour: sendWindow.endHour,
+          },
+          queue: getOutboundQueueSnapshot(),
+          summary: { total: 0 },
+          results: [],
+        });
+      }
+      return NextResponse.json(
+        { error: 'Provide candidates[] or use useQueuedOnly/processQueued with queued work available.' },
+        { status: 400 },
+      );
+    }
+
+    for (const work of workItems) {
+      const candidate = work.candidate || {};
+      const queuedOptions = work.queuedOptions || {};
       const firstName = asText(candidate.firstName);
       const lastName = asText(candidate.lastName);
       const email = asText(candidate.email).toLowerCase();
       const phone = asText(candidate.phone);
       const fullName = `${firstName} ${lastName}`.trim();
+      const effectiveWindowHours = asInt(candidate.windowHours, asInt(queuedOptions.windowHours, windowHours));
+      const effectiveFallbackLocationId =
+        asText(candidate.locationId) ||
+        asText(queuedOptions.fallbackLocationId) ||
+        fallbackLocationId ||
+        null;
+      const effectiveTargetDurationMinutes = asInt(
+        candidate.targetDurationMinutes,
+        asInt(queuedOptions.targetDurationMinutes, targetDurationMinutes),
+      );
+      const effectiveFromNumber = asText(candidate.fromNumber) || asText(queuedOptions.fromNumber) || fromNumber || null;
+      const effectiveStatusCallback =
+        asText(candidate.statusCallback) || asText(queuedOptions.statusCallback) || statusCallback || null;
       const contacts = [];
       if (email) contacts.push(email);
       if (phone) contacts.push(phone);
@@ -176,6 +312,8 @@ export async function POST(request) {
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           status: 'skipped',
           reason: 'missing_candidate_fields',
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
@@ -194,16 +332,18 @@ export async function POST(request) {
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           status: 'skipped',
           reason: 'member_not_found',
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
 
       const opportunity = await evaluateUpgradeOpportunityForProfile(profile, {
         appointmentId: asText(candidate.appointmentId) || undefined,
-        targetDurationMinutes: asInt(candidate.targetDurationMinutes, targetDurationMinutes) || undefined,
-        locationId: asText(candidate.locationId) || fallbackLocationId || undefined,
+        targetDurationMinutes: effectiveTargetDurationMinutes || undefined,
+        locationId: effectiveFallbackLocationId || undefined,
         now: now || undefined,
-        windowHours: windowHours || undefined,
+        windowHours: effectiveWindowHours || undefined,
       });
 
       if (!opportunity?.eligible) {
@@ -213,6 +353,8 @@ export async function POST(request) {
           status: 'skipped',
           reason: opportunity?.reason || 'not_eligible',
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
@@ -225,6 +367,8 @@ export async function POST(request) {
           status: 'skipped',
           reason: 'missing_profile_phone',
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
@@ -245,6 +389,8 @@ export async function POST(request) {
           sessionId: session.id,
           appointmentId: opportunity.appointmentId || null,
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
@@ -258,6 +404,8 @@ export async function POST(request) {
           reason: 'offer_message_unavailable',
           sessionId: session.id,
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
@@ -278,6 +426,8 @@ export async function POST(request) {
           sessionId: session.id,
           appointmentId: opportunity.appointmentId || null,
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
@@ -292,6 +442,8 @@ export async function POST(request) {
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
           message: offerMessage,
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
         continue;
       }
@@ -300,8 +452,8 @@ export async function POST(request) {
         const sms = await sendTwilioSms({
           to: profilePhone,
           body: offerMessage,
-          from: fromNumber || undefined,
-          statusCallback: statusCallback || undefined,
+          from: effectiveFromNumber || undefined,
+          statusCallback: effectiveStatusCallback || undefined,
         });
         sentCount += 1;
         results.push({
@@ -313,6 +465,8 @@ export async function POST(request) {
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
           twilioSid: sms?.sid || null,
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
       } catch (err) {
         results.push({
@@ -323,6 +477,8 @@ export async function POST(request) {
           appointmentId: opportunity.appointmentId || null,
           reason: err?.message || 'twilio_send_failed',
           matchedContact,
+          source: work.source,
+          queueId: work.queueId,
         });
       }
     }
@@ -344,6 +500,7 @@ export async function POST(request) {
         startHour: sendWindow.startHour,
         endHour: sendWindow.endHour,
       },
+      queue: getOutboundQueueSnapshot(),
       summary,
       results,
     });

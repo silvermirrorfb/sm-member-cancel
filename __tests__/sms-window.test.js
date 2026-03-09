@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  getNextWindowStartIso,
   getHourInTimeZone,
   isHourInsideWindow,
   isWithinSendWindow,
@@ -37,5 +38,16 @@ describe('sms send window helpers', () => {
     });
     expect(result.allowed).toBe(true);
     expect(result.hour).toBe(10);
+  });
+
+  it('computes next ET window start', () => {
+    const next = getNextWindowStartIso('2026-03-09T06:30:00Z', {
+      timeZone: 'America/New_York',
+      startHour: 9,
+      endHour: 17,
+    });
+    expect(next).toBeTruthy();
+    const hour = getHourInTimeZone(next, 'America/New_York');
+    expect(hour).toBe(9);
   });
 });

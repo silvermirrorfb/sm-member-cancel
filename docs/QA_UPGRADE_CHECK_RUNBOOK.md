@@ -132,3 +132,7 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
 - `sendTimezone`: timezone for send-hour guardrail (default `America/New_York`).
 - `sendStartHour` / `sendEndHour`: allowed send range in 24h format (`9` to `17` = 9:00 AM to 4:59 PM).
 - `enforceSendWindow`: set `false` to bypass send-hour guardrail for QA-only checks.
+- `queueWhenOutsideWindow` (default `true`): if outside send hours, queue candidates for next send window instead of dropping them.
+- `processQueued` (default `true`): when in-window, automatically drain due queued items and process them.
+- `useQueuedOnly` (default `false`): process only queued items (no direct candidates required).
+- `maxQueueDrain`: cap number of queued items processed in one run.

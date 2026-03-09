@@ -9,6 +9,9 @@ const mockFormatProfileForPrompt = vi.fn();
 const mockBindPhoneToSession = vi.fn();
 const mockGetSessionIdForPhone = vi.fn();
 const mockSendTwilioSms = vi.fn();
+const mockEnqueueOutboundCandidate = vi.fn();
+const mockPopDueCandidates = vi.fn();
+const mockGetOutboundQueueSnapshot = vi.fn();
 
 vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
@@ -34,6 +37,12 @@ vi.mock('../src/lib/twilio.js', () => ({
   sendTwilioSms: (...args) => mockSendTwilioSms(...args),
 }));
 
+vi.mock('../src/lib/sms-outbound-queue.js', () => ({
+  enqueueOutboundCandidate: (...args) => mockEnqueueOutboundCandidate(...args),
+  popDueCandidates: (...args) => mockPopDueCandidates(...args),
+  getOutboundQueueSnapshot: (...args) => mockGetOutboundQueueSnapshot(...args),
+}));
+
 import { POST } from '../src/app/api/sms/automation/pre-appointment/route.js';
 
 describe('sms automation route', () => {
@@ -44,9 +53,16 @@ describe('sms automation route', () => {
     mockFormatProfileForPrompt.mockReturnValue('profile');
     mockBuildSystemPromptWithProfile.mockReturnValue('prompt');
     mockCreateSession.mockReturnValue({ id: 'sess-1', status: 'active' });
+    mockEnqueueOutboundCandidate.mockReturnValue({
+      id: 'q-1',
+      runAfter: '2026-03-09T14:00:00Z',
+      deduped: false,
+    });
+    mockPopDueCandidates.mockReturnValue([]);
+    mockGetOutboundQueueSnapshot.mockReturnValue({ size: 0, earliestRunAfter: null });
   });
 
-  it('skips all candidates outside send window before lookups', async () => {
+  it('queues candidates outside send window before any lookups', async () => {
     const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
       method: 'POST',
       headers: {
@@ -70,7 +86,8 @@ describe('sms automation route', () => {
 
     expect(res.status).toBe(200);
     expect(body.sendWindow.allowed).toBe(false);
-    expect(body.results[0].reason).toBe('outside_send_window');
+    expect(body.results[0].reason).toBe('queued_outside_send_window');
+    expect(body.results[0].status).toBe('queued');
     expect(mockLookupMember).not.toHaveBeenCalled();
   });
 
@@ -125,5 +142,60 @@ describe('sms automation route', () => {
     expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].matchedContact).toContain('917');
     expect(mockLookupMember).toHaveBeenCalledTimes(2);
+  });
+
+  it('can process queued work with useQueuedOnly', async () => {
+    mockPopDueCandidates.mockReturnValue([
+      {
+        id: 'q-2',
+        payload: {
+          candidate: {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbievonahrens@mac.com',
+          },
+          options: {},
+        },
+      },
+    ]);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '30',
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      isMember: true,
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        useQueuedOnly: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.summary.total).toBe(1);
+    expect(body.results[0].source).toBe('queued');
+    expect(body.results[0].queueId).toBe('q-2');
   });
 });
