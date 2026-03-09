@@ -14,6 +14,7 @@ import {
   getOutboundQueueSnapshot,
   popDueCandidates,
 } from '../../../../../lib/sms-outbound-queue';
+import { checkKlaviyoSmsOptIn } from '../../../../../lib/klaviyo';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 10);
 
@@ -134,6 +135,15 @@ export async function POST(request) {
     const processQueued = asBool(body.processQueued, true);
     const useQueuedOnly = asBool(body.useQueuedOnly, false);
     const maxQueueDrain = Math.max(0, asInt(body.maxQueueDrain, maxSends));
+    const requireManualLiveApproval = asBool(
+      process.env.SMS_REQUIRE_MANUAL_LIVE_APPROVAL,
+      true,
+    );
+    const liveApproval = asBool(body.liveApproval, false);
+    const enforceKlaviyoOptIn = asBool(
+      body.enforceKlaviyoOptIn,
+      asBool(process.env.SMS_REQUIRE_KLAVIYO_OPT_IN, true),
+    );
     const directCandidates = useQueuedOnly ? [] : resolveCandidates(body);
 
     const results = [];
@@ -143,6 +153,17 @@ export async function POST(request) {
       startHour: sendStartHour,
       endHour: sendEndHour,
     });
+
+    if (!dryRun && requireManualLiveApproval && !liveApproval) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: 'Live outbound SMS is locked pending manual approval.',
+          hint: 'Use dryRun=true, or set liveApproval=true after explicit approval.',
+        },
+        { status: 403 },
+      );
+    }
 
     if (enforceSendWindow && !sendWindow.allowed) {
       const runAfter = getNextWindowStartIso(runNow, {
@@ -373,6 +394,38 @@ export async function POST(request) {
         continue;
       }
 
+      let klaviyoGate = {
+        allowed: true,
+        reason: null,
+      };
+      if (enforceKlaviyoOptIn) {
+        klaviyoGate = await checkKlaviyoSmsOptIn({
+          phone: profilePhone,
+          email: profile.email || email || null,
+        });
+      }
+      if (!klaviyoGate.allowed) {
+        results.push({
+          candidate: { firstName, lastName, email: email || null, phone: phone || null },
+          profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+          status: 'skipped',
+          reason: klaviyoGate.reason || 'klaviyo_sms_not_subscribed',
+          matchedContact,
+          source: work.source,
+          queueId: work.queueId,
+          klaviyo: {
+            matchedBy: klaviyoGate.matchedBy || null,
+            profileId: klaviyoGate.profileId || null,
+            consent: klaviyoGate.consent || null,
+            canReceiveSmsMarketing: klaviyoGate.canReceiveSmsMarketing ?? null,
+            method: klaviyoGate.method || null,
+            consentTimestamp: klaviyoGate.consentTimestamp || null,
+            lastUpdated: klaviyoGate.lastUpdated || null,
+          },
+        });
+        continue;
+      }
+
       const session = getOrCreateSmsSession(profile);
       const pending = session.pendingUpgradeOffer;
       if (
@@ -444,6 +497,12 @@ export async function POST(request) {
           matchedContact,
           source: work.source,
           queueId: work.queueId,
+          klaviyo: {
+            matchedBy: klaviyoGate.matchedBy || null,
+            profileId: klaviyoGate.profileId || null,
+            consent: klaviyoGate.consent || null,
+            canReceiveSmsMarketing: klaviyoGate.canReceiveSmsMarketing ?? null,
+          },
         });
         continue;
       }
@@ -467,6 +526,12 @@ export async function POST(request) {
           matchedContact,
           source: work.source,
           queueId: work.queueId,
+          klaviyo: {
+            matchedBy: klaviyoGate.matchedBy || null,
+            profileId: klaviyoGate.profileId || null,
+            consent: klaviyoGate.consent || null,
+            canReceiveSmsMarketing: klaviyoGate.canReceiveSmsMarketing ?? null,
+          },
         });
       } catch (err) {
         results.push({

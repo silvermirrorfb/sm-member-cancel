@@ -131,8 +131,24 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
 - `windowHours`: eligibility window before appointment (default `6`).
 - `sendTimezone`: timezone for send-hour guardrail (default `America/New_York`).
 - `sendStartHour` / `sendEndHour`: allowed send range in 24h format (`9` to `17` = 9:00 AM to 4:59 PM).
+- `enforceKlaviyoOptIn` (default `true`): require Klaviyo SMS marketing consent before outbound SMS is sent.
+- `liveApproval` (default `false`): required for any non-dry-run live send while manual lock is enabled.
 - `enforceSendWindow`: set `false` to bypass send-hour guardrail for QA-only checks.
 - `queueWhenOutsideWindow` (default `true`): if outside send hours, queue candidates for next send window instead of dropping them.
 - `processQueued` (default `true`): when in-window, automatically drain due queued items and process them.
 - `useQueuedOnly` (default `false`): process only queued items (no direct candidates required).
 - `maxQueueDrain`: cap number of queued items processed in one run.
+
+### Klaviyo opt-in source of truth (required)
+- Outbound SMS route checks Klaviyo profile `subscriptions.sms.marketing`.
+- SMS is allowed only when:
+  - `consent = SUBSCRIBED`
+  - `can_receive_sms_marketing` is not `false`
+- If Klaviyo is missing/unreachable/not subscribed, route fails closed and returns `status: "skipped"` with a Klaviyo reason code.
+
+Required env vars:
+- `KLAVIYO_PRIVATE_API_KEY`
+- `KLAVIYO_API_BASE_URL` (optional override, default `https://a.klaviyo.com/api`)
+- `KLAVIYO_REVISION` (optional override, default `2026-01-15`)
+- `SMS_REQUIRE_KLAVIYO_OPT_IN` (optional, default `true`)
+- `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` (optional, default `true`)

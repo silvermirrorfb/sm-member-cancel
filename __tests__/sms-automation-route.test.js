@@ -12,6 +12,7 @@ const mockSendTwilioSms = vi.fn();
 const mockEnqueueOutboundCandidate = vi.fn();
 const mockPopDueCandidates = vi.fn();
 const mockGetOutboundQueueSnapshot = vi.fn();
+const mockCheckKlaviyoSmsOptIn = vi.fn();
 
 vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
@@ -43,6 +44,10 @@ vi.mock('../src/lib/sms-outbound-queue.js', () => ({
   getOutboundQueueSnapshot: (...args) => mockGetOutboundQueueSnapshot(...args),
 }));
 
+vi.mock('../src/lib/klaviyo.js', () => ({
+  checkKlaviyoSmsOptIn: (...args) => mockCheckKlaviyoSmsOptIn(...args),
+}));
+
 import { POST } from '../src/app/api/sms/automation/pre-appointment/route.js';
 
 describe('sms automation route', () => {
@@ -60,6 +65,14 @@ describe('sms automation route', () => {
     });
     mockPopDueCandidates.mockReturnValue([]);
     mockGetOutboundQueueSnapshot.mockReturnValue({ size: 0, earliestRunAfter: null });
+    mockCheckKlaviyoSmsOptIn.mockResolvedValue({
+      allowed: true,
+      reason: null,
+      matchedBy: 'phone',
+      profileId: 'klyv-1',
+      consent: 'SUBSCRIBED',
+      canReceiveSmsMarketing: true,
+    });
   });
 
   it('queues candidates outside send window before any lookups', async () => {
@@ -197,5 +210,166 @@ describe('sms automation route', () => {
     expect(body.summary.total).toBe(1);
     expect(body.results[0].source).toBe('queued');
     expect(body.results[0].queueId).toBe('q-2');
+  });
+
+  it('skips outbound message when klaviyo sms consent is not subscribed', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '30',
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+      email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      isMember: true,
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    mockCheckKlaviyoSmsOptIn.mockResolvedValue({
+      allowed: false,
+      reason: 'klaviyo_sms_not_subscribed',
+      matchedBy: 'phone',
+      profileId: 'klyv-2',
+      consent: 'UNSUBSCRIBED',
+      canReceiveSmsMarketing: false,
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: false,
+        liveApproval: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbie@example.com',
+            phone: '+1 (917) 555-1234',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('skipped');
+    expect(body.results[0].reason).toBe('klaviyo_sms_not_subscribed');
+    expect(body.results[0].klaviyo.profileId).toBe('klyv-2');
+    expect(mockSendTwilioSms).not.toHaveBeenCalled();
+  });
+
+  it('allows outbound processing when klaviyo consent is valid', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '30',
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+      email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      isMember: true,
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    mockCheckKlaviyoSmsOptIn.mockResolvedValue({
+      allowed: true,
+      reason: null,
+      matchedBy: 'phone',
+      profileId: 'klyv-3',
+      consent: 'SUBSCRIBED',
+      canReceiveSmsMarketing: true,
+    });
+    mockSendTwilioSms.mockResolvedValue({ sid: 'SM123' });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: false,
+        liveApproval: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbie@example.com',
+            phone: '+1 (917) 555-1234',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('sent');
+    expect(body.results[0].twilioSid).toBe('SM123');
+    expect(body.results[0].klaviyo.profileId).toBe('klyv-3');
+    expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks live sends without manual liveApproval flag', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '30',
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+      email: 'debbie@example.com',
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: false,
+        now: '2026-03-09T15:00:00Z',
+        candidates: [
+          {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbie@example.com',
+            phone: '+1 (917) 555-1234',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(res.status).toBe(403);
+    expect(body.error).toContain('locked');
+    expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    expect(mockLookupMember).not.toHaveBeenCalled();
   });
 });
