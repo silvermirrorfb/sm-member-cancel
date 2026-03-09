@@ -1116,4 +1116,215 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(rootsWithErrors.has('bookings')).toBe(true);
     expect(rootsWithErrors.has('calendarAppointments')).toBe(true);
   });
+
+  it('passes required locationId argument when appointments root requires it', async () => {
+    const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
+    const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });
+    const nonNullType = (inner) => ({ kind: 'NON_NULL', name: null, ofType: inner });
+
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const typeName = body?.variables?.typeName;
+
+      if (body.query.includes('IntrospectSchemaQueryType')) {
+        return {
+          ok: true,
+          json: async () => ({ data: { __schema: { queryType: { name: 'RootQueryType' } } } }),
+        };
+      }
+
+      if (body.query.includes('IntrospectTypeDetailed')) {
+        if (typeName === 'RootQueryType') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    {
+                      name: 'appointments',
+                      args: [
+                        { name: 'locationId', type: nonNullType(scalarType('ID')) },
+                        { name: 'first', type: scalarType('Int') },
+                      ],
+                      type: objectType('AppointmentConnection'),
+                    },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentConnection') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'edges', type: objectType('AppointmentEdge') }, { name: 'pageInfo', type: objectType('PageInfo') }],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'Query') {
+          return { ok: true, json: async () => ({ data: { __type: null } }) };
+        }
+      }
+
+      if (body.query.includes('IntrospectType')) {
+        if (typeName === 'Query') {
+          return { ok: true, json: async () => ({ data: { __type: null } }) };
+        }
+        if (typeName === 'RootQueryType') {
+          return { ok: true, json: async () => ({ data: { __type: { fields: [{ name: 'appointments' }] } } }) };
+        }
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'id', type: scalarType('ID') },
+                    { name: 'startAt', type: scalarType('DateTime') },
+                    { name: 'endAt', type: scalarType('DateTime') },
+                    { name: 'clientId', type: scalarType('ID') },
+                    { name: 'providerId', type: scalarType('ID') },
+                    { name: 'state', type: scalarType('AppointmentState') },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentConnection') {
+          return { ok: true, json: async () => ({ data: { __type: { fields: [{ name: 'edges' }, { name: 'pageInfo' }] } } }) };
+        }
+      }
+
+      if (body.query.includes('ScanAppointments')) {
+        expect(body.variables?.locationId).toBe('loc-1');
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              appointments: {
+                edges: [
+                  {
+                    node: {
+                      id: 'appt-1',
+                      clientId: 'client-1',
+                      providerId: 'prov-1',
+                      startAt: '2026-03-08T10:00:00.000Z',
+                      endAt: '2026-03-08T10:30:00.000Z',
+                      state: 'BOOKED',
+                    },
+                  },
+                  {
+                    node: {
+                      id: 'appt-2',
+                      clientId: 'other',
+                      providerId: 'prov-1',
+                      startAt: '2026-03-08T11:10:00.000Z',
+                      endAt: '2026-03-08T11:40:00.000Z',
+                      state: 'BOOKED',
+                    },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: {} }) };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', locationId: 'loc-1', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
+  });
+
+  it('reports preflight error when required locationId arg is missing', async () => {
+    const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
+    const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });
+    const nonNullType = (inner) => ({ kind: 'NON_NULL', name: null, ofType: inner });
+
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const typeName = body?.variables?.typeName;
+
+      if (body.query.includes('IntrospectSchemaQueryType')) {
+        return {
+          ok: true,
+          json: async () => ({ data: { __schema: { queryType: { name: 'RootQueryType' } } } }),
+        };
+      }
+
+      if (body.query.includes('IntrospectTypeDetailed')) {
+        if (typeName === 'RootQueryType') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    {
+                      name: 'appointments',
+                      args: [{ name: 'locationId', type: nonNullType(scalarType('ID')) }],
+                      type: objectType('AppointmentConnection'),
+                    },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'Query') return { ok: true, json: async () => ({ data: { __type: null } }) };
+      }
+
+      if (body.query.includes('IntrospectType')) {
+        if (typeName === 'Query') return { ok: true, json: async () => ({ data: { __type: null } }) };
+        if (typeName === 'RootQueryType') return { ok: true, json: async () => ({ data: { __type: { fields: [{ name: 'appointments' }] } } }) };
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'id' }, { name: 'startAt' }, { name: 'endAt' }, { name: 'clientId' }],
+                },
+              },
+            }),
+          };
+        }
+      }
+
+      if (body.query.includes('ScanAppointments')) {
+        return {
+          ok: true,
+          json: async () => ({ errors: [{ message: 'should not execute scan query when required args missing' }] }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: {} }) };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('appointment_scan_failed');
+    expect(result.diagnostics?.failure).toBe('appointments_query_failed');
+    expect(result.diagnostics?.queryErrors?.[0]?.stage).toBe('preflight');
+    expect(result.diagnostics?.queryErrors?.[0]?.errors?.[0]?.code).toBe('MISSING_REQUIRED_QUERY_ARG');
+  });
 });

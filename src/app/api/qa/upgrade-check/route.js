@@ -133,6 +133,7 @@ export async function POST(request) {
         tier: profile.tier || null,
         accountStatus: profile.accountStatus || null,
         location: profile.location || null,
+        locationId: profile.locationId || null,
       },
       qa: {
         matchedContact,

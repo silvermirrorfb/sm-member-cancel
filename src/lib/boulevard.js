@@ -436,7 +436,7 @@ async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {
               createdAt
               appointmentCount
               active
-              primaryLocation { name }
+              primaryLocation { id name }
             }
           }
           pageInfo { hasNextPage endCursor }
@@ -488,7 +488,7 @@ async function findMembershipForClient(apiUrl, headers, clientId) {
               termNumber
               unitPrice
               nextChargeDate
-              location { name }
+              location { id name }
             }
           }
           pageInfo { hasNextPage endCursor }
@@ -558,6 +558,13 @@ function unwrapNamedType(typeNode) {
     kind: current.kind || null,
     name: current.name || null,
   };
+}
+
+function formatGraphQLType(typeNode) {
+  if (!typeNode || typeof typeNode !== 'object') return 'String';
+  if (typeNode.kind === 'NON_NULL') return `${formatGraphQLType(typeNode.ofType)}!`;
+  if (typeNode.kind === 'LIST') return `[${formatGraphQLType(typeNode.ofType)}]`;
+  return typeNode.name || 'String';
 }
 
 async function getTypeFieldDetailMap(apiUrl, headers, typeName) {
@@ -640,7 +647,10 @@ async function getTypeFieldDetailMap(apiUrl, headers, typeName) {
       fieldName,
       kind: namedType?.kind || null,
       namedType: namedType?.name || null,
-      args,
+      args: args?.map(arg => ({
+        ...arg,
+        typeText: formatGraphQLType(field?.args?.find(a => String(a?.name || '').trim() === arg.name)?.type || null),
+      })) || null,
     });
   }
   typeFieldDetailCache.set(key, { fields: map, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
@@ -991,15 +1001,59 @@ function buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection) {
   return strategies;
 }
 
-function buildScanAppointmentsQuery(queryRoot, selectedFields, strategy) {
+function pickQueryContextArgValue(argName, context) {
+  if (!argName) return null;
+  if (argName === 'locationId') return context?.locationId || null;
+  return null;
+}
+
+function buildRootQueryArgBindings(rootFieldDetail, context = {}) {
+  const argDefs = Array.isArray(rootFieldDetail?.args) ? rootFieldDetail.args : [];
+  const argBindings = [];
+  const variableDefs = [];
+  const variables = {};
+  const missingRequiredArgs = [];
+
+  for (const arg of argDefs) {
+    const argName = String(arg?.name || '').trim();
+    if (!argName || argName === 'first' || argName === 'after') continue;
+
+    const value = pickQueryContextArgValue(argName, context);
+    const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
+    if (!hasValue) {
+      if (arg?.required) missingRequiredArgs.push(argName);
+      continue;
+    }
+
+    argBindings.push(`${argName}: $${argName}`);
+    variableDefs.push(`$${argName}: ${arg?.typeText || (arg?.required ? 'String!' : 'String')}`);
+    variables[argName] = typeof value === 'string' ? value.trim() : value;
+  }
+
+  return {
+    argBindings,
+    variableDefs,
+    variables,
+    missingRequiredArgs,
+  };
+}
+
+function buildScanAppointmentsQuery(queryRoot, selectedFields, strategy, rootBindings = null) {
   const fields = selectedFields.join('\n                ');
+  const rootArgBindings = Array.isArray(rootBindings?.argBindings) ? rootBindings.argBindings : [];
+  const rootVariableDefs = Array.isArray(rootBindings?.variableDefs) ? rootBindings.variableDefs : [];
+
   if (strategy.mode === 'connection') {
-    const argFragment = strategy.argMode === 'first_after'
-      ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after)`
+    const strategyArgs = strategy.argMode === 'first_after'
+      ? [`first: ${APPOINTMENT_SCAN_PAGE_SIZE}`, 'after: $after']
       : strategy.argMode === 'first_only'
-      ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE})`
-      : '';
-    const variableDef = strategy.argMode === 'first_after' ? '($after: String)' : '';
+      ? [`first: ${APPOINTMENT_SCAN_PAGE_SIZE}`]
+      : [];
+    const allArgs = [...strategyArgs, ...rootArgBindings];
+    const argFragment = allArgs.length > 0 ? `(${allArgs.join(', ')})` : '';
+    const strategyVariableDefs = strategy.argMode === 'first_after' ? ['$after: String'] : [];
+    const allVariableDefs = [...strategyVariableDefs, ...rootVariableDefs];
+    const variableDef = allVariableDefs.length > 0 ? `(${allVariableDefs.join(', ')})` : '';
     return `
       query ScanAppointments${variableDef} {
         ${queryRoot}${argFragment} {
@@ -1014,11 +1068,16 @@ function buildScanAppointmentsQuery(queryRoot, selectedFields, strategy) {
     `;
   }
   if (strategy.mode === 'nodes_list') {
-    const argFragment = strategy.argMode === 'first_only'
-      ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE})`
-      : '';
+    const strategyArgs = strategy.argMode === 'first_only'
+      ? [`first: ${APPOINTMENT_SCAN_PAGE_SIZE}`]
+      : [];
+    const allArgs = [...strategyArgs, ...rootArgBindings];
+    const argFragment = allArgs.length > 0 ? `(${allArgs.join(', ')})` : '';
+    const strategyVariableDefs = [];
+    const allVariableDefs = [...strategyVariableDefs, ...rootVariableDefs];
+    const variableDef = allVariableDefs.length > 0 ? `(${allVariableDefs.join(', ')})` : '';
     return `
-      query ScanAppointments {
+      query ScanAppointments${variableDef} {
         ${queryRoot}${argFragment} {
           nodes {
             ${fields}
@@ -1029,11 +1088,15 @@ function buildScanAppointmentsQuery(queryRoot, selectedFields, strategy) {
     `;
   }
 
-  const argFragment = strategy.argMode === 'first_only'
-    ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE})`
-    : '';
+  const strategyArgs = strategy.argMode === 'first_only'
+    ? [`first: ${APPOINTMENT_SCAN_PAGE_SIZE}`]
+    : [];
+  const allArgs = [...strategyArgs, ...rootArgBindings];
+  const argFragment = allArgs.length > 0 ? `(${allArgs.join(', ')})` : '';
+  const allVariableDefs = [...rootVariableDefs];
+  const variableDef = allVariableDefs.length > 0 ? `(${allVariableDefs.join(', ')})` : '';
   return `
-    query ScanAppointments {
+    query ScanAppointments${variableDef} {
       ${queryRoot}${argFragment} {
         ${fields}
       }
@@ -1065,11 +1128,13 @@ function extractStrategyNodes(payload, strategy) {
   return { nodes: [], pageInfo: null };
 }
 
-async function scanAppointments(apiUrl, headers) {
+async function scanAppointments(apiUrl, headers, context = {}) {
+  const locationIdForScan = String(context?.locationId || '').trim() || null;
   const diagnostics = {
     typeIntrospection: null,
     queryIntrospection: null,
     queryTypeName: null,
+    locationId: locationIdForScan,
     queryRootTried: [],
     queryAttempts: [],
     queryErrors: [],
@@ -1187,6 +1252,26 @@ async function scanAppointments(apiUrl, headers) {
     const rootLooksLikeConnection = rootReturnTypeFieldSet
       ? rootReturnTypeFieldSet.has('edges') || rootReturnTypeFieldSet.has('nodes')
       : null;
+    const rootBindings = buildRootQueryArgBindings(rootFieldDetail, {
+      locationId: locationIdForScan,
+    });
+    if (rootBindings.missingRequiredArgs.length > 0) {
+      const missingArgsError = {
+        root: queryRoot,
+        strategy: null,
+        stage: 'preflight',
+        status: null,
+        errors: rootBindings.missingRequiredArgs.map(argName => ({
+          message: `Missing required query argument value: ${argName}`,
+          path: [queryRoot, argName],
+          code: 'MISSING_REQUIRED_QUERY_ARG',
+        })),
+        bodyPreview: null,
+      };
+      diagnostics.queryErrors.push(missingArgsError);
+      diagnostics.lastQueryError = missingArgsError;
+      continue;
+    }
     const strategies = buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection);
 
     for (const strategy of strategies) {
@@ -1196,8 +1281,11 @@ async function scanAppointments(apiUrl, headers) {
       let queryError = null;
 
       for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
-        const query = buildScanAppointmentsQuery(queryRoot, selectedFields, strategy);
-        const variables = strategy.argMode === 'first_after' ? { after } : {};
+        const query = buildScanAppointmentsQuery(queryRoot, selectedFields, strategy, rootBindings);
+        const variables = {
+          ...rootBindings.variables,
+          ...(strategy.argMode === 'first_after' ? { after } : {}),
+        };
         const data = await fetchBoulevardGraphQL(
           apiUrl,
           headers,
@@ -1381,7 +1469,17 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   const auth = getBoulevardAuthContext();
   if (!auth) return { eligible: false, reason: 'boulevard_not_configured' };
 
-  const scan = await scanAppointments(auth.apiUrl, auth.headers);
+  const profileLocationId = String(
+    options?.locationId ||
+    profile?.locationId ||
+    profile?.primaryLocationId ||
+    profile?.location?.id ||
+    ''
+  ).trim() || null;
+
+  const scan = await scanAppointments(auth.apiUrl, auth.headers, {
+    locationId: profileLocationId,
+  });
   const appointments = scan?.appointments || null;
   if (!appointments) {
     return {
@@ -1549,7 +1647,7 @@ async function lookupMember(name, emailOrPhone) {
                 createdAt
                 appointmentCount
                 active
-                primaryLocation { name }
+                primaryLocation { id name }
               }
             }
           }
@@ -1592,6 +1690,7 @@ async function lookupMember(name, emailOrPhone) {
       nextChargeDate: membership.nextChargeDate,
       unitPrice: membership.unitPrice,
       location: membership?.location?.name || match.node?.primaryLocation?.name || match.node.location,
+      locationId: membership?.location?.id || match.node?.primaryLocation?.id || null,
     } : {
       ...match.node,
       ...(commerce || {}),
@@ -1617,6 +1716,7 @@ function buildProfile(d) {
     clientId: d.id || null,
     name: `${d.firstName} ${d.lastName}`, firstName: d.firstName, email: d.email,
     phone: d.mobilePhone || null, location: d.location || d.primaryLocation?.name || 'Unknown',
+    locationId: d.locationId || d.primaryLocation?.id || null,
     tier: tier || null, monthlyRate,
     clientSince, memberSince, tenureMonths,
     accountStatus: d.accountStatus || d.membershipStatus || (d.active === false ? 'inactive' : d.active === true ? 'active' : null),
