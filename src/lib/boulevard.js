@@ -1909,6 +1909,7 @@ async function lookupMember(name, emailOrPhone, options = {}) {
 
     let match = findNameMatch(name, clients, options);
     let usedNameScanLocationFallback = false;
+    const toNode = (candidate) => candidate?.node || candidate || null;
     if (
       isEmail &&
       preferredLocationCanonicalId &&
@@ -1917,9 +1918,19 @@ async function lookupMember(name, emailOrPhone, options = {}) {
     ) {
       const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
       if (Array.isArray(nameScanMatches) && nameScanMatches.length > 0) {
-        const preferredMatch = findNameMatch(name, nameScanMatches, options);
-        if (preferredMatch?.node?.id && preferredMatch.node.id !== match.node.id) {
-          match = preferredMatch;
+        const fallback = resolveNameScanFallbackCandidate(name, email, nameScanMatches);
+        const fallbackNode = toNode(fallback?.candidate);
+        const fallbackLocationCanonicalId = canonicalizeBoulevardLocationId(fallbackNode?.primaryLocation?.id || '') || null;
+        const fallbackMailboxMatch = emailsLikelyReferToSameMailbox(email, fallbackNode?.email || '');
+        if (
+          fallbackNode?.id &&
+          fallbackMailboxMatch &&
+          fallbackLocationCanonicalId &&
+          fallbackLocationCanonicalId === preferredLocationCanonicalId &&
+          fallbackNode.id !== match.node.id
+        ) {
+          match = { node: fallbackNode };
+          lookupStrategy = fallback?.strategy || 'name_scan_location_preferred';
           usedNameScanLocationFallback = true;
         }
       }
@@ -1927,9 +1938,12 @@ async function lookupMember(name, emailOrPhone, options = {}) {
     if (!match && isEmail) {
       const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
       if (Array.isArray(nameScanMatches) && nameScanMatches.length > 0) {
-        const preferredMatch = findNameMatch(name, nameScanMatches, options);
-        if (preferredMatch) {
-          match = preferredMatch;
+        const fallback = resolveNameScanFallbackCandidate(name, email, nameScanMatches);
+        const fallbackNode = toNode(fallback?.candidate);
+        const fallbackMailboxMatch = emailsLikelyReferToSameMailbox(email, fallbackNode?.email || '');
+        if (fallbackNode && fallbackMailboxMatch) {
+          match = { node: fallbackNode };
+          lookupStrategy = fallback?.strategy || 'name_scan_mailbox';
           usedNameScanLocationFallback = true;
         }
       }
