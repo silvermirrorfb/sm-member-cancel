@@ -416,6 +416,21 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     global.fetch = vi.fn(async (_url, init) => {
       const body = JSON.parse(init.body);
       if (body.query.includes('IntrospectType')) {
+        const typeName = body?.variables?.typeName;
+        if (typeName === 'Query') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'appointments' },
+                  ],
+                },
+              },
+            }),
+          };
+        }
         return {
           ok: true,
           json: async () => ({

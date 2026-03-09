@@ -348,6 +348,14 @@ async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options 
   } catch (fetchErr) {
     if (fetchErr.name === 'AbortError') console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
     else console.error('Boulevard API fetch error:', buildFetchErrorDiagnostics(fetchErr, apiUrl));
+    if (options.returnErrors) {
+      return {
+        __error: {
+          stage: 'fetch',
+          diagnostics: buildFetchErrorDiagnostics(fetchErr, apiUrl),
+        },
+      };
+    }
     return null;
   } finally {
     clearTimeout(timeoutId);
@@ -356,6 +364,15 @@ async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options 
   if (!response.ok) {
     const t = await response.text().catch(() => '');
     console.error(`Boulevard API HTTP ${response.status}: ${t.substring(0,500)}`);
+    if (options.returnErrors) {
+      return {
+        __error: {
+          stage: 'http',
+          status: response.status,
+          bodyPreview: t.substring(0, 500),
+        },
+      };
+    }
     return null;
   }
 
@@ -364,12 +381,29 @@ async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options 
     data = await response.json();
   } catch (e) {
     console.error('Boulevard API non-JSON:', e.message);
+    if (options.returnErrors) {
+      return {
+        __error: {
+          stage: 'non_json',
+          message: e.message,
+        },
+      };
+    }
     return null;
   }
 
   if (data.errors) {
     if (!options.silentErrors) {
       console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
+    }
+    if (options.returnErrors) {
+      return {
+        __error: {
+          stage: 'graphql',
+          errors: data.errors,
+        },
+        data: data.data || null,
+      };
     }
     return null;
   }
@@ -642,9 +676,41 @@ function computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, is
   };
 }
 
+function compactGraphQLErrorPayload(payload) {
+  if (!payload) return null;
+  if (Array.isArray(payload.errors)) {
+    return payload.errors.map(err => ({
+      message: err?.message || null,
+      path: err?.path || null,
+      code: err?.extensions?.code || null,
+    }));
+  }
+  return payload;
+}
+
 async function scanAppointments(apiUrl, headers) {
+  const diagnostics = {
+    typeIntrospection: null,
+    queryIntrospection: null,
+    queryRootTried: [],
+    failure: null,
+  };
+
   const fieldSet = await getTypeFieldSet(apiUrl, headers, 'Appointment');
-  if (!fieldSet) return null;
+  diagnostics.typeIntrospection = fieldSet ? 'ok' : 'missing_type_or_fields';
+  if (!fieldSet) {
+    diagnostics.failure = 'appointment_type_introspection_failed';
+    return { appointments: null, diagnostics };
+  }
+
+  const queryFieldSet = await getTypeFieldSet(apiUrl, headers, 'Query');
+  diagnostics.queryIntrospection = queryFieldSet ? 'ok' : 'missing_query_type';
+  const queryRootCandidates = ['appointments', 'bookings', 'calendarAppointments']
+    .filter(root => queryFieldSet && queryFieldSet.has(root));
+  if (queryRootCandidates.length === 0) {
+    diagnostics.failure = 'appointments_query_field_not_found';
+    return { appointments: null, diagnostics };
+  }
 
   const clientIdField = pickFirstAvailableField(fieldSet, ['clientId', 'customerId']);
   const providerIdField = pickFirstAvailableField(fieldSet, ['providerId', 'staffId', 'employeeId', 'serviceProviderId']);
@@ -653,7 +719,15 @@ async function scanAppointments(apiUrl, headers) {
   const canceledAtField = pickFirstAvailableField(fieldSet, ['canceledAt', 'cancelledAt']);
 
   if (!fieldSet.has('id') || !fieldSet.has('startOn') || !fieldSet.has('endOn') || !clientIdField || !providerIdField) {
-    return null;
+    diagnostics.failure = 'appointment_missing_required_fields';
+    diagnostics.requiredFields = {
+      hasId: fieldSet.has('id'),
+      hasStartOn: fieldSet.has('startOn'),
+      hasEndOn: fieldSet.has('endOn'),
+      clientIdField,
+      providerIdField,
+    };
+    return { appointments: null, diagnostics };
   }
 
   const selectedFields = ['id', 'startOn', 'endOn', clientIdField, providerIdField];
@@ -661,51 +735,80 @@ async function scanAppointments(apiUrl, headers) {
   if (statusField) selectedFields.push(statusField);
   if (canceledAtField) selectedFields.push(canceledAtField);
 
-  const appointments = [];
-  let after = null;
+  for (const queryRoot of queryRootCandidates) {
+    diagnostics.queryRootTried.push(queryRoot);
+    const appointments = [];
+    let after = null;
+    let queryFailed = false;
+    let queryError = null;
 
-  for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
-    const query = `
-      query ScanAppointments($after: String) {
-        appointments(first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after) {
-          edges {
-            node {
-              ${selectedFields.join('\n              ')}
+    for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
+      const query = `
+        query ScanAppointments($after: String) {
+          ${queryRoot}(first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after) {
+            edges {
+              node {
+                ${selectedFields.join('\n                ')}
+              }
             }
+            pageInfo { hasNextPage endCursor }
           }
-          pageInfo { hasNextPage endCursor }
         }
+      `;
+      const data = await fetchBoulevardGraphQL(
+        apiUrl,
+        headers,
+        query,
+        { after },
+        { silentErrors: true, returnErrors: true },
+      );
+      if (data?.__error) {
+        queryFailed = true;
+        queryError = data.__error;
+        break;
       }
-    `;
-    const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { after }, { silentErrors: true });
-    if (!data) return null;
 
-    const connection = data?.data?.appointments;
-    const edges = connection?.edges || [];
-    if (edges.length === 0) break;
+      const connection = data?.data?.[queryRoot];
+      const edges = connection?.edges || [];
+      if (edges.length === 0) break;
 
-    for (const edge of edges) {
-      const node = edge?.node || {};
-      const normalized = {
-        id: String(node.id || ''),
-        startOn: node.startOn || null,
-        endOn: node.endOn || null,
-        clientId: String(node[clientIdField] || ''),
-        providerId: String(node[providerIdField] || ''),
-        locationId: locationIdField ? String(node[locationIdField] || '') : null,
-        status: statusField ? String(node[statusField] || '') : null,
-        canceledAt: canceledAtField ? node[canceledAtField] : null,
-      };
-      if (!normalized.id || !normalized.startOn || !normalized.endOn || !normalized.clientId || !normalized.providerId) continue;
-      appointments.push(normalized);
+      for (const edge of edges) {
+        const node = edge?.node || {};
+        const normalized = {
+          id: String(node.id || ''),
+          startOn: node.startOn || null,
+          endOn: node.endOn || null,
+          clientId: String(node[clientIdField] || ''),
+          providerId: String(node[providerIdField] || ''),
+          locationId: locationIdField ? String(node[locationIdField] || '') : null,
+          status: statusField ? String(node[statusField] || '') : null,
+          canceledAt: canceledAtField ? node[canceledAtField] : null,
+        };
+        if (!normalized.id || !normalized.startOn || !normalized.endOn || !normalized.clientId || !normalized.providerId) continue;
+        appointments.push(normalized);
+      }
+
+      if (!connection?.pageInfo?.hasNextPage) break;
+      after = connection?.pageInfo?.endCursor || null;
+      if (!after) break;
     }
 
-    if (!connection?.pageInfo?.hasNextPage) break;
-    after = connection?.pageInfo?.endCursor || null;
-    if (!after) break;
+    if (!queryFailed) {
+      diagnostics.failure = null;
+      return { appointments, diagnostics };
+    }
+
+    diagnostics.lastQueryError = {
+      root: queryRoot,
+      stage: queryError?.stage || null,
+      status: queryError?.status || null,
+      errors: compactGraphQLErrorPayload(queryError),
+      bodyPreview: queryError?.bodyPreview || null,
+    };
   }
 
-  return appointments;
+  diagnostics.failure = 'appointments_query_failed';
+  return { appointments: null, diagnostics };
 }
 
 function evaluateUpgradeEligibilityFromAppointments(appointments, profile, options = {}) {
@@ -801,8 +904,15 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   const auth = getBoulevardAuthContext();
   if (!auth) return { eligible: false, reason: 'boulevard_not_configured' };
 
-  const appointments = await scanAppointments(auth.apiUrl, auth.headers);
-  if (!appointments) return { eligible: false, reason: 'appointment_scan_failed' };
+  const scan = await scanAppointments(auth.apiUrl, auth.headers);
+  const appointments = scan?.appointments || null;
+  if (!appointments) {
+    return {
+      eligible: false,
+      reason: 'appointment_scan_failed',
+      diagnostics: scan?.diagnostics || null,
+    };
+  }
 
   return evaluateUpgradeEligibilityFromAppointments(appointments, profile, options);
 }

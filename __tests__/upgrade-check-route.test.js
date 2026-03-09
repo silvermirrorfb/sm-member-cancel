@@ -106,4 +106,52 @@ describe('QA upgrade-check route', () => {
     expect(mockLookupMember).toHaveBeenCalledWith('Jane Smith', 'jane@example.com');
     expect(mockEvaluateUpgradeOpportunityForProfile).toHaveBeenCalled();
   });
+
+  it('includes diagnostics only when debug=true', async () => {
+    process.env.NODE_ENV = 'development';
+    mockLookupMember.mockResolvedValue({
+      name: 'Jane Smith',
+      firstName: 'Jane',
+      email: 'jane@example.com',
+      phone: '15555550123',
+      clientId: 'client-1',
+      tier: '30',
+      accountStatus: 'active',
+      location: 'Flatiron',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: false,
+      reason: 'appointment_scan_failed',
+      diagnostics: { failure: 'appointments_query_failed' },
+    });
+
+    const debugReq = new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Jane',
+        lastName: 'Smith',
+        email: 'jane@example.com',
+        debug: true,
+      }),
+    });
+    const debugRes = await POST(debugReq);
+    const debugBody = await debugRes.json();
+    expect(debugBody.qa.debug).toBe(true);
+    expect(debugBody.opportunity.diagnostics.failure).toBe('appointments_query_failed');
+
+    const normalReq = new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Jane',
+        lastName: 'Smith',
+        email: 'jane@example.com',
+      }),
+    });
+    const normalRes = await POST(normalReq);
+    const normalBody = await normalRes.json();
+    expect(normalBody.qa.debug).toBe(false);
+    expect(normalBody.opportunity.diagnostics).toBeUndefined();
+  });
 });

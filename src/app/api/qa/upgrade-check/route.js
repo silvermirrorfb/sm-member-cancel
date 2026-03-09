@@ -59,6 +59,7 @@ export async function POST(request) {
     const email = parseBodyValue(body.email).toLowerCase();
     const phone = parseBodyValue(body.phone);
     const appointmentId = parseBodyValue(body.appointmentId);
+    const debugMode = body.debug === true || String(body.debug || '').toLowerCase() === 'true';
     const targetDurationMinutes = Number.isFinite(Number(body.targetDurationMinutes))
       ? Number(body.targetDurationMinutes)
       : null;
@@ -112,6 +113,14 @@ export async function POST(request) {
       now: nowIso || undefined,
       windowHours: windowHours || undefined,
     });
+    const responseOpportunity = debugMode
+      ? opportunity
+      : opportunity && typeof opportunity === 'object'
+      ? (() => {
+          const { diagnostics, ...rest } = opportunity;
+          return rest;
+        })()
+      : opportunity;
 
     return NextResponse.json({
       ok: true,
@@ -131,9 +140,10 @@ export async function POST(request) {
         targetDurationMinutes: targetDurationMinutes || null,
         now: nowIso || null,
         windowHours: windowHours || null,
+        debug: debugMode,
         readOnly: true,
       },
-      opportunity,
+      opportunity: responseOpportunity,
     });
   } catch (err) {
     console.error('QA upgrade check error:', err);
