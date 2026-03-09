@@ -1853,6 +1853,7 @@ async function lookupMember(name, emailOrPhone, options = {}) {
 
     let clients = [];
     let lookupStrategy = isEmail ? 'email_exact' : 'phone_scan';
+    const preferredLocationCanonicalId = canonicalizeBoulevardLocationId(options.preferLocationId || '') || null;
     if (isEmail) {
       const query = `
         query FindClientByEmail($emails: [String!]) {
@@ -1906,8 +1907,35 @@ async function lookupMember(name, emailOrPhone, options = {}) {
       return null;
     }
 
-    const match = findNameMatch(name, clients, options);
+    let match = findNameMatch(name, clients, options);
+    let usedNameScanLocationFallback = false;
+    if (
+      isEmail &&
+      preferredLocationCanonicalId &&
+      match?.node?.primaryLocation?.id &&
+      canonicalizeBoulevardLocationId(match.node.primaryLocation.id) !== preferredLocationCanonicalId
+    ) {
+      const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
+      if (Array.isArray(nameScanMatches) && nameScanMatches.length > 0) {
+        const preferredMatch = findNameMatch(name, nameScanMatches, options);
+        if (preferredMatch?.node?.id && preferredMatch.node.id !== match.node.id) {
+          match = preferredMatch;
+          usedNameScanLocationFallback = true;
+        }
+      }
+    }
+    if (!match && isEmail) {
+      const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
+      if (Array.isArray(nameScanMatches) && nameScanMatches.length > 0) {
+        const preferredMatch = findNameMatch(name, nameScanMatches, options);
+        if (preferredMatch) {
+          match = preferredMatch;
+          usedNameScanLocationFallback = true;
+        }
+      }
+    }
     if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
+    if (usedNameScanLocationFallback) lookupStrategy = 'name_scan_location_preferred';
     console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName} via ${lookupStrategy}`);
     const membership = await findMembershipForClient(apiUrl, headers, match.node.id);
     const commerce = await fetchClientCommerceMetrics(apiUrl, headers, match.node);

@@ -114,7 +114,11 @@ describe('QA upgrade-check route', () => {
     expect(body.qa.readOnly).toBe(true);
     expect(body.opportunity.eligible).toBe(true);
     expect(res.headers.get('x-request-id')).toBe(body.requestId);
-    expect(mockLookupMember).toHaveBeenCalledWith('Jane Smith', 'jane@example.com');
+    expect(mockLookupMember).toHaveBeenCalledWith(
+      'Jane Smith',
+      'jane@example.com',
+      expect.objectContaining({ preferLocationId: undefined }),
+    );
     expect(mockEvaluateUpgradeOpportunityForProfile).toHaveBeenCalled();
   });
 
