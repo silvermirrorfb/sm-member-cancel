@@ -1172,23 +1172,29 @@ function buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection) {
   const hasArgMetadata = Array.isArray(args);
   const supportsFirst = argNames.has('first');
   const supportsAfter = argNames.has('after');
+  const supportsLast = argNames.has('last');
+  const supportsBefore = argNames.has('before');
 
   const treatAsConnection = rootLooksLikeConnection !== false;
   if (treatAsConnection) {
+    if (!hasArgMetadata || (supportsLast && supportsBefore)) {
+      add({ id: 'connection_last_before', mode: 'connection', supportsPaging: true, argMode: 'last_before' });
+    }
+    if (!hasArgMetadata || supportsLast) {
+      add({ id: 'connection_last_only', mode: 'connection', supportsPaging: false, argMode: 'last_only' });
+    }
     if (!hasArgMetadata || (supportsFirst && supportsAfter)) {
       add({ id: 'connection_first_after', mode: 'connection', supportsPaging: true, argMode: 'first_after' });
     }
     if (!hasArgMetadata || supportsFirst) {
       add({ id: 'connection_first_only', mode: 'connection', supportsPaging: false, argMode: 'first_only' });
     }
-    if (!hasArgMetadata || argNames.size === 0) {
-      add({ id: 'connection_no_args', mode: 'connection', supportsPaging: false, argMode: 'no_args' });
-    }
+    add({ id: 'connection_no_args', mode: 'connection', supportsPaging: false, argMode: 'no_args' });
   }
 
-  if (!hasArgMetadata || argNames.size === 0) add({ id: 'list_no_args', mode: 'list', supportsPaging: false, argMode: 'no_args' });
+  add({ id: 'list_no_args', mode: 'list', supportsPaging: false, argMode: 'no_args' });
   if (!hasArgMetadata || supportsFirst) add({ id: 'list_first_only', mode: 'list', supportsPaging: false, argMode: 'first_only' });
-  if (!hasArgMetadata || argNames.size === 0) add({ id: 'list_nodes_no_args', mode: 'nodes_list', supportsPaging: false, argMode: 'no_args' });
+  add({ id: 'list_nodes_no_args', mode: 'nodes_list', supportsPaging: false, argMode: 'no_args' });
   if (!hasArgMetadata || supportsFirst) add({ id: 'list_nodes_first_only', mode: 'nodes_list', supportsPaging: false, argMode: 'first_only' });
 
   if (strategies.length === 0) {
@@ -1201,6 +1207,7 @@ function buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection) {
 function pickQueryContextArgValue(argName, context) {
   if (!argName) return null;
   if (argName === 'locationId') return normalizeBoulevardLocationId(context?.locationId || '') || null;
+  if (argName === 'clientId') return String(context?.clientId || '').trim() || null;
   return null;
 }
 
@@ -1213,7 +1220,7 @@ function buildRootQueryArgBindings(rootFieldDetail, context = {}) {
 
   for (const arg of argDefs) {
     const argName = String(arg?.name || '').trim();
-    if (!argName || argName === 'first' || argName === 'after') continue;
+    if (!argName || argName === 'first' || argName === 'after' || argName === 'last' || argName === 'before') continue;
 
     const value = pickQueryContextArgValue(argName, context);
     const hasValue = value !== null && value !== undefined && String(value).trim() !== '';
@@ -1241,14 +1248,22 @@ function buildScanAppointmentsQuery(queryRoot, selectedFields, strategy, rootBin
   const rootVariableDefs = Array.isArray(rootBindings?.variableDefs) ? rootBindings.variableDefs : [];
 
   if (strategy.mode === 'connection') {
-    const strategyArgs = strategy.argMode === 'first_after'
+    const strategyArgs = strategy.argMode === 'last_before'
+      ? [`last: ${APPOINTMENT_SCAN_PAGE_SIZE}`, 'before: $before']
+      : strategy.argMode === 'last_only'
+      ? [`last: ${APPOINTMENT_SCAN_PAGE_SIZE}`]
+      : strategy.argMode === 'first_after'
       ? [`first: ${APPOINTMENT_SCAN_PAGE_SIZE}`, 'after: $after']
       : strategy.argMode === 'first_only'
       ? [`first: ${APPOINTMENT_SCAN_PAGE_SIZE}`]
       : [];
     const allArgs = [...strategyArgs, ...rootArgBindings];
     const argFragment = allArgs.length > 0 ? `(${allArgs.join(', ')})` : '';
-    const strategyVariableDefs = strategy.argMode === 'first_after' ? ['$after: String'] : [];
+    const strategyVariableDefs = strategy.argMode === 'last_before'
+      ? ['$before: String']
+      : strategy.argMode === 'first_after'
+      ? ['$after: String']
+      : [];
     const allVariableDefs = [...strategyVariableDefs, ...rootVariableDefs];
     const variableDef = allVariableDefs.length > 0 ? `(${allVariableDefs.join(', ')})` : '';
     return `
@@ -1259,7 +1274,7 @@ function buildScanAppointmentsQuery(queryRoot, selectedFields, strategy, rootBin
               ${fields}
             }
           }
-          pageInfo { hasNextPage endCursor }
+          pageInfo { hasNextPage endCursor hasPreviousPage startCursor }
         }
       }
     `;
@@ -1328,12 +1343,14 @@ function extractStrategyNodes(payload, strategy) {
 async function scanAppointments(apiUrl, headers, context = {}) {
   const locationIdForScan = normalizeBoulevardLocationId(context?.locationId || '') || null;
   const locationCanonicalIdForScan = canonicalizeBoulevardLocationId(locationIdForScan || '') || null;
+  const clientIdForScan = String(context?.clientId || '').trim() || null;
   const diagnostics = {
     typeIntrospection: null,
     queryIntrospection: null,
     queryTypeName: null,
     locationId: locationIdForScan,
     locationCanonicalId: locationCanonicalIdForScan,
+    clientId: clientIdForScan,
     queryRootTried: [],
     queryAttempts: [],
     queryErrors: [],
@@ -1440,6 +1457,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
   if (canceledAtField) selectedFields.push(canceledAtField);
 
   const queryFieldDetailMap = await getTypeFieldDetailMap(apiUrl, headers, queryTypeName);
+  let successfulEmptyStrategy = null;
 
   for (const queryRoot of queryRootCandidates) {
     diagnostics.queryRootTried.push(queryRoot);
@@ -1453,6 +1471,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
       : null;
     const rootBindings = buildRootQueryArgBindings(rootFieldDetail, {
       locationId: locationIdForScan,
+      clientId: clientIdForScan,
     });
     if (rootBindings.missingRequiredArgs.length > 0) {
       const missingArgsError = {
@@ -1476,6 +1495,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
     for (const strategy of strategies) {
       const appointments = [];
       let after = null;
+      let before = null;
       let queryFailed = false;
       let queryError = null;
 
@@ -1483,6 +1503,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
         const query = buildScanAppointmentsQuery(queryRoot, selectedFields, strategy, rootBindings);
         const variables = {
           ...rootBindings.variables,
+          ...(strategy.argMode === 'last_before' ? { before } : {}),
           ...(strategy.argMode === 'first_after' ? { after } : {}),
         };
         const data = await fetchBoulevardGraphQL(
@@ -1537,19 +1558,33 @@ async function scanAppointments(apiUrl, headers, context = {}) {
         }
 
         if (!strategy.supportsPaging) break;
-        if (!pageInfo?.hasNextPage) break;
-        after = pageInfo?.endCursor || null;
-        if (!after) break;
+        if (strategy.argMode === 'last_before') {
+          if (!pageInfo?.hasPreviousPage) break;
+          before = pageInfo?.startCursor || null;
+          if (!before) break;
+        } else {
+          if (!pageInfo?.hasNextPage) break;
+          after = pageInfo?.endCursor || null;
+          if (!after) break;
+        }
       }
 
       if (!queryFailed) {
-        diagnostics.failure = null;
-        diagnostics.querySuccess = {
+        if (appointments.length > 0) {
+          diagnostics.failure = null;
+          diagnostics.querySuccess = {
+            root: queryRoot,
+            strategy: strategy.id,
+            totalAppointments: appointments.length,
+          };
+          return { appointments, diagnostics };
+        }
+        successfulEmptyStrategy = {
           root: queryRoot,
           strategy: strategy.id,
-          totalAppointments: appointments.length,
+          totalAppointments: 0,
         };
-        return { appointments, diagnostics };
+        continue;
       }
 
       const formattedError = {
@@ -1563,6 +1598,12 @@ async function scanAppointments(apiUrl, headers, context = {}) {
       diagnostics.queryErrors.push(formattedError);
       diagnostics.lastQueryError = formattedError;
     }
+  }
+
+  if (successfulEmptyStrategy) {
+    diagnostics.failure = null;
+    diagnostics.querySuccess = successfulEmptyStrategy;
+    return { appointments: [], diagnostics };
   }
 
   diagnostics.failure = 'appointments_query_failed';
@@ -1682,6 +1723,7 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
 
   const scan = await scanAppointments(auth.apiUrl, auth.headers, {
     locationId: profileLocationId,
+    clientId: profile?.clientId || null,
   });
   let appointments = scan?.appointments || null;
   let fallbackScanUsed = false;
@@ -1689,7 +1731,10 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   // Guests can have appointments at locations other than their primary profile location.
   // If a location-scoped scan returns no rows, retry once without location scoping.
   if (Array.isArray(appointments) && appointments.length === 0 && profileLocationId) {
-    const fallbackScan = await scanAppointments(auth.apiUrl, auth.headers, { locationId: null });
+    const fallbackScan = await scanAppointments(auth.apiUrl, auth.headers, {
+      locationId: null,
+      clientId: profile?.clientId || null,
+    });
     if (Array.isArray(fallbackScan?.appointments)) {
       appointments = fallbackScan.appointments;
       fallbackScanUsed = true;
@@ -1843,6 +1888,7 @@ async function lookupMember(name, emailOrPhone, options = {}) {
   try {
     const rawContact = String(emailOrPhone || '').trim();
     const isEmail = rawContact.includes('@');
+    const normalizedEmail = isEmail ? rawContact.toLowerCase() : '';
 
     const authCredentials = generateAuthHeader(apiKey, apiSecret, businessId);
     const headers = {
@@ -1874,15 +1920,14 @@ async function lookupMember(name, emailOrPhone, options = {}) {
           }
         }
       `;
-      const email = rawContact.toLowerCase();
-      console.log(`Boulevard lookup: email = ${email} at ${apiUrl}`);
-      const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { emails: [email] });
+      console.log(`Boulevard lookup: email = ${normalizedEmail} at ${apiUrl}`);
+      const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { emails: [normalizedEmail] });
       if (!data) return null;
       clients = data?.data?.clients?.edges || [];
       if (clients.length === 0) {
         const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
         if (!nameScanMatches) return null;
-        const fallback = resolveNameScanFallbackCandidate(name, email, nameScanMatches);
+        const fallback = resolveNameScanFallbackCandidate(name, normalizedEmail, nameScanMatches);
         if (fallback?.candidate) {
           clients = [fallback.candidate];
           lookupStrategy = fallback.strategy;
@@ -1918,10 +1963,10 @@ async function lookupMember(name, emailOrPhone, options = {}) {
     ) {
       const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
       if (Array.isArray(nameScanMatches) && nameScanMatches.length > 0) {
-        const fallback = resolveNameScanFallbackCandidate(name, email, nameScanMatches);
+        const fallback = resolveNameScanFallbackCandidate(name, normalizedEmail, nameScanMatches);
         const fallbackNode = toNode(fallback?.candidate);
         const fallbackLocationCanonicalId = canonicalizeBoulevardLocationId(fallbackNode?.primaryLocation?.id || '') || null;
-        const fallbackMailboxMatch = emailsLikelyReferToSameMailbox(email, fallbackNode?.email || '');
+        const fallbackMailboxMatch = emailsLikelyReferToSameMailbox(normalizedEmail, fallbackNode?.email || '');
         if (
           fallbackNode?.id &&
           fallbackMailboxMatch &&
@@ -1938,9 +1983,9 @@ async function lookupMember(name, emailOrPhone, options = {}) {
     if (!match && isEmail) {
       const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
       if (Array.isArray(nameScanMatches) && nameScanMatches.length > 0) {
-        const fallback = resolveNameScanFallbackCandidate(name, email, nameScanMatches);
+        const fallback = resolveNameScanFallbackCandidate(name, normalizedEmail, nameScanMatches);
         const fallbackNode = toNode(fallback?.candidate);
-        const fallbackMailboxMatch = emailsLikelyReferToSameMailbox(email, fallbackNode?.email || '');
+        const fallbackMailboxMatch = emailsLikelyReferToSameMailbox(normalizedEmail, fallbackNode?.email || '');
         if (fallbackNode && fallbackMailboxMatch) {
           match = { node: fallbackNode };
           lookupStrategy = fallback?.strategy || 'name_scan_mailbox';
