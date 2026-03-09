@@ -180,17 +180,18 @@ describe('QA upgrade-check route', () => {
         firstName: 'Jane',
         lastName: 'Smith',
         email: 'jane@example.com',
-        locationId: 'loc-override',
+        locationId: '24a2fac0-deef-4f7f-8bf6-52368be42d65',
       }),
     });
     const res = await POST(req);
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.qa.locationId).toBe('loc-override');
+    expect(body.qa.locationId).toBe('24a2fac0-deef-4f7f-8bf6-52368be42d65');
+    expect(body.qa.resolvedLocationId).toBe('urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65');
     expect(mockEvaluateUpgradeOpportunityForProfile).toHaveBeenCalledWith(
       expect.objectContaining({ clientId: 'client-1' }),
-      expect.objectContaining({ locationId: 'loc-override' }),
+      expect.objectContaining({ locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65' }),
     );
   });
 });

@@ -21,6 +21,7 @@ const PREP_BUFFER_30MIN = Number(process.env.PREP_BUFFER_30MIN || 15);
 const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
 const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
 const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
+const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const membershipCache = new Map();
 const clientFieldCache = new Map();
@@ -129,6 +130,14 @@ function normalizePhone(phone) {
   let digits = phone.replace(/\D/g, '');
   if (digits.length === 10) digits = '1' + digits;
   return digits;
+}
+
+function normalizeBoulevardLocationId(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('urn:')) return raw;
+  if (UUID_V4_LIKE_RE.test(raw)) return `urn:blvd:Location:${raw}`;
+  return raw;
 }
 
 function toIsoDate(value) {
@@ -1003,7 +1012,7 @@ function buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection) {
 
 function pickQueryContextArgValue(argName, context) {
   if (!argName) return null;
-  if (argName === 'locationId') return context?.locationId || null;
+  if (argName === 'locationId') return normalizeBoulevardLocationId(context?.locationId || '') || null;
   return null;
 }
 
@@ -1129,7 +1138,7 @@ function extractStrategyNodes(payload, strategy) {
 }
 
 async function scanAppointments(apiUrl, headers, context = {}) {
-  const locationIdForScan = String(context?.locationId || '').trim() || null;
+  const locationIdForScan = normalizeBoulevardLocationId(context?.locationId || '') || null;
   const diagnostics = {
     typeIntrospection: null,
     queryIntrospection: null,
@@ -1469,13 +1478,13 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   const auth = getBoulevardAuthContext();
   if (!auth) return { eligible: false, reason: 'boulevard_not_configured' };
 
-  const profileLocationId = String(
+  const profileLocationId = normalizeBoulevardLocationId(
     options?.locationId ||
     profile?.locationId ||
     profile?.primaryLocationId ||
     profile?.location?.id ||
     ''
-  ).trim() || null;
+  ) || null;
 
   const scan = await scanAppointments(auth.apiUrl, auth.headers, {
     locationId: profileLocationId,
@@ -1716,7 +1725,7 @@ function buildProfile(d) {
     clientId: d.id || null,
     name: `${d.firstName} ${d.lastName}`, firstName: d.firstName, email: d.email,
     phone: d.mobilePhone || null, location: d.location || d.primaryLocation?.name || 'Unknown',
-    locationId: d.locationId || d.primaryLocation?.id || null,
+    locationId: normalizeBoulevardLocationId(d.locationId || d.primaryLocation?.id || '') || null,
     tier: tier || null, monthlyRate,
     clientSince, memberSince, tenureMonths,
     accountStatus: d.accountStatus || d.membershipStatus || (d.active === false ? 'inactive' : d.active === true ? 'active' : null),

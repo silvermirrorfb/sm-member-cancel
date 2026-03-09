@@ -1204,7 +1204,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
       }
 
       if (body.query.includes('ScanAppointments')) {
-        expect(body.variables?.locationId).toBe('loc-1');
+        expect(body.variables?.locationId).toBe('urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65');
         return {
           ok: true,
           json: async () => ({
@@ -1243,7 +1243,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     });
 
     const result = await evaluateUpgradeOpportunityForProfile(
-      { clientId: 'client-1', locationId: 'loc-1', tier: '30', accountStatus: 'active' },
+      { clientId: 'client-1', locationId: '24a2fac0-deef-4f7f-8bf6-52368be42d65', tier: '30', accountStatus: 'active' },
       { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
     );
 
