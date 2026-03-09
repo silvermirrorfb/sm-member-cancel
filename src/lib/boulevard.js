@@ -701,6 +701,49 @@ function readProviderFromNestedPlan(node, plan) {
   return '';
 }
 
+function extractProviderIdHeuristic(node) {
+  if (!node || typeof node !== 'object') return '';
+  const queue = [{ value: node, providerContext: false }];
+  const seen = new Set();
+
+  while (queue.length > 0) {
+    const item = queue.shift();
+    const value = item?.value;
+    const providerContext = item?.providerContext === true;
+    if (!value || typeof value !== 'object') continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      for (const child of value) queue.push({ value: child, providerContext });
+      continue;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      const keyLower = String(key || '').toLowerCase();
+      const nextProviderContext = providerContext || /(provider|staff|employee|resource)/i.test(keyLower);
+
+      if (nextProviderContext && keyLower === 'id' && (typeof child === 'string' || typeof child === 'number')) {
+        const raw = String(child).trim();
+        if (raw) return raw;
+      }
+
+      if (child && typeof child === 'object') {
+        if (nextProviderContext) {
+          const directId = child.id;
+          if (directId !== null && directId !== undefined) {
+            const raw = String(directId).trim();
+            if (raw) return raw;
+          }
+        }
+        queue.push({ value: child, providerContext: nextProviderContext });
+      }
+    }
+  }
+
+  return '';
+}
+
 async function getClientTypeFieldSet(apiUrl, headers) {
   const cached = clientFieldCache.get(apiUrl);
   if (cached && cached.expiresAt > Date.now()) return cached.fields;
@@ -905,7 +948,7 @@ async function scanAppointments(apiUrl, headers) {
 
   const hasClientIdentity = Boolean(clientIdField || clientObjectField);
   const hasProviderIdentity = Boolean(providerIdField || providerObjectField || providerNestedPlans.length > 0);
-  if (!fieldSet.has('id') || !startField || !endField || !hasClientIdentity || !hasProviderIdentity) {
+  if (!fieldSet.has('id') || !startField || !endField || !hasClientIdentity) {
     diagnostics.failure = 'appointment_missing_required_fields';
     diagnostics.requiredFields = {
       hasId: fieldSet.has('id'),
@@ -919,6 +962,7 @@ async function scanAppointments(apiUrl, headers) {
       clientObjectField,
       providerIdField,
       providerObjectField,
+      hasProviderIdentity,
       providerNestedParents: providerNestedPlans.map(plan => plan.parentFieldName),
       availableFields: Array.from(fieldSet).sort(),
     };
@@ -985,6 +1029,7 @@ async function scanAppointments(apiUrl, headers) {
           providerId:
             readNodeFieldAsString(node, providerIdField, providerObjectField) ||
             providerNestedPlans.map(plan => readProviderFromNestedPlan(node, plan)).find(Boolean) ||
+            extractProviderIdHeuristic(node) ||
             '',
           locationId: locationIdField
             ? String(node[locationIdField] || '')
@@ -1064,13 +1109,18 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   const currentEndMs = new Date(current.endOn).getTime();
   if (!Number.isFinite(currentEndMs)) return { eligible: false, reason: 'invalid_current_end_time' };
 
+  const hasProviderIdentity = Boolean(String(current.providerId || '').trim());
   const providerCommitments = appointments
-    .filter(appt => appt.providerId === current.providerId)
     .filter(appt => appt.id !== current.id)
     .filter(appt => !isCanceledAppointment(appt))
     .filter(appt => {
       const startMs = new Date(appt.startOn).getTime();
       return Number.isFinite(startMs) && startMs > new Date(current.startOn).getTime();
+    })
+    .filter(appt => {
+      if (hasProviderIdentity) return appt.providerId === current.providerId;
+      if (current.locationId && appt.locationId) return appt.locationId === current.locationId;
+      return true;
     })
     .sort((a, b) => new Date(a.startOn).getTime() - new Date(b.startOn).getTime());
 
@@ -1092,7 +1142,8 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     reason: availableGapMinutes >= requiredExtraMinutes ? 'eligible' : 'insufficient_gap',
     appointmentId: current.id,
     clientId: current.clientId,
-    providerId: current.providerId,
+    providerId: current.providerId || null,
+    providerIdentityMode: hasProviderIdentity ? 'exact_provider' : 'fallback_no_provider_id',
     locationId: current.locationId || null,
     startOn: current.startOn,
     endOn: current.endOn,

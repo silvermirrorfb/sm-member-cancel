@@ -391,6 +391,38 @@ describe('upgrade eligibility engine', () => {
     expect(result.availableGapMinutes).toBe(20);
     expect(result.nextCommitmentStartOn).toBe('2026-03-08T11:05:00.000Z');
   });
+
+  it('falls back to conservative location-based gap when provider id is unavailable', () => {
+    const appointments = [
+      {
+        id: 'appt-1',
+        clientId: 'client-1',
+        providerId: '',
+        locationId: 'loc-1',
+        startOn: '2026-03-08T10:00:00.000Z',
+        endOn: '2026-03-08T10:30:00.000Z',
+        status: 'BOOKED',
+      },
+      {
+        id: 'appt-2',
+        clientId: 'other',
+        providerId: 'prov-x',
+        locationId: 'loc-1',
+        startOn: '2026-03-08T11:05:00.000Z',
+        endOn: '2026-03-08T11:35:00.000Z',
+        status: 'BOOKED',
+      },
+    ];
+
+    const result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, {
+      now: '2026-03-08T08:00:00.000Z',
+      windowHours: 6,
+    });
+
+    expect(result.eligible).toBe(true);
+    expect(result.providerIdentityMode).toBe('fallback_no_provider_id');
+    expect(result.availableGapMinutes).toBe(20);
+  });
 });
 
 describe('upgrade opportunity Boulevard integration (mocked)', () => {
