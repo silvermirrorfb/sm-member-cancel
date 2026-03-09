@@ -1374,6 +1374,146 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(result.reason).toBe('eligible');
   });
 
+  it('falls back to unscoped appointment scan when location-scoped scan returns zero rows', async () => {
+    const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
+    const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });
+
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const typeName = body?.variables?.typeName;
+
+      if (body.query.includes('IntrospectSchemaQueryType')) {
+        return {
+          ok: true,
+          json: async () => ({ data: { __schema: { queryType: { name: 'RootQueryType' } } } }),
+        };
+      }
+
+      if (body.query.includes('IntrospectTypeDetailed')) {
+        if (typeName === 'RootQueryType') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    {
+                      name: 'appointments',
+                      args: [
+                        { name: 'locationId', type: scalarType('ID') },
+                        { name: 'first', type: scalarType('Int') },
+                      ],
+                      type: objectType('AppointmentConnection'),
+                    },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentConnection') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'edges', type: objectType('AppointmentEdge') }, { name: 'pageInfo', type: objectType('PageInfo') }],
+                },
+              },
+            }),
+          };
+        }
+      }
+
+      if (body.query.includes('IntrospectType')) {
+        if (typeName === 'Query') return { ok: true, json: async () => ({ data: { __type: null } }) };
+        if (typeName === 'RootQueryType') return { ok: true, json: async () => ({ data: { __type: { fields: [{ name: 'appointments' }] } } }) };
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'id', type: scalarType('ID') },
+                    { name: 'startAt', type: scalarType('DateTime') },
+                    { name: 'endAt', type: scalarType('DateTime') },
+                    { name: 'clientId', type: scalarType('ID') },
+                    { name: 'providerId', type: scalarType('ID') },
+                    { name: 'state', type: scalarType('AppointmentState') },
+                    { name: 'locationId', type: scalarType('ID') },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+      }
+
+      if (body.query.includes('ScanAppointments')) {
+        const scoped = body.variables?.locationId === 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65';
+        if (scoped) {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                appointments: {
+                  edges: [],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              appointments: {
+                edges: [
+                  {
+                    node: {
+                      id: 'appt-1',
+                      clientId: 'client-1',
+                      providerId: 'prov-1',
+                      locationId: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc',
+                      startAt: '2026-03-08T10:00:00.000Z',
+                      endAt: '2026-03-08T10:30:00.000Z',
+                      state: 'BOOKED',
+                    },
+                  },
+                  {
+                    node: {
+                      id: 'appt-2',
+                      clientId: 'other',
+                      providerId: 'prov-1',
+                      locationId: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc',
+                      startAt: '2026-03-08T11:10:00.000Z',
+                      endAt: '2026-03-08T11:40:00.000Z',
+                      state: 'BOOKED',
+                    },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      return { ok: true, json: async () => ({ data: {} }) };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', locationId: '24a2fac0-deef-4f7f-8bf6-52368be42d65', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
+    expect(result.locationFallbackUsed).toBe(true);
+  });
+
   it('reports preflight error when required locationId arg is missing', async () => {
     const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
     const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });

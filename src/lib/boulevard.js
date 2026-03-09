@@ -1644,7 +1644,19 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   const scan = await scanAppointments(auth.apiUrl, auth.headers, {
     locationId: profileLocationId,
   });
-  const appointments = scan?.appointments || null;
+  let appointments = scan?.appointments || null;
+  let fallbackScanUsed = false;
+
+  // Guests can have appointments at locations other than their primary profile location.
+  // If a location-scoped scan returns no rows, retry once without location scoping.
+  if (Array.isArray(appointments) && appointments.length === 0 && profileLocationId) {
+    const fallbackScan = await scanAppointments(auth.apiUrl, auth.headers, { locationId: null });
+    if (Array.isArray(fallbackScan?.appointments)) {
+      appointments = fallbackScan.appointments;
+      fallbackScanUsed = true;
+    }
+  }
+
   if (!appointments) {
     return {
       eligible: false,
@@ -1653,7 +1665,11 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
     };
   }
 
-  return evaluateUpgradeEligibilityFromAppointments(appointments, profile, options);
+  const result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, options);
+  if (fallbackScanUsed) {
+    result.locationFallbackUsed = true;
+  }
+  return result;
 }
 
 async function tryApplyAppointmentUpgradeMutation(apiUrl, headers, appointmentId, serviceId) {
