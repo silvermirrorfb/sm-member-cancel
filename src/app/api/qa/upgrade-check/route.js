@@ -1,11 +1,18 @@
 import crypto from 'crypto';
 import { NextResponse } from 'next/server';
-import { lookupMember, evaluateUpgradeOpportunityForProfile } from '../../../../lib/boulevard';
+import {
+  lookupMember,
+  evaluateUpgradeOpportunityForProfile,
+  evaluateUpgradeEligibilityFromAppointments,
+  resolveNameScanFallbackCandidate,
+  buildProfile,
+} from '../../../../lib/boulevard';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
 const QA_UPGRADE_LIMIT_MAX = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_MAX || 40), 1);
 const QA_UPGRADE_LIMIT_WINDOW_MS = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_WINDOW_MS || 10 * 60 * 1000), 1000);
 const QA_UPGRADE_IDEMPOTENCY_TTL_MS = Math.max(Number(process.env.QA_UPGRADE_IDEMPOTENCY_TTL_MS || 15 * 60 * 1000), 1000);
+const QA_SYNTHETIC_MODE_TOKEN = String(process.env.QA_SYNTHETIC_MODE_TOKEN || '').trim();
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const idempotencyCache = new Map();
 
@@ -50,6 +57,12 @@ function normalizeLocationIdInput(rawLocationId) {
   if (value.startsWith('urn:')) return value;
   if (UUID_V4_LIKE_RE.test(value)) return `urn:blvd:Location:${value}`;
   return value;
+}
+
+function parseSyntheticMode(rawValue) {
+  const mode = parseBodyValue(rawValue).toLowerCase();
+  if (mode === 'eligibility' || mode === 'lookup') return mode;
+  return '';
 }
 
 function getRequestId(request) {
@@ -109,6 +122,12 @@ function isAuthorized(request) {
   return providedToken === configuredToken;
 }
 
+function isSyntheticAuthorized(request) {
+  if (!QA_SYNTHETIC_MODE_TOKEN) return process.env.NODE_ENV !== 'production';
+  const providedToken = parseBodyValue(request.headers.get('x-qa-synthetic-token') || '');
+  return providedToken === QA_SYNTHETIC_MODE_TOKEN;
+}
+
 export async function GET() {
   return NextResponse.json({
     ok: true,
@@ -116,7 +135,11 @@ export async function GET() {
     method: 'POST',
     notes: 'Read-only Boulevard appointment eligibility check for upgrade QA.',
     required: ['firstName', 'lastName', 'email or phone'],
-    optional: ['appointmentId', 'targetDurationMinutes (50|90)', 'locationId', 'now', 'windowHours'],
+    optional: ['appointmentId', 'targetDurationMinutes (50|90)', 'locationId', 'now', 'windowHours', 'syntheticMode'],
+    syntheticModes: {
+      eligibility: ['syntheticProfile', 'syntheticAppointments'],
+      lookup: ['firstName', 'lastName', 'email', 'syntheticCandidates'],
+    },
   });
 }
 
@@ -150,6 +173,7 @@ export async function POST(request) {
     const appointmentId = parseBodyValue(body.appointmentId);
     const rawLocationId = parseBodyValue(body.locationId);
     const resolvedLocationId = normalizeLocationIdInput(rawLocationId);
+    const syntheticMode = parseSyntheticMode(body.syntheticMode);
     const debugMode = body.debug === true || String(body.debug || '').toLowerCase() === 'true';
     const targetDurationMinutes = Number.isFinite(Number(body.targetDurationMinutes))
       ? Number(body.targetDurationMinutes)
@@ -167,6 +191,10 @@ export async function POST(request) {
       now: nowIso,
       windowHours,
       debugMode,
+      syntheticMode,
+      syntheticProfile: body.syntheticProfile || null,
+      syntheticAppointments: body.syntheticAppointments || null,
+      syntheticCandidates: body.syntheticCandidates || null,
     };
     const idempotencyFingerprint = idempotencyKey
       ? crypto.createHash('sha256').update(stableStringify(fingerprintPayload)).digest('hex')
@@ -205,9 +233,29 @@ export async function POST(request) {
       );
     }
 
+    if (syntheticMode && !isSyntheticAuthorized(request)) {
+      const payload = { error: 'Unauthorized synthetic mode.', requestId };
+      if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 401, payload);
+      return respond(payload, 401, remaining);
+    }
+
     if (!firstName || !lastName || (!email && !phone)) {
+      if (!syntheticMode || syntheticMode === 'lookup') {
+        const payload = {
+          error: 'firstName, lastName, and at least one contact (email or phone) are required.',
+          requestId,
+        };
+        if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);
+        return respond(
+          payload,
+          400,
+          remaining,
+        );
+      }
+    }
+    if (syntheticMode === 'lookup' && !email) {
       const payload = {
-        error: 'firstName, lastName, and at least one contact (email or phone) are required.',
+        error: 'syntheticMode=lookup requires email for mailbox matching.',
         requestId,
       };
       if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);
@@ -240,6 +288,107 @@ export async function POST(request) {
         400,
         remaining,
       );
+    }
+
+    if (syntheticMode === 'eligibility') {
+      if (!body.syntheticProfile || typeof body.syntheticProfile !== 'object' || !Array.isArray(body.syntheticAppointments)) {
+        const payload = {
+          error: 'syntheticMode=eligibility requires syntheticProfile (object) and syntheticAppointments (array).',
+          requestId,
+        };
+        if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);
+        return respond(payload, 400, remaining);
+      }
+
+      const profile = buildProfile(body.syntheticProfile || {});
+      const opportunity = evaluateUpgradeEligibilityFromAppointments(
+        body.syntheticAppointments,
+        profile,
+        {
+          appointmentId: appointmentId || undefined,
+          targetDurationMinutes: targetDurationMinutes || undefined,
+          now: nowIso || undefined,
+          windowHours: windowHours || undefined,
+        },
+      );
+      const payload = {
+        ok: true,
+        requestId,
+        member: {
+          name: profile.name,
+          firstName: profile.firstName || null,
+          email: profile.email || null,
+          phone: profile.phone || null,
+          clientId: profile.clientId || null,
+          tier: profile.tier || null,
+          accountStatus: profile.accountStatus || null,
+          location: profile.location || null,
+          locationId: profile.locationId || null,
+          locationCanonicalId: profile.locationCanonicalId || null,
+          lookupStrategy: profile.lookupStrategy || null,
+        },
+        qa: {
+          requestId,
+          idempotencyKey: idempotencyKey || null,
+          syntheticMode,
+          synthetic: true,
+          appointmentId: appointmentId || null,
+          targetDurationMinutes: targetDurationMinutes || null,
+          locationId: rawLocationId || null,
+          resolvedLocationId: resolvedLocationId || null,
+          now: nowIso || null,
+          windowHours: windowHours || null,
+          debug: debugMode,
+          readOnly: true,
+        },
+        opportunity,
+      };
+      if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 200, payload);
+      return respond(payload, 200, remaining);
+    }
+
+    if (syntheticMode === 'lookup') {
+      if (!Array.isArray(body.syntheticCandidates)) {
+        const payload = {
+          error: 'syntheticMode=lookup requires syntheticCandidates (array).',
+          requestId,
+        };
+        if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);
+        return respond(payload, 400, remaining);
+      }
+
+      const fullName = `${firstName} ${lastName}`.trim();
+      const fallback = resolveNameScanFallbackCandidate(fullName, email, body.syntheticCandidates);
+      const resolvedCandidate = fallback?.candidate?.node || fallback?.candidate || null;
+      const payload = {
+        ok: true,
+        requestId,
+        qa: {
+          requestId,
+          idempotencyKey: idempotencyKey || null,
+          syntheticMode,
+          synthetic: true,
+          debug: debugMode,
+          readOnly: true,
+        },
+        syntheticLookup: {
+          matched: Boolean(resolvedCandidate),
+          strategy: fallback?.strategy || null,
+          reason: fallback?.reason || null,
+          candidate: resolvedCandidate
+            ? {
+                id: resolvedCandidate.id || null,
+                firstName: resolvedCandidate.firstName || null,
+                lastName: resolvedCandidate.lastName || null,
+                email: resolvedCandidate.email || null,
+                phone: resolvedCandidate.mobilePhone || null,
+                locationId: resolvedCandidate?.primaryLocation?.id || resolvedCandidate.locationId || null,
+              }
+            : null,
+        },
+      };
+      if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 200, payload);
+      return respond(payload, 200, remaining);
     }
 
     const fullName = `${firstName} ${lastName}`.trim();

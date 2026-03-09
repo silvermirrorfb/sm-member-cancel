@@ -2,10 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
+const mockEvaluateUpgradeEligibilityFromAppointments = vi.fn();
+const mockResolveNameScanFallbackCandidate = vi.fn();
+const mockBuildProfile = vi.fn();
 
 vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
+  evaluateUpgradeEligibilityFromAppointments: (...args) => mockEvaluateUpgradeEligibilityFromAppointments(...args),
+  resolveNameScanFallbackCandidate: (...args) => mockResolveNameScanFallbackCandidate(...args),
+  buildProfile: (...args) => mockBuildProfile(...args),
 }));
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -21,6 +27,9 @@ describe('QA upgrade-check route', () => {
   beforeEach(() => {
     process.env = { ...originalEnv };
     vi.clearAllMocks();
+    mockBuildProfile.mockImplementation(input => input);
+    mockResolveNameScanFallbackCandidate.mockReturnValue({ candidate: null, strategy: null, reason: 'no_match' });
+    mockEvaluateUpgradeEligibilityFromAppointments.mockReturnValue({ eligible: false, reason: 'synthetic_default' });
   });
 
   afterEach(() => {
@@ -294,5 +303,86 @@ describe('QA upgrade-check route', () => {
     const secondBody = await secondRes.json();
     expect(secondRes.status).toBe(409);
     expect(secondBody.error).toContain('Idempotency key');
+  });
+
+  it('supports synthetic eligibility mode without Boulevard lookup', async () => {
+    process.env.NODE_ENV = 'development';
+    mockBuildProfile.mockReturnValue({
+      name: 'Synthetic Member',
+      firstName: 'Synthetic',
+      clientId: 'client-synth',
+      location: 'Upper West Side',
+      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
+      locationCanonicalId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
+    });
+    mockEvaluateUpgradeEligibilityFromAppointments.mockReturnValue({
+      eligible: true,
+      reason: 'eligible',
+      availableGapMinutes: 30,
+    });
+
+    const req = new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-qa-synthetic-token': 'dev-ok',
+      },
+      body: JSON.stringify({
+        syntheticMode: 'eligibility',
+        syntheticProfile: {
+          name: 'Synthetic Member',
+          firstName: 'Synthetic',
+          clientId: 'client-synth',
+        },
+        syntheticAppointments: [],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.qa.syntheticMode).toBe('eligibility');
+    expect(body.qa.synthetic).toBe(true);
+    expect(body.opportunity.eligible).toBe(true);
+    expect(mockLookupMember).not.toHaveBeenCalled();
+    expect(mockEvaluateUpgradeEligibilityFromAppointments).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports synthetic lookup mode with fallback resolver output', async () => {
+    process.env.NODE_ENV = 'development';
+    mockResolveNameScanFallbackCandidate.mockReturnValue({
+      candidate: {
+        id: 'client-1',
+        firstName: 'Sandra',
+        lastName: 'Bellew',
+        email: 'sandra@example.com',
+        primaryLocation: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65' },
+      },
+      strategy: 'name_scan_exact',
+      reason: null,
+    });
+
+    const req = new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-qa-synthetic-token': 'dev-ok',
+      },
+      body: JSON.stringify({
+        syntheticMode: 'lookup',
+        firstName: 'Sandra',
+        lastName: 'Bellew',
+        email: 'stale-email@example.com',
+        syntheticCandidates: [{ id: 'client-1' }],
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.qa.syntheticMode).toBe('lookup');
+    expect(body.syntheticLookup.matched).toBe(true);
+    expect(body.syntheticLookup.strategy).toBe('name_scan_exact');
+    expect(mockResolveNameScanFallbackCandidate).toHaveBeenCalledTimes(1);
+    expect(mockLookupMember).not.toHaveBeenCalled();
   });
 });

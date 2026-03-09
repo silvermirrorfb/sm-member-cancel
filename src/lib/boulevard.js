@@ -257,6 +257,47 @@ function emailsLikelyReferToSameMailbox(leftEmail, rightEmail) {
   return left === right;
 }
 
+function resolveNameScanFallbackCandidate(requestedName, requestedEmail, candidates = []) {
+  const prepared = candidates
+    .map(item => ({ raw: item, node: item?.node || item }))
+    .filter(item => item?.node && typeof item.node === 'object');
+
+  const exactMatches = prepared.filter(item =>
+    isExactFirstLastNameMatch(requestedName, item.node?.firstName || '', item.node?.lastName || '')
+  );
+  if (exactMatches.length === 1) {
+    return { candidate: exactMatches[0].raw, strategy: 'name_scan_exact', reason: null };
+  }
+  if (exactMatches.length > 1) {
+    const mailboxMatches = exactMatches.filter(item =>
+      emailsLikelyReferToSameMailbox(requestedEmail, item.node?.email || '')
+    );
+    if (mailboxMatches.length === 1) {
+      return { candidate: mailboxMatches[0].raw, strategy: 'name_scan_exact_mailbox', reason: null };
+    }
+    return { candidate: null, strategy: null, reason: 'ambiguous_exact_name' };
+  }
+
+  const likelyMailboxMatches = prepared.filter(item =>
+    emailsLikelyReferToSameMailbox(requestedEmail, item.node?.email || '')
+  );
+  if (likelyMailboxMatches.length === 1) {
+    return { candidate: likelyMailboxMatches[0].raw, strategy: 'name_scan_mailbox', reason: null };
+  }
+
+  const fuzzyMatches = prepared.filter(item =>
+    namesLikelyMatch(requestedName, item.node?.firstName || '', item.node?.lastName || '')
+  );
+  if (fuzzyMatches.length === 1) {
+    return { candidate: fuzzyMatches[0].raw, strategy: 'name_scan_fuzzy_unique', reason: null };
+  }
+  if (fuzzyMatches.length > 1) {
+    return { candidate: null, strategy: null, reason: 'ambiguous_fuzzy_name' };
+  }
+
+  return { candidate: null, strategy: null, reason: 'no_match' };
+}
+
 function namesLikelyMatch(requestedName, candidateFirstName, candidateLastName) {
   const reqTokens = tokenizeName(requestedName);
   const candFull = `${candidateFirstName || ''} ${candidateLastName || ''}`.trim();
@@ -1785,31 +1826,12 @@ async function lookupMember(name, emailOrPhone) {
       if (clients.length === 0) {
         const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
         if (!nameScanMatches) return null;
-
-        const exactMatches = nameScanMatches.filter(edge =>
-          isExactFirstLastNameMatch(name, edge?.node?.firstName || '', edge?.node?.lastName || '')
-        );
-        if (exactMatches.length === 1) {
-          clients = [exactMatches[0]];
-          lookupStrategy = 'name_scan_exact';
-        } else if (exactMatches.length > 1) {
-          const mailboxMatches = exactMatches.filter(edge =>
-            emailsLikelyReferToSameMailbox(email, edge?.node?.email || '')
-          );
-          if (mailboxMatches.length === 1) {
-            clients = [mailboxMatches[0]];
-            lookupStrategy = 'name_scan_exact_mailbox';
-          } else {
-            console.log(`Boulevard lookup: ambiguous exact-name fallback matches for "${name}" (${exactMatches.length})`);
-          }
-        } else {
-          const likelyMailboxMatches = nameScanMatches.filter(edge =>
-            emailsLikelyReferToSameMailbox(email, edge?.node?.email || '')
-          );
-          if (likelyMailboxMatches.length === 1) {
-            clients = [likelyMailboxMatches[0]];
-            lookupStrategy = 'name_scan_mailbox';
-          }
+        const fallback = resolveNameScanFallbackCandidate(name, email, nameScanMatches);
+        if (fallback?.candidate) {
+          clients = [fallback.candidate];
+          lookupStrategy = fallback.strategy;
+        } else if (fallback?.reason?.startsWith('ambiguous')) {
+          console.log(`Boulevard lookup: ${fallback.reason} fallback matches for "${name}"`);
         }
       }
     } else {
@@ -2068,6 +2090,7 @@ export {
   lookupMember,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
+  resolveNameScanFallbackCandidate,
   reverifyAndApplyUpgradeForProfile,
   verifyMemberIdentity,
   levenshtein,
