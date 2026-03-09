@@ -25,6 +25,7 @@ const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION ==
 const membershipCache = new Map();
 const clientFieldCache = new Map();
 const typeFieldCache = new Map();
+const typeFieldDetailCache = new Map();
 
 const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
 const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
@@ -548,6 +549,158 @@ async function getTypeFieldSet(apiUrl, headers, typeName) {
   return fieldSet;
 }
 
+function unwrapNamedType(typeNode) {
+  let current = typeNode || null;
+  while (current && current.kind === 'NON_NULL') current = current.ofType || null;
+  while (current && current.kind === 'LIST') current = current.ofType || null;
+  if (!current) return null;
+  return {
+    kind: current.kind || null,
+    name: current.name || null,
+  };
+}
+
+async function getTypeFieldDetailMap(apiUrl, headers, typeName) {
+  const key = `${apiUrl}::detail::${typeName}`;
+  const cached = typeFieldDetailCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.fields;
+
+  const query = `
+    query IntrospectTypeDetailed($typeName: String!) {
+      __type(name: $typeName) {
+        fields {
+          name
+          type {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { typeName }, { silentErrors: true });
+  const fields = data?.data?.__type?.fields;
+  if (!Array.isArray(fields) || fields.length === 0) {
+    typeFieldDetailCache.set(key, { fields: null, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
+    return null;
+  }
+
+  const map = new Map();
+  for (const field of fields) {
+    const fieldName = String(field?.name || '').trim();
+    if (!fieldName) continue;
+    const namedType = unwrapNamedType(field?.type || null);
+    map.set(fieldName, {
+      fieldName,
+      kind: namedType?.kind || null,
+      namedType: namedType?.name || null,
+    });
+  }
+  typeFieldDetailCache.set(key, { fields: map, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
+  return map;
+}
+
+async function resolveNestedNodeTypeName(apiUrl, headers, parentTypeName, parentFieldName) {
+  const parentDetails = await getTypeFieldDetailMap(apiUrl, headers, parentTypeName);
+  const parentField = parentDetails?.get(parentFieldName) || null;
+  const parentNamedType = parentField?.namedType || null;
+  if (!parentNamedType) return null;
+
+  const childDetails = await getTypeFieldDetailMap(apiUrl, headers, parentNamedType);
+  if (!childDetails) return null;
+
+  if (childDetails.has('edges')) {
+    const edgeType = childDetails.get('edges')?.namedType || null;
+    if (!edgeType) return null;
+    const edgeDetails = await getTypeFieldDetailMap(apiUrl, headers, edgeType);
+    const nodeType = edgeDetails?.get('node')?.namedType || null;
+    if (!nodeType) return null;
+    return { shape: 'connection', nodeType };
+  }
+
+  return { shape: 'list_or_object', nodeType: parentNamedType };
+}
+
+async function buildProviderNestedPlan(apiUrl, headers, parentFieldName) {
+  const resolved = await resolveNestedNodeTypeName(apiUrl, headers, 'Appointment', parentFieldName);
+  if (!resolved?.nodeType) return null;
+
+  const nodeFieldSet = await getTypeFieldSet(apiUrl, headers, resolved.nodeType);
+  if (!nodeFieldSet) return null;
+
+  const scalarCandidates = ['providerId', 'staffId', 'employeeId', 'serviceProviderId']
+    .filter(name => nodeFieldSet.has(name));
+  const objectCandidates = ['provider', 'staff', 'employee', 'serviceProvider', 'resource']
+    .filter(name => nodeFieldSet.has(name));
+  if (scalarCandidates.length === 0 && objectCandidates.length === 0) return null;
+
+  const scalarPart = scalarCandidates.join('\n                  ');
+  const objectPart = objectCandidates.map(name => `${name} { id }`).join('\n                  ');
+  const combined = [scalarPart, objectPart].filter(Boolean).join('\n                  ');
+  if (!combined) return null;
+
+  const selection = resolved.shape === 'connection'
+    ? `${parentFieldName} {\n                edges {\n                  node {\n                  ${combined}\n                  }\n                }\n              }`
+    : `${parentFieldName} {\n                ${combined}\n              }`;
+
+  return {
+    parentFieldName,
+    shape: resolved.shape,
+    scalarCandidates,
+    objectCandidates,
+    selection,
+  };
+}
+
+function readProviderFromNestedPlan(node, plan) {
+  if (!node || !plan) return '';
+  const container = node?.[plan.parentFieldName];
+  if (!container) return '';
+
+  const entries = [];
+  if (plan.shape === 'connection') {
+    for (const edge of container?.edges || []) {
+      if (edge?.node) entries.push(edge.node);
+    }
+  } else if (Array.isArray(container)) {
+    for (const item of container) {
+      if (item && typeof item === 'object') entries.push(item);
+    }
+  } else if (container && typeof container === 'object') {
+    entries.push(container);
+  }
+
+  for (const entry of entries) {
+    for (const scalarField of plan.scalarCandidates) {
+      const raw = entry?.[scalarField];
+      if (raw !== null && raw !== undefined && String(raw).trim()) return String(raw).trim();
+    }
+    for (const objectField of plan.objectCandidates) {
+      const nested = entry?.[objectField];
+      const nestedId = nested?.id;
+      if (nestedId !== null && nestedId !== undefined && String(nestedId).trim()) return String(nestedId).trim();
+    }
+  }
+
+  return '';
+}
+
 async function getClientTypeFieldSet(apiUrl, headers) {
   const cached = clientFieldCache.get(apiUrl);
   if (cached && cached.expiresAt > Date.now()) return cached.fields;
@@ -734,6 +887,15 @@ async function scanAppointments(apiUrl, headers) {
   const clientObjectField = pickFirstAvailableField(fieldSet, ['client', 'customer']);
   const providerIdField = pickFirstAvailableField(fieldSet, ['providerId', 'staffId', 'employeeId', 'serviceProviderId']);
   const providerObjectField = pickFirstAvailableField(fieldSet, ['provider', 'staff', 'employee', 'serviceProvider']);
+  const providerNestedPlans = [];
+  if (!providerIdField && !providerObjectField) {
+    const nestedProviderParentCandidates = ['appointmentServices', 'appointmentServiceResources'];
+    for (const parentField of nestedProviderParentCandidates) {
+      if (!fieldSet.has(parentField)) continue;
+      const plan = await buildProviderNestedPlan(apiUrl, headers, parentField);
+      if (plan) providerNestedPlans.push(plan);
+    }
+  }
   const locationIdField = pickFirstAvailableField(fieldSet, ['locationId']);
   const locationObjectField = pickFirstAvailableField(fieldSet, ['location']);
   const statusField = pickFirstAvailableField(fieldSet, ['status', 'state', 'appointmentStatus']);
@@ -742,11 +904,13 @@ async function scanAppointments(apiUrl, headers) {
   const endField = pickFirstAvailableField(fieldSet, ['endOn', 'endAt', 'endsAt', 'endTime', 'endDateTime', 'end']);
 
   const hasClientIdentity = Boolean(clientIdField || clientObjectField);
-  const hasProviderIdentity = Boolean(providerIdField || providerObjectField);
+  const hasProviderIdentity = Boolean(providerIdField || providerObjectField || providerNestedPlans.length > 0);
   if (!fieldSet.has('id') || !startField || !endField || !hasClientIdentity || !hasProviderIdentity) {
     diagnostics.failure = 'appointment_missing_required_fields';
     diagnostics.requiredFields = {
       hasId: fieldSet.has('id'),
+      hasStartField: Boolean(startField),
+      hasEndField: Boolean(endField),
       hasStartOn: fieldSet.has('startOn'),
       hasEndOn: fieldSet.has('endOn'),
       startField: startField || null,
@@ -755,6 +919,7 @@ async function scanAppointments(apiUrl, headers) {
       clientObjectField,
       providerIdField,
       providerObjectField,
+      providerNestedParents: providerNestedPlans.map(plan => plan.parentFieldName),
       availableFields: Array.from(fieldSet).sort(),
     };
     return { appointments: null, diagnostics };
@@ -765,6 +930,9 @@ async function scanAppointments(apiUrl, headers) {
   else if (clientObjectField) selectedFields.push(`${clientObjectField} { id }`);
   if (providerIdField) selectedFields.push(providerIdField);
   else if (providerObjectField) selectedFields.push(`${providerObjectField} { id }`);
+  else {
+    for (const plan of providerNestedPlans) selectedFields.push(plan.selection);
+  }
   if (locationIdField) selectedFields.push(locationIdField);
   else if (locationObjectField) selectedFields.push(`${locationObjectField} { id }`);
   if (statusField) selectedFields.push(statusField);
@@ -814,7 +982,10 @@ async function scanAppointments(apiUrl, headers) {
           startOn: node[startField] || null,
           endOn: node[endField] || null,
           clientId: readNodeFieldAsString(node, clientIdField, clientObjectField),
-          providerId: readNodeFieldAsString(node, providerIdField, providerObjectField),
+          providerId:
+            readNodeFieldAsString(node, providerIdField, providerObjectField) ||
+            providerNestedPlans.map(plan => readProviderFromNestedPlan(node, plan)).find(Boolean) ||
+            '',
           locationId: locationIdField
             ? String(node[locationIdField] || '')
             : readNodeFieldAsString(node, null, locationObjectField) || null,
@@ -1363,6 +1534,7 @@ function __resetBoulevardCachesForTests() {
   membershipCache.clear();
   clientFieldCache.clear();
   typeFieldCache.clear();
+  typeFieldDetailCache.clear();
 }
 
 export {

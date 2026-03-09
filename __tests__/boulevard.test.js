@@ -678,4 +678,151 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(result.appointmentId).toBe('appt-1');
     expect(result.availableGapMinutes).toBe(25);
   });
+
+  it('derives provider identity from appointmentServices when provider fields are nested', async () => {
+    const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
+    const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });
+    const listOfObjectType = (name) => ({
+      kind: 'LIST',
+      name: null,
+      ofType: { kind: 'OBJECT', name, ofType: null },
+    });
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes('IntrospectType')) {
+        const typeName = body?.variables?.typeName;
+        if (typeName === 'Query') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'appointments', type: listOfObjectType('AppointmentConnection') }],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'id', type: scalarType('ID') },
+                    { name: 'startAt', type: scalarType('DateTime') },
+                    { name: 'endAt', type: scalarType('DateTime') },
+                    { name: 'clientId', type: scalarType('ID') },
+                    { name: 'appointmentServices', type: objectType('AppointmentServiceConnection') },
+                    { name: 'state', type: scalarType('AppointmentState') },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentServiceConnection') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'edges', type: listOfObjectType('AppointmentServiceEdge') }],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentServiceEdge') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'node', type: objectType('AppointmentService') }],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentService') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'staffId', type: scalarType('ID') }],
+                },
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({ data: { __type: null } }),
+        };
+      }
+
+      if (body.query.includes('ScanAppointments')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              appointments: {
+                edges: [
+                  {
+                    node: {
+                      id: 'appt-1',
+                      clientId: 'client-1',
+                      startAt: '2026-03-08T10:00:00.000Z',
+                      endAt: '2026-03-08T10:30:00.000Z',
+                      state: 'BOOKED',
+                      appointmentServices: {
+                        edges: [
+                          { node: { staffId: 'prov-1' } },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    node: {
+                      id: 'appt-2',
+                      clientId: 'other',
+                      startAt: '2026-03-08T11:10:00.000Z',
+                      endAt: '2026-03-08T11:40:00.000Z',
+                      state: 'BOOKED',
+                      appointmentServices: {
+                        edges: [
+                          { node: { staffId: 'prov-1' } },
+                        ],
+                      },
+                    },
+                  },
+                ],
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null,
+                },
+              },
+            },
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ data: {} }),
+      };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(true);
+    expect(result.providerId).toBe('prov-1');
+    expect(result.appointmentId).toBe('appt-1');
+  });
 });
