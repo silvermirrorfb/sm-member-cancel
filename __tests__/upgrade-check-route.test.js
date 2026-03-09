@@ -9,7 +9,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
 }));
 
 vi.mock('../src/lib/rate-limit.js', () => ({
-  checkRateLimit: () => ({ allowed: true, retryAfterMs: 0 }),
+  checkRateLimit: () => ({ allowed: true, remaining: 39, retryAfterMs: 0 }),
   getClientIP: () => '127.0.0.1',
 }));
 
@@ -100,9 +100,11 @@ describe('QA upgrade-check route', () => {
 
     expect(res.status).toBe(200);
     expect(body.ok).toBe(true);
+    expect(Boolean(body.requestId)).toBe(true);
     expect(body.member.name).toBe('Jane Smith');
     expect(body.qa.readOnly).toBe(true);
     expect(body.opportunity.eligible).toBe(true);
+    expect(res.headers.get('x-request-id')).toBe(body.requestId);
     expect(mockLookupMember).toHaveBeenCalledWith('Jane Smith', 'jane@example.com');
     expect(mockEvaluateUpgradeOpportunityForProfile).toHaveBeenCalled();
   });
@@ -193,5 +195,104 @@ describe('QA upgrade-check route', () => {
       expect.objectContaining({ clientId: 'client-1' }),
       expect.objectContaining({ locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65' }),
     );
+  });
+
+  it('replays identical request when idempotency key is reused', async () => {
+    process.env.NODE_ENV = 'development';
+    mockLookupMember.mockResolvedValue({
+      name: 'Jane Smith',
+      firstName: 'Jane',
+      email: 'jane@example.com',
+      phone: '15555550123',
+      clientId: 'client-1',
+      tier: '30',
+      accountStatus: 'active',
+      location: 'Flatiron',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      reason: 'eligible',
+      appointmentId: 'appt-1',
+    });
+
+    const headers = {
+      'content-type': 'application/json',
+      'x-idempotency-key': 'qa-idempotency-1',
+      'x-request-id': 'trace-1',
+    };
+    const body = JSON.stringify({
+      firstName: 'Jane',
+      lastName: 'Smith',
+      email: 'jane@example.com',
+    });
+
+    const firstRes = await POST(new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers,
+      body,
+    }));
+    const firstJson = await firstRes.json();
+    expect(firstRes.status).toBe(200);
+    expect(firstRes.headers.get('x-idempotency-replayed')).toBe('false');
+
+    const secondRes = await POST(new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers: { ...headers, 'x-request-id': 'trace-2' },
+      body,
+    }));
+    const secondJson = await secondRes.json();
+
+    expect(secondRes.status).toBe(200);
+    expect(secondRes.headers.get('x-idempotency-replayed')).toBe('true');
+    expect(firstJson.opportunity).toEqual(secondJson.opportunity);
+    expect(mockEvaluateUpgradeOpportunityForProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns 409 when idempotency key is reused with a different payload', async () => {
+    process.env.NODE_ENV = 'development';
+    mockLookupMember.mockResolvedValue({
+      name: 'Jane Smith',
+      firstName: 'Jane',
+      email: 'jane@example.com',
+      phone: '15555550123',
+      clientId: 'client-1',
+      tier: '30',
+      accountStatus: 'active',
+      location: 'Flatiron',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      reason: 'eligible',
+    });
+
+    const headers = {
+      'content-type': 'application/json',
+      'x-idempotency-key': 'qa-idempotency-2',
+    };
+
+    const firstRes = await POST(new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        firstName: 'Jane',
+        lastName: 'Smith',
+        email: 'jane@example.com',
+      }),
+    }));
+    expect(firstRes.status).toBe(200);
+
+    const secondRes = await POST(new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        firstName: 'Jane',
+        lastName: 'Smith',
+        email: 'jane@example.com',
+        debug: true,
+      }),
+    }));
+    const secondBody = await secondRes.json();
+    expect(secondRes.status).toBe(409);
+    expect(secondBody.error).toContain('Idempotency key');
   });
 });

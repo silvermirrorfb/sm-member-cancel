@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  lookupMember,
   normalizePhone,
   verifyMemberIdentity,
   levenshtein,
@@ -98,6 +99,96 @@ describe('P1-2: Mock fallback gating', () => {
     const { lookupMember } = await import('../src/lib/boulevard.js');
     const result = await lookupMember('Test User', 'test@test.com');
     expect(result).toBeNull();
+  });
+});
+
+describe('lookupMember fallback matching', () => {
+  const originalEnv = process.env;
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      BOULEVARD_API_KEY: 'key',
+      BOULEVARD_API_SECRET: Buffer.from('secret').toString('base64'),
+      BOULEVARD_BUSINESS_ID: 'biz-id',
+      BOULEVARD_API_URL: 'https://dashboard.boulevard.io/api/2020-01/admin',
+    };
+    __resetBoulevardCachesForTests();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('falls back to unique exact-name scan when email lookup returns no rows', async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes('FindClientByEmail')) {
+        return { ok: true, json: async () => ({ data: { clients: { edges: [] } } }) };
+      }
+      if (body.query.includes('FindClientsByNameScan')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              clients: {
+                edges: [{
+                  node: {
+                    id: 'client-1',
+                    firstName: 'Sandra',
+                    lastName: 'Bellew',
+                    email: 'sandra.bellew@silvermirror.com',
+                    mobilePhone: null,
+                    createdAt: '2024-01-01T00:00:00.000Z',
+                    appointmentCount: 3,
+                    active: true,
+                    primaryLocation: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Upper West Side' },
+                  },
+                }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('FindMembershipForClient')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              memberships: {
+                edges: [{
+                  node: {
+                    id: 'mem-1',
+                    clientId: 'client-1',
+                    name: '50-minute membership',
+                    startOn: '2025-01-01',
+                    status: 'ACTIVE',
+                    termNumber: 1,
+                    unitPrice: 13900,
+                    nextChargeDate: '2026-04-01',
+                    location: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Upper West Side' },
+                  },
+                }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('IntrospectType')) {
+        return { ok: true, json: async () => ({ data: { __type: null } }) };
+      }
+      return { ok: true, json: async () => ({ data: {} }) };
+    });
+
+    const result = await lookupMember('Sandra Bellew', 'stale-email@example.com');
+    expect(result).not.toBeNull();
+    expect(result.clientId).toBe('client-1');
+    expect(result.lookupStrategy).toBe('name_scan_exact');
   });
 });
 
@@ -421,6 +512,38 @@ describe('upgrade eligibility engine', () => {
 
     expect(result.eligible).toBe(true);
     expect(result.providerIdentityMode).toBe('fallback_no_provider_id');
+    expect(result.availableGapMinutes).toBe(20);
+  });
+
+  it('treats aliased location IDs as equivalent when provider identity is unavailable', () => {
+    const appointments = [
+      {
+        id: 'appt-1',
+        clientId: 'client-1',
+        providerId: '',
+        locationId: 'urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb',
+        startOn: '2026-03-08T10:00:00.000Z',
+        endOn: '2026-03-08T10:30:00.000Z',
+        status: 'BOOKED',
+      },
+      {
+        id: 'appt-2',
+        clientId: 'other',
+        providerId: 'prov-x',
+        locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
+        startOn: '2026-03-08T11:05:00.000Z',
+        endOn: '2026-03-08T11:35:00.000Z',
+        status: 'BOOKED',
+      },
+    ];
+
+    const result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, {
+      now: '2026-03-08T08:00:00.000Z',
+      windowHours: 6,
+    });
+
+    expect(result.eligible).toBe(true);
+    expect(result.locationCanonicalId).toBe('urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65');
     expect(result.availableGapMinutes).toBe(20);
   });
 });

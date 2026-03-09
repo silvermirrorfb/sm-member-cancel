@@ -22,11 +22,42 @@ const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
 const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
 const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEFAULT_LOCATION_ALIAS_GROUPS = [
+  [
+    'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
+    'urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb',
+  ],
+];
 
 const membershipCache = new Map();
 const clientFieldCache = new Map();
 const typeFieldCache = new Map();
 const typeFieldDetailCache = new Map();
+
+function parseLocationAliasGroups(rawValue) {
+  if (!rawValue) return DEFAULT_LOCATION_ALIAS_GROUPS;
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) return DEFAULT_LOCATION_ALIAS_GROUPS;
+    const groups = parsed
+      .filter(group => Array.isArray(group))
+      .map(group => group.map(item => normalizeBoulevardLocationId(item)).filter(Boolean))
+      .filter(group => group.length >= 2);
+    return groups.length > 0 ? groups : DEFAULT_LOCATION_ALIAS_GROUPS;
+  } catch {
+    return DEFAULT_LOCATION_ALIAS_GROUPS;
+  }
+}
+
+const LOCATION_ALIAS_GROUPS = parseLocationAliasGroups(process.env.BOULEVARD_LOCATION_ALIAS_GROUPS_JSON || '');
+const LOCATION_ALIAS_CANONICAL_MAP = (() => {
+  const map = new Map();
+  for (const group of LOCATION_ALIAS_GROUPS) {
+    const canonical = group[0];
+    for (const member of group) map.set(member, canonical);
+  }
+  return map;
+})();
 
 const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
 const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
@@ -140,6 +171,12 @@ function normalizeBoulevardLocationId(value) {
   return raw;
 }
 
+function canonicalizeBoulevardLocationId(value) {
+  const normalized = normalizeBoulevardLocationId(value);
+  if (!normalized) return '';
+  return LOCATION_ALIAS_CANONICAL_MAP.get(normalized) || normalized;
+}
+
 function toIsoDate(value) {
   if (!value) return null;
   const d = new Date(value);
@@ -196,6 +233,28 @@ function tokenizeName(text) {
   return normalizeNameText(text)
     .split(' ')
     .filter(Boolean);
+}
+
+function isExactFirstLastNameMatch(requestedName, candidateFirstName, candidateLastName) {
+  const reqTokens = tokenizeName(requestedName);
+  const candTokens = tokenizeName(`${candidateFirstName || ''} ${candidateLastName || ''}`);
+  if (reqTokens.length < 2 || candTokens.length < 2) return false;
+  return reqTokens[0] === candTokens[0] && reqTokens[reqTokens.length - 1] === candTokens[candTokens.length - 1];
+}
+
+function normalizeEmailLocalPart(email) {
+  const raw = String(email || '').trim().toLowerCase();
+  const at = raw.indexOf('@');
+  if (at <= 0) return '';
+  const local = raw.slice(0, at).split('+')[0];
+  return local.replace(/\./g, '');
+}
+
+function emailsLikelyReferToSameMailbox(leftEmail, rightEmail) {
+  const left = normalizeEmailLocalPart(leftEmail);
+  const right = normalizeEmailLocalPart(rightEmail);
+  if (!left || !right) return false;
+  return left === right;
 }
 
 function namesLikelyMatch(requestedName, candidateFirstName, candidateLastName) {
@@ -425,6 +484,55 @@ function findNameMatch(name, clients) {
   return clients.find(c =>
     namesLikelyMatch(name, c?.node?.firstName || '', c?.node?.lastName || '')
   ) || null;
+}
+
+async function findClientsByNameScan(apiUrl, headers, requestedName) {
+  const found = [];
+  let after = null;
+
+  for (let page = 0; page < PHONE_SCAN_MAX_PAGES; page++) {
+    const query = `
+      query FindClientsByNameScan($after: String) {
+        clients(first: ${PHONE_SCAN_PAGE_SIZE}, after: $after) {
+          edges {
+            node {
+              id
+              firstName
+              lastName
+              email
+              mobilePhone
+              createdAt
+              appointmentCount
+              active
+              primaryLocation { id name }
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+    const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { after });
+    if (!data) return null;
+
+    const connection = data?.data?.clients;
+    const edges = connection?.edges || [];
+    if (edges.length === 0) return found;
+
+    for (const edge of edges) {
+      if (namesLikelyMatch(requestedName, edge?.node?.firstName || '', edge?.node?.lastName || '')) {
+        found.push(edge);
+      }
+    }
+
+    // Keep scan bounded once we have several plausible candidates.
+    if (found.length >= 8) return found;
+    if (!connection?.pageInfo?.hasNextPage) break;
+
+    after = connection?.pageInfo?.endCursor || null;
+    if (!after) break;
+  }
+
+  return found;
 }
 
 async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {
@@ -1139,11 +1247,13 @@ function extractStrategyNodes(payload, strategy) {
 
 async function scanAppointments(apiUrl, headers, context = {}) {
   const locationIdForScan = normalizeBoulevardLocationId(context?.locationId || '') || null;
+  const locationCanonicalIdForScan = canonicalizeBoulevardLocationId(locationIdForScan || '') || null;
   const diagnostics = {
     typeIntrospection: null,
     queryIntrospection: null,
     queryTypeName: null,
     locationId: locationIdForScan,
+    locationCanonicalId: locationCanonicalIdForScan,
     queryRootTried: [],
     queryAttempts: [],
     queryErrors: [],
@@ -1425,6 +1535,7 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   if (!Number.isFinite(currentEndMs)) return { eligible: false, reason: 'invalid_current_end_time' };
 
   const hasProviderIdentity = Boolean(String(current.providerId || '').trim());
+  const currentLocationCanonicalId = canonicalizeBoulevardLocationId(current.locationId || '') || null;
   const providerCommitments = appointments
     .filter(appt => appt.id !== current.id)
     .filter(appt => !isCanceledAppointment(appt))
@@ -1434,7 +1545,9 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     })
     .filter(appt => {
       if (hasProviderIdentity) return appt.providerId === current.providerId;
-      if (current.locationId && appt.locationId) return appt.locationId === current.locationId;
+      if (currentLocationCanonicalId && appt.locationId) {
+        return canonicalizeBoulevardLocationId(appt.locationId) === currentLocationCanonicalId;
+      }
       return true;
     })
     .sort((a, b) => new Date(a.startOn).getTime() - new Date(b.startOn).getTime());
@@ -1460,6 +1573,7 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     providerId: current.providerId || null,
     providerIdentityMode: hasProviderIdentity ? 'exact_provider' : 'fallback_no_provider_id',
     locationId: current.locationId || null,
+    locationCanonicalId: currentLocationCanonicalId,
     startOn: current.startOn,
     endOn: current.endOn,
     nextCommitmentStartOn: nextCommitment?.startOn || null,
@@ -1642,6 +1756,7 @@ async function lookupMember(name, emailOrPhone) {
     };
 
     let clients = [];
+    let lookupStrategy = isEmail ? 'email_exact' : 'phone_scan';
     if (isEmail) {
       const query = `
         query FindClientByEmail($emails: [String!]) {
@@ -1667,6 +1782,36 @@ async function lookupMember(name, emailOrPhone) {
       const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { emails: [email] });
       if (!data) return null;
       clients = data?.data?.clients?.edges || [];
+      if (clients.length === 0) {
+        const nameScanMatches = await findClientsByNameScan(apiUrl, headers, name);
+        if (!nameScanMatches) return null;
+
+        const exactMatches = nameScanMatches.filter(edge =>
+          isExactFirstLastNameMatch(name, edge?.node?.firstName || '', edge?.node?.lastName || '')
+        );
+        if (exactMatches.length === 1) {
+          clients = [exactMatches[0]];
+          lookupStrategy = 'name_scan_exact';
+        } else if (exactMatches.length > 1) {
+          const mailboxMatches = exactMatches.filter(edge =>
+            emailsLikelyReferToSameMailbox(email, edge?.node?.email || '')
+          );
+          if (mailboxMatches.length === 1) {
+            clients = [mailboxMatches[0]];
+            lookupStrategy = 'name_scan_exact_mailbox';
+          } else {
+            console.log(`Boulevard lookup: ambiguous exact-name fallback matches for "${name}" (${exactMatches.length})`);
+          }
+        } else {
+          const likelyMailboxMatches = nameScanMatches.filter(edge =>
+            emailsLikelyReferToSameMailbox(email, edge?.node?.email || '')
+          );
+          if (likelyMailboxMatches.length === 1) {
+            clients = [likelyMailboxMatches[0]];
+            lookupStrategy = 'name_scan_mailbox';
+          }
+        }
+      }
     } else {
       const cleanPhone = normalizePhone(rawContact);
       if (!cleanPhone) {
@@ -1686,7 +1831,7 @@ async function lookupMember(name, emailOrPhone) {
 
     const match = findNameMatch(name, clients);
     if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
-    console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName}`);
+    console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName} via ${lookupStrategy}`);
     const membership = await findMembershipForClient(apiUrl, headers, match.node.id);
     const commerce = await fetchClientCommerceMetrics(apiUrl, headers, match.node);
     const source = membership ? {
@@ -1700,9 +1845,11 @@ async function lookupMember(name, emailOrPhone) {
       unitPrice: membership.unitPrice,
       location: membership?.location?.name || match.node?.primaryLocation?.name || match.node.location,
       locationId: membership?.location?.id || match.node?.primaryLocation?.id || null,
+      lookupStrategy,
     } : {
       ...match.node,
       ...(commerce || {}),
+      lookupStrategy,
     };
     return buildProfile(source);
   } catch (err) { console.error('Boulevard API error:', err.message || err); return null; }
@@ -1726,6 +1873,8 @@ function buildProfile(d) {
     name: `${d.firstName} ${d.lastName}`, firstName: d.firstName, email: d.email,
     phone: d.mobilePhone || null, location: d.location || d.primaryLocation?.name || 'Unknown',
     locationId: normalizeBoulevardLocationId(d.locationId || d.primaryLocation?.id || '') || null,
+    locationCanonicalId: canonicalizeBoulevardLocationId(d.locationId || d.primaryLocation?.id || '') || null,
+    lookupStrategy: d.lookupStrategy || null,
     tier: tier || null, monthlyRate,
     clientSince, memberSince, tenureMonths,
     accountStatus: d.accountStatus || d.membershipStatus || (d.active === false ? 'inactive' : d.active === true ? 'active' : null),

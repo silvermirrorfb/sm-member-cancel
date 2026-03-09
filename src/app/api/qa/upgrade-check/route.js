@@ -1,10 +1,13 @@
+import crypto from 'crypto';
 import { NextResponse } from 'next/server';
 import { lookupMember, evaluateUpgradeOpportunityForProfile } from '../../../../lib/boulevard';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
 const QA_UPGRADE_LIMIT_MAX = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_MAX || 40), 1);
 const QA_UPGRADE_LIMIT_WINDOW_MS = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_WINDOW_MS || 10 * 60 * 1000), 1000);
+const QA_UPGRADE_IDEMPOTENCY_TTL_MS = Math.max(Number(process.env.QA_UPGRADE_IDEMPOTENCY_TTL_MS || 15 * 60 * 1000), 1000);
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const idempotencyCache = new Map();
 
 function parseBodyValue(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -22,6 +25,16 @@ function parseNow(value) {
   return d.toISOString();
 }
 
+function stableStringify(value) {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function buildRateLimitHeaders(remaining, retryAfterMs = 0) {
   const headers = {
     'X-RateLimit-Limit': String(QA_UPGRADE_LIMIT_MAX),
@@ -37,6 +50,54 @@ function normalizeLocationIdInput(rawLocationId) {
   if (value.startsWith('urn:')) return value;
   if (UUID_V4_LIKE_RE.test(value)) return `urn:blvd:Location:${value}`;
   return value;
+}
+
+function getRequestId(request) {
+  const provided = parseBodyValue(request.headers.get('x-request-id') || '');
+  return provided || crypto.randomUUID();
+}
+
+function getIdempotencyKey(request) {
+  return parseBodyValue(request.headers.get('x-idempotency-key') || '');
+}
+
+function readIdempotencyEntry(key) {
+  if (!key) return null;
+  const entry = idempotencyCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    idempotencyCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function writeIdempotencyEntry(key, fingerprint, status, payload) {
+  if (!key) return;
+  idempotencyCache.set(key, {
+    fingerprint,
+    status,
+    payload,
+    expiresAt: Date.now() + QA_UPGRADE_IDEMPOTENCY_TTL_MS,
+  });
+}
+
+function buildResponseHeaders({
+  requestId,
+  remaining,
+  retryAfterMs = 0,
+  idempotencyKey = '',
+  replayed = false,
+}) {
+  const headers = {
+    'X-Request-Id': requestId,
+    ...buildRateLimitHeaders(remaining, retryAfterMs),
+  };
+  if (idempotencyKey) {
+    headers['X-Idempotency-Key'] = idempotencyKey;
+    headers['X-Idempotency-Replayed'] = replayed ? 'true' : 'false';
+  }
+  return headers;
 }
 
 function isAuthorized(request) {
@@ -60,23 +121,25 @@ export async function GET() {
 }
 
 export async function POST(request) {
+  const requestId = getRequestId(request);
+  const idempotencyKey = getIdempotencyKey(request);
+  const defaultRemaining = QA_UPGRADE_LIMIT_MAX;
+
+  const respond = (payload, status, remaining = defaultRemaining, retryAfterMs = 0, replayed = false) =>
+    NextResponse.json(payload, {
+      status,
+      headers: buildResponseHeaders({
+        requestId,
+        remaining,
+        retryAfterMs,
+        idempotencyKey,
+        replayed,
+      }),
+    });
+
   try {
     if (!isAuthorized(request)) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const ip = getClientIP(request);
-    const { allowed, remaining, retryAfterMs } = checkRateLimit(
-      ip,
-      'qa-upgrade-check',
-      QA_UPGRADE_LIMIT_MAX,
-      QA_UPGRADE_LIMIT_WINDOW_MS,
-    );
-    if (!allowed) {
-      return NextResponse.json(
-        { error: 'Too many requests. Please try again shortly.' },
-        { status: 429, headers: buildRateLimitHeaders(remaining, retryAfterMs) },
-      );
+      return respond({ error: 'Unauthorized', requestId }, 401);
     }
 
     const body = await request.json().catch(() => ({}));
@@ -93,23 +156,89 @@ export async function POST(request) {
       : null;
     const nowIso = parseNow(body.now);
     const windowHours = Number.isFinite(Number(body.windowHours)) ? Number(body.windowHours) : null;
+    const fingerprintPayload = {
+      firstName,
+      lastName,
+      email,
+      phone,
+      appointmentId,
+      targetDurationMinutes,
+      locationId: resolvedLocationId || null,
+      now: nowIso,
+      windowHours,
+      debugMode,
+    };
+    const idempotencyFingerprint = idempotencyKey
+      ? crypto.createHash('sha256').update(stableStringify(fingerprintPayload)).digest('hex')
+      : '';
+    const existingIdempotency = idempotencyKey ? readIdempotencyEntry(idempotencyKey) : null;
+    if (existingIdempotency) {
+      if (existingIdempotency.fingerprint !== idempotencyFingerprint) {
+        return respond({
+          error: 'Idempotency key has already been used with a different request payload.',
+          requestId,
+        }, 409, defaultRemaining, 0, true);
+      }
+      const replayPayload = {
+        ...(existingIdempotency.payload || {}),
+        requestId,
+      };
+      if (replayPayload.qa && typeof replayPayload.qa === 'object') {
+        replayPayload.qa = { ...replayPayload.qa, requestId };
+      }
+      return respond(replayPayload, existingIdempotency.status, defaultRemaining, 0, true);
+    }
+
+    const ip = getClientIP(request);
+    const { allowed, remaining, retryAfterMs } = checkRateLimit(
+      ip,
+      'qa-upgrade-check',
+      QA_UPGRADE_LIMIT_MAX,
+      QA_UPGRADE_LIMIT_WINDOW_MS,
+    );
+    if (!allowed) {
+      return respond(
+        { error: 'Too many requests. Please try again shortly.', requestId },
+        429,
+        remaining,
+        retryAfterMs,
+      );
+    }
 
     if (!firstName || !lastName || (!email && !phone)) {
-      return NextResponse.json(
-        { error: 'firstName, lastName, and at least one contact (email or phone) are required.' },
-        { status: 400 },
+      const payload = {
+        error: 'firstName, lastName, and at least one contact (email or phone) are required.',
+        requestId,
+      };
+      if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);
+      return respond(
+        payload,
+        400,
+        remaining,
       );
     }
     if (targetDurationMinutes !== null && !isValidTargetDuration(targetDurationMinutes)) {
-      return NextResponse.json(
-        { error: 'targetDurationMinutes must be 50 or 90 when provided.' },
-        { status: 400 },
+      const payload = {
+        error: 'targetDurationMinutes must be 50 or 90 when provided.',
+        requestId,
+      };
+      if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);
+      return respond(
+        payload,
+        400,
+        remaining,
       );
     }
     if (body.now && !nowIso) {
-      return NextResponse.json(
-        { error: 'now must be a valid date/time string when provided.' },
-        { status: 400 },
+      const payload = {
+        error: 'now must be a valid date/time string when provided.',
+        requestId,
+      };
+      if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);
+      return respond(
+        payload,
+        400,
+        remaining,
       );
     }
 
@@ -129,10 +258,9 @@ export async function POST(request) {
     }
 
     if (!profile) {
-      return NextResponse.json(
-        { ok: false, reason: 'member_not_found' },
-        { status: 404 },
-      );
+      const payload = { ok: false, reason: 'member_not_found', requestId };
+      if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 404, payload);
+      return respond(payload, 404, remaining);
     }
 
     const opportunity = await evaluateUpgradeOpportunityForProfile(profile, {
@@ -151,8 +279,9 @@ export async function POST(request) {
         })()
       : opportunity;
 
-    return NextResponse.json({
+    const payload = {
       ok: true,
+      requestId,
       member: {
         name: profile.name,
         firstName: profile.firstName || null,
@@ -165,6 +294,8 @@ export async function POST(request) {
         locationId: profile.locationId || null,
       },
       qa: {
+        requestId,
+        idempotencyKey: idempotencyKey || null,
         matchedContact,
         appointmentId: appointmentId || null,
         targetDurationMinutes: targetDurationMinutes || null,
@@ -176,9 +307,14 @@ export async function POST(request) {
         readOnly: true,
       },
       opportunity: responseOpportunity,
-    }, { headers: buildRateLimitHeaders(remaining, 0) });
+    };
+    if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 200, payload);
+    return respond(payload, 200, remaining);
   } catch (err) {
     console.error('QA upgrade check error:', err);
-    return NextResponse.json({ error: 'Internal error while running upgrade check.' }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Internal error while running upgrade check.', requestId },
+      { status: 500, headers: { 'X-Request-Id': requestId } },
+    );
   }
 }
