@@ -190,6 +190,75 @@ describe('lookupMember fallback matching', () => {
     expect(result.clientId).toBe('client-1');
     expect(result.lookupStrategy).toBe('name_scan_exact');
   });
+
+  it('prefers location-matching candidate when duplicate name/email records exist', async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes('FindClientByEmail')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              clients: {
+                edges: [
+                  {
+                    node: {
+                      id: 'client-old',
+                      firstName: 'Matt',
+                      lastName: 'Maroone',
+                      email: 'mattmaroone@gmail.com',
+                      mobilePhone: '+12134401333',
+                      createdAt: '2020-01-01T00:00:00.000Z',
+                      appointmentCount: 1,
+                      active: false,
+                      primaryLocation: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Brickell' },
+                    },
+                  },
+                  {
+                    node: {
+                      id: 'client-pq',
+                      firstName: 'Matt',
+                      lastName: 'Maroone',
+                      email: 'mattmaroone@gmail.com',
+                      mobilePhone: '+12134401333',
+                      createdAt: '2026-01-01T00:00:00.000Z',
+                      appointmentCount: 27,
+                      active: true,
+                      primaryLocation: { id: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc', name: 'Penn Quarter' },
+                    },
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('FindMembershipForClient')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              memberships: {
+                edges: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('IntrospectType')) {
+        return { ok: true, json: async () => ({ data: { __type: null } }) };
+      }
+      return { ok: true, json: async () => ({ data: {} }) };
+    });
+
+    const result = await lookupMember('Matt Maroone', 'mattmaroone@gmail.com', {
+      preferLocationId: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc',
+    });
+    expect(result).not.toBeNull();
+    expect(result.clientId).toBe('client-pq');
+    expect(result.location).toBe('Penn Quarter');
+  });
 });
 
 describe('constants', () => {

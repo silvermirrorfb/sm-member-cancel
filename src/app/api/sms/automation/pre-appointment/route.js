@@ -418,7 +418,9 @@ export async function POST(request) {
       let profile = null;
       let matchedContact = null;
       for (const contact of contacts) {
-        profile = await lookupMember(fullName, contact);
+        profile = await lookupMember(fullName, contact, {
+          preferLocationId: effectiveFallbackLocationId || undefined,
+        });
         if (profile) {
           matchedContact = contact;
           break;

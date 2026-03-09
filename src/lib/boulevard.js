@@ -521,10 +521,49 @@ async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options 
   return data;
 }
 
-function findNameMatch(name, clients) {
-  return clients.find(c =>
-    namesLikelyMatch(name, c?.node?.firstName || '', c?.node?.lastName || '')
-  ) || null;
+function findNameMatch(name, clients, options = {}) {
+  const preferredLocationCanonicalId = canonicalizeBoulevardLocationId(options.preferLocationId || '') || null;
+  const excludedClientIds = new Set(
+    Array.isArray(options.excludeClientIds)
+      ? options.excludeClientIds.map(id => String(id || '').trim()).filter(Boolean)
+      : [],
+  );
+
+  const candidates = (Array.isArray(clients) ? clients : [])
+    .filter(c => namesLikelyMatch(name, c?.node?.firstName || '', c?.node?.lastName || ''))
+    .filter(c => {
+      const id = String(c?.node?.id || '').trim();
+      return !excludedClientIds.has(id);
+    });
+  if (candidates.length === 0) return null;
+
+  const withScore = candidates.map(candidate => {
+    const node = candidate?.node || {};
+    const candidateLocationCanonicalId = canonicalizeBoulevardLocationId(node?.primaryLocation?.id || '') || null;
+    const appointmentCount = Number(node?.appointmentCount);
+    const createdAtMs = new Date(node?.createdAt || 0).getTime();
+
+    let score = 0;
+    if (preferredLocationCanonicalId && candidateLocationCanonicalId === preferredLocationCanonicalId) score += 100;
+    if (node?.active === true) score += 20;
+    if (node?.active === false) score -= 20;
+    if (Number.isFinite(appointmentCount)) score += Math.max(0, Math.min(appointmentCount, 30));
+
+    return {
+      candidate,
+      score,
+      appointmentCount: Number.isFinite(appointmentCount) ? appointmentCount : -1,
+      createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : -1,
+    };
+  });
+
+  withScore.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.appointmentCount !== a.appointmentCount) return b.appointmentCount - a.appointmentCount;
+    return b.createdAtMs - a.createdAtMs;
+  });
+
+  return withScore[0]?.candidate || null;
 }
 
 async function findClientsByNameScan(apiUrl, headers, requestedName) {
@@ -1786,7 +1825,7 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
   };
 }
 
-async function lookupMember(name, emailOrPhone) {
+async function lookupMember(name, emailOrPhone, options = {}) {
   const apiKey = process.env.BOULEVARD_API_KEY;
   const apiSecret = process.env.BOULEVARD_API_SECRET;
   const businessId = process.env.BOULEVARD_BUSINESS_ID;
@@ -1867,7 +1906,7 @@ async function lookupMember(name, emailOrPhone) {
       return null;
     }
 
-    const match = findNameMatch(name, clients);
+    const match = findNameMatch(name, clients, options);
     if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
     console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName} via ${lookupStrategy}`);
     const membership = await findMembershipForClient(apiUrl, headers, match.node.id);
