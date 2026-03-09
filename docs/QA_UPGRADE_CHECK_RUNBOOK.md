@@ -114,6 +114,9 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
     "dryRun": true,
     "now": "2026-03-09T17:00:00Z",
     "windowHours": 6,
+    "sendTimezone": "America/New_York",
+    "sendStartHour": 9,
+    "sendEndHour": 17,
     "candidates": [
       {
         "firstName": "Debbie",
@@ -123,3 +126,9 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
     ]
   }'
 ```
+
+### Outbound send controls
+- `windowHours`: eligibility window before appointment (default `6`).
+- `sendTimezone`: timezone for send-hour guardrail (default `America/New_York`).
+- `sendStartHour` / `sendEndHour`: allowed send range in 24h format (`9` to `17` = 9:00 AM to 4:59 PM).
+- `enforceSendWindow`: set `false` to bypass send-hour guardrail for QA-only checks.
