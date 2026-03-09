@@ -61,22 +61,22 @@ KNOWLEDGE BASE — ADD-ONS
 Add-ons enhance a facial and boost its results. Customers cannot book an add-on without a facial — they are not effective when used standalone. Do NOT use the word "unfortunately" when explaining this.
 
 PREMIUM ADD-ONS:
-- Dermaplaning — $95 — Medical-grade blade removes dead skin + vellus hair. Not for active acne.
-- Hydradermabrasion — $95 — Diamond-tip dermabrasion + pressurized serum infusion. Our upgrade replacement for HydraFacial.
-- Gua Sha Massage — $75 — 30-minute face/neck massage with Facify sculpting tech. Already included in Lymphatic Facial.
-- BioRePeel — $225 — Intensive two-phase chemical peel. Series of 3 recommended, spaced 7 days apart.
-- Custom Jelly Mask — $50 — Hydrating peel-off mask with HA, collagen, or peptides.
-- Microcurrent — $50 — PureLift sculpting. Already included in Party-Prep and Anti-Aging facials.
+- Dermaplaning — $95 (member $76) — 15 min — Medical-grade blade removes dead skin + vellus hair. Not for active acne. Best for: texture, roughness, dullness.
+- Hydradermabrasion — $95 (member $76) — 20 min — Diamond-tip dermabrasion + pressurized serum infusion. Our upgrade replacement for HydraFacial. Best for: dryness, dehydration, congestion.
+- Gua Sha Massage — $75 (member $60) — 30 min — Face/neck massage with Facify sculpting tech. Best for: puffiness, tension, circulation. ALREADY INCLUDED in Lymphatic Facial and Premier Contour — do not recommend as add-on for those services.
+- BioRePeel — $225 (member $180) — Chemical peel. Series of 3 recommended, spaced 7 days apart. Best for: deep resurfacing, acne scarring. Offered via advance recommendation only.
+- Custom Jelly Mask — $50 (member $40) — 15 min — Hydrating peel-off mask with HA, collagen, or peptides. Best for: dryness, dehydration, sensitivity, calming.
+- Microcurrent — $50 (member $40) — 15 min — PureLift sculpting for lift and tone. Best for: fine lines, elasticity, sagging. ALREADY INCLUDED in Party-Prep and Anti-Aging facials — do not recommend as add-on for those services.
 
 QUICK ADD-ONS:
-- Antioxidant Peel — $50 — Zero-downtime resurfacing.
-- Eye Puff Minimizer — $50 — Vitamin C eye mask + cryo Gua Sha.
-- Lip Plump & Scrub — $35 — Sugar exfoliation + Dr. Dennis Gross LED Lip Mask. Our only lip service.
-- Neck Firming — $25 — Electrical stimulation for neck/decolletage.
-- Extra Extractions — $25 — Ultrasonic tool for stubborn blackheads/whiteheads.
+- Antioxidant Peel — $50 (member $40) — 10 min — Zero-downtime resurfacing. Best for: dullness, uneven tone. SAFETY: Only suitable for lighter skin tones (Fitzpatrick I-III). Do NOT recommend for darker skin tones or if skin tone is unknown — recommend Dermaplaning instead.
+- Eye Puff Minimizer — $50 (member $40) — 10 min — Vitamin C eye mask + cryo Gua Sha. Best for: dark circles, puffiness, tired eyes.
+- Lip Plump & Scrub — $35 (member $28) — 10 min — Sugar exfoliation + Dr. Dennis Gross LED Lip Mask. Our only lip service.
+- Neck Firming — $25 (member $20) — 10 min — Electrical stimulation for neck/decolletage. Best for: fine lines, aging, neck laxity.
+- Extra Extractions — $25 (member $20) — 10 min — Ultrasonic tool for stubborn blackheads/whiteheads. Best for: congestion, clogged pores, blackheads.
 
 ADVANCED TREATMENT:
-- Microchanneling — Available ONLY at DC (Dupont, Navy Yard, Penn Quarter) and Miami (Brickell, Coral Gables). Procell device, .25mm nano needles, 3-5 day downtime. Stimulates collagen production.
+- Microchanneling — $225 (member $180) — Available ONLY at DC (Dupont, Navy Yard, Penn Quarter) and Miami (Brickell, Coral Gables). Procell device, .25mm nano needles, 3-5 day downtime. Best for: collagen production, scarring, deep texture improvement.
 
 ---
 
@@ -90,25 +90,64 @@ Do NOT say "unfortunately" or frame it as a loss. Frame it as an upgrade.
 
 ---
 
+KNOWLEDGE BASE — ADD-ON INTELLIGENCE & UPSELL GUIDANCE
+
+When a guest asks "what add-on should I get?" or describes a specific skin concern, recommend the best-fit add-on based on their concern:
+
+CONCERN → ADD-ON MAPPING:
+- Dryness / dehydration → Custom Jelly Mask ($50) or Hydradermabrasion ($95) for deeper hydration
+- Fine lines / aging → Microcurrent ($50) for lift and tone, or Neck Firming ($25) for neck/decolletage
+- Congestion / clogged pores → Extra Extractions ($25) or Hydradermabrasion ($95) for deeper clearing
+- Dark circles / puffiness → Eye Puff Minimizer ($50)
+- Dullness / uneven tone → Antioxidant Peel ($50) for lighter skin tones, or Dermaplaning ($95) for all skin tones
+- Texture / roughness → Dermaplaning ($95) — not suitable for active acne
+- Sensitivity / redness → Custom Jelly Mask ($50) with calming formula
+- Lips → Lip Plump & Scrub ($35)
+
+When multiple add-ons fit, recommend the one that best targets their primary concern. If they want to maximize their session, suggest the premium option first. If budget is a factor, suggest the quick add-on.
+
+UPGRADE PATHS (for guests considering more time):
+- 30-min → 50-min upgrade: +$50 non-member / +$40 member. Adds targeted treatment time for specific skin goals.
+- 50-min → 90-min upgrade: +$110 non-member / +$60 member. The Premier Contour is our ultimate 17-step treatment with dermaplaning, gua sha, LED, and cold therapy all included.
+
+SERVICE REDUNDANCY RULES — never recommend these add-ons for these facials (they're already included):
+- Microcurrent: already in Anti-Aging Facial and Party-Prep Facial
+- Gua Sha: already in Lymphatic Facial and Premier Contour
+- Dermaplaning: already in Premier Contour
+
+FITZPATRICK SKIN TONE SAFETY:
+- Antioxidant Peel: ONLY suitable for Fitzpatrick I-III (lighter skin tones). For Fitzpatrick IV-VI (olive to dark skin) or unknown skin tone, recommend Dermaplaning instead. This is a safety constraint — the peel can cause hyperpigmentation on darker skin.
+- All other add-ons: safe for all skin tones.
+- If a guest mentions their skin tone or you can infer it, factor this into recommendations. When in doubt, recommend Dermaplaning over Antioxidant Peel.
+
+WHEN TO SUGGEST ADD-ONS:
+- When a guest asks about a specific skin concern and you're recommending a facial, mention the most relevant add-on as a natural enhancement: "The Acne-Fighting Facial is perfect for that — and if you want extra clearing, adding Extra Extractions ($25, 10 min) goes deeper on blackheads."
+- Do not aggressively upsell. One add-on suggestion per response, framed as helpful, not salesy.
+- If they're already booking a 50-min facial and mention wanting more, suggest the 90-min Premier Contour upgrade rather than stacking add-ons.
+- For members, mention the member price: "As a member, Dermaplaning is $76 instead of $95."
+
+---
+
 KNOWLEDGE BASE — SKIN CONCERN RECOMMENDATIONS
 
-When customers describe their skin concern, recommend:
-- Acne / breakouts → Acne-Fighting Facial (50 min)
-- Hyperpigmentation / dark spots / sun damage → Hyperpigmentation Facial (50 min)
-- Anti-aging / wrinkles / elasticity → Anti-Aging Facial (50 min) — most popular
-- Sensitive / rosacea / eczema → Sensitive Skin Facial (50 min)
-- Dehydration / dry / flakey → Seasonal Hydrating Facial (50 min)
-- Pregnancy → Sensitive Skin (primary), Signature, or Lymphatic — all confirmed safe
-- First-time → Signature Facial (30 min) or Esthetician's Choice (50 min)
-- Pre-event / special occasion → Party-Prep Facial (30 min)
-- Puffiness / circulation → Lymphatic Facial (30 min)
-- Ingrown hairs / shaving → Just for Men Facial (30 min)
+When customers describe their skin concern, recommend a facial AND mention the best add-on pairing:
+- Acne / breakouts → Acne-Fighting Facial (50 min). Add-on: Extra Extractions ($25) for deeper clearing.
+- Hyperpigmentation / dark spots / sun damage → Hyperpigmentation Facial (50 min). Add-on: Antioxidant Peel ($50, lighter skin tones only) or Dermaplaning ($95, all skin tones).
+- Anti-aging / wrinkles / elasticity → Anti-Aging Facial (50 min) — most popular. Microcurrent is already included. Add-on: Neck Firming ($25) for neck/decolletage.
+- Sensitive / rosacea / eczema → Sensitive Skin Facial (50 min). Add-on: Custom Jelly Mask ($50) for extra calming hydration.
+- Dehydration / dry / flakey → Seasonal Hydrating Facial (50 min). Add-on: Custom Jelly Mask ($50) or Hydradermabrasion ($95) for intense hydration.
+- Pregnancy → Sensitive Skin (primary), Signature, or Lymphatic — all confirmed safe. Add-on: Custom Jelly Mask ($50) is safe during pregnancy.
+- First-time → Signature Facial (30 min) or Esthetician's Choice (50 min). No add-on needed for first visit — let them experience the facial first.
+- Pre-event / special occasion → Party-Prep Facial (30 min). Microcurrent already included. Add-on: Lip Plump ($35) for a finishing touch.
+- Puffiness / circulation → Lymphatic Facial (30 min). Gua Sha already included. Add-on: Eye Puff Minimizer ($50) for targeted under-eye work.
+- Ingrown hairs / shaving → Just for Men Facial (30 min). Add-on: Extra Extractions ($25) for stubborn ingrowns.
 - Multiple/complex concerns → Esthetician's Choice (50 min) for customized approach
-- Wants the ultimate treatment → Premier Contour (90 min)
+- Wants the ultimate treatment → Premier Contour (90 min). Dermaplaning and Gua Sha already included.
 - Hormonal acne → Acne-Fighting + esthetician guidance on at-home care
 - Hyperpigmentation + scarring → Start with facial assessment, may need peels/microchanneling (3-6 months for results)
-- Blackheads → Acne-Fighting Facial
-- 30-min vs 50-min: A 30-minute facial helps maintain healthy skin and is great for first-timers. The 50-minute facial targets specific skin issues and helps reach skincare goals.
+- Blackheads → Acne-Fighting Facial. Add-on: Extra Extractions ($25).
+- Dullness / wants glow → Dermaplaning ($95) as add-on to any facial for instant smoothness and radiance.
+- 30-min vs 50-min: A 30-minute facial helps maintain healthy skin and is great for first-timers. The 50-minute facial targets specific skin issues and helps reach skincare goals. Upgrading from 30 to 50 is +$50 (or +$40 for members).
 
 All facials include a skin analysis at the start. All facials are customized to the guest's skin type, concerns, and goals.
 

@@ -8,7 +8,13 @@ import {
     parseSessionSummary,
     stripAllSystemTags,
 } from '../../../../lib/claude';
-import { lookupMember, formatProfileForPrompt, verifyMemberIdentity } from '../../../../lib/boulevard';
+import {
+    lookupMember,
+    formatProfileForPrompt,
+    verifyMemberIdentity,
+    evaluateUpgradeOpportunityForProfile,
+    reverifyAndApplyUpgradeForProfile,
+} from '../../../../lib/boulevard';
 import { logChatMessage, logSupportIncident } from '../../../../lib/notify';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
@@ -34,6 +40,11 @@ const LOCATION_CANDIDATES = [
   'Upper East Side', 'Flatiron', 'Bryant Park', 'Manhattan West', 'Upper West Side',
   'Dupont Circle', 'Navy Yard', 'Penn Quarter', 'Brickell', 'Coral Gables',
 ];
+const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
+const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
+const UPGRADE_INTEREST_KEYWORDS = /\b(upgrade|extend|longer|50[-\s]?min|50[-\s]?minute|90[-\s]?min|90[-\s]?minute|add[-\s]?on|add on|add[-\s]?it)\b/i;
+const LOGISTICS_CONTEXT_KEYWORDS = /\b(direction|directions|address|where (is|are)|location|parking|how do i get|closest|map)\b/i;
+const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 10);
 
 function formatMoney(value) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -150,6 +161,74 @@ function buildPauseCreditsAnswer(profile) {
 
 function isUnresolvedIssueMessage(text) {
     return UNRESOLVED_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function isAffirmativeUpgradeReply(text) {
+    return YES_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function isNegativeUpgradeReply(text) {
+    return NO_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function mentionsUpgradeInterest(text) {
+    return UPGRADE_INTEREST_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function isLogisticsContext(text) {
+    return LOGISTICS_CONTEXT_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function formatTimeForGuest(iso) {
+    if (!iso) return 'your upcoming appointment';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return 'your upcoming appointment';
+    return d.toLocaleString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      month: 'short',
+      day: 'numeric',
+    });
+}
+
+function buildUpgradeOfferMessage(opportunity, options = {}) {
+    if (!opportunity?.pricing) return null;
+    const proactive = options.proactive === true;
+    const isMember = opportunity.isMember === true;
+    const pricing = opportunity.pricing;
+    const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
+    const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
+    const currentDuration = opportunity.currentDurationMinutes;
+    const targetDuration = opportunity.targetDurationMinutes;
+    const timeText = formatTimeForGuest(opportunity.startOn);
+    const opener = proactive
+      ? `Also, I can see room after your ${timeText} session.`
+      : `I checked your schedule for ${timeText}.`;
+    const memberPhrase = isMember ? 'as a member' : '';
+    const priceLine = isMember
+      ? `Upgrading from ${currentDuration} to ${targetDuration} minutes would be $${total} total (${memberPhrase} +$${delta}).`
+      : `Upgrading from ${currentDuration} to ${targetDuration} minutes would be +$${delta} (new total $${total}).`;
+
+    return `${opener} ${priceLine} Reply YES within ${OFFER_WINDOW_MINUTES} minutes to confirm, or NO to skip.`;
+}
+
+function buildUpgradeSuccessMessage(result) {
+    const target = result?.opportunity?.targetDurationMinutes;
+    const timeText = formatTimeForGuest(result?.opportunity?.startOn);
+    if (target) {
+      return `You're all set. I confirmed the upgrade to ${target} minutes for ${timeText}.`;
+    }
+    return "You're all set. I confirmed the upgrade.";
+}
+
+function buildUpgradeUnavailableMessage() {
+    return "Thanks for the quick reply. I re-checked availability and that upgrade slot is no longer open right now.";
+}
+
+function isPendingOfferExpired(offer) {
+    if (!offer?.expiresAt) return true;
+    const expiresMs = new Date(offer.expiresAt).getTime();
+    return !Number.isFinite(expiresMs) || Date.now() > expiresMs;
 }
 
 function buildUnresolvedEscalationResponse() {
@@ -560,6 +639,92 @@ export async function POST(request) {
             });
       }
 
+      // Expire stale pending upgrade offers
+      if (session.pendingUpgradeOffer && isPendingOfferExpired(session.pendingUpgradeOffer)) {
+            session.pendingUpgradeOffer = null;
+      }
+
+      // YES/NO handling for an active pending upgrade offer
+      if (session.pendingUpgradeOffer && session.memberProfile) {
+            if (isAffirmativeUpgradeReply(sanitizedMessage)) {
+                  const upgradeResult = await reverifyAndApplyUpgradeForProfile(
+                    session.memberProfile,
+                    session.pendingUpgradeOffer,
+                  );
+                  const upgradeMessage = upgradeResult.success
+                    ? buildUpgradeSuccessMessage(upgradeResult)
+                    : buildUpgradeUnavailableMessage();
+                  addMessage(sessionId, 'assistant', upgradeMessage);
+                  logChatMessage(sessionId, sessionCreated, 'assistant', upgradeMessage).catch(err =>
+                      console.warn('Chatlog failed for upgrade response:', err)
+                  );
+                  session.lastUpgradeOfferAppointmentId = session.pendingUpgradeOffer.appointmentId || null;
+                  session.pendingUpgradeOffer = null;
+                  return NextResponse.json({
+                        message: upgradeMessage,
+                        sessionId,
+                        upgradeHandled: true,
+                        upgradeResult: {
+                              success: upgradeResult.success,
+                              reason: upgradeResult.reason || null,
+                              appointmentId: upgradeResult?.opportunity?.appointmentId || null,
+                              mutationRoot: upgradeResult?.mutationRoot || null,
+                        },
+                  });
+            }
+
+            if (isNegativeUpgradeReply(sanitizedMessage)) {
+                  const declineMessage = 'No problem at all — we will keep your appointment as-is.';
+                  addMessage(sessionId, 'assistant', declineMessage);
+                  logChatMessage(sessionId, sessionCreated, 'assistant', declineMessage).catch(err =>
+                      console.warn('Chatlog failed for upgrade decline response:', err)
+                  );
+                  session.lastUpgradeOfferAppointmentId = session.pendingUpgradeOffer.appointmentId || null;
+                  session.pendingUpgradeOffer = null;
+                  return NextResponse.json({
+                        message: declineMessage,
+                        sessionId,
+                        upgradeHandled: true,
+                        upgradeResult: { success: false, reason: 'declined' },
+                  });
+            }
+      }
+
+      // Explicit upgrade request: run deterministic eligibility check before LLM response.
+      if (session.memberProfile && mentionsUpgradeInterest(sanitizedMessage)) {
+            const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
+            if (opportunity?.eligible) {
+                  if (session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
+                        const offerMessage = buildUpgradeOfferMessage(opportunity, { proactive: false });
+                        if (offerMessage) {
+                              session.pendingUpgradeOffer = {
+                                    appointmentId: opportunity.appointmentId,
+                                    targetDurationMinutes: opportunity.targetDurationMinutes,
+                                    createdAt: new Date().toISOString(),
+                                    expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
+                              };
+                              addMessage(sessionId, 'assistant', offerMessage);
+                              logChatMessage(sessionId, sessionCreated, 'assistant', offerMessage).catch(err =>
+                                  console.warn('Chatlog failed for direct upgrade offer:', err)
+                              );
+                              return NextResponse.json({
+                                    message: offerMessage,
+                                    sessionId,
+                                    pendingUpgradeOffer: true,
+                                    upgradeOpportunity: {
+                                          appointmentId: opportunity.appointmentId,
+                                          currentDurationMinutes: opportunity.currentDurationMinutes,
+                                          targetDurationMinutes: opportunity.targetDurationMinutes,
+                                          requiredExtraMinutes: opportunity.requiredExtraMinutes,
+                                          availableGapMinutes: opportunity.availableGapMinutes,
+                                          gapUnlimited: opportunity.gapUnlimited === true,
+                                    },
+                              });
+                        }
+                  }
+            }
+      }
+
       // Determine which system prompt to use
       const systemPrompt = session.systemPrompt || getSystemPrompt();
 
@@ -692,6 +857,23 @@ export async function POST(request) {
             visibleResponse = stripEndFollowUpQuestions(visibleResponse);
             if (!visibleResponse) {
                   visibleResponse = 'Thanks again. We have documented this conversation and our team will follow up.';
+            }
+      }
+
+      // Proactive upgrade suggestion on logistics questions (e.g., directions) for identified members.
+      if (!summary && session.memberProfile && !session.pendingUpgradeOffer && isLogisticsContext(sanitizedMessage)) {
+            const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
+            if (opportunity?.eligible && session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
+                  const proactiveOffer = buildUpgradeOfferMessage(opportunity, { proactive: true });
+                  if (proactiveOffer) {
+                        session.pendingUpgradeOffer = {
+                              appointmentId: opportunity.appointmentId,
+                              targetDurationMinutes: opportunity.targetDurationMinutes,
+                              createdAt: new Date().toISOString(),
+                              expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
+                        };
+                        visibleResponse = `${visibleResponse}\n\n${proactiveOffer}`.trim();
+                  }
             }
       }
 

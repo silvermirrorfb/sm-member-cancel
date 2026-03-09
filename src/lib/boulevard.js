@@ -14,9 +14,17 @@ const MEMBERSHIP_SCAN_MAX_PAGES = 120;
 const MEMBERSHIP_CACHE_TTL_MS = 30 * 60 * 1000;
 const MEMBERSHIP_NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
 const CLIENT_FIELD_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const APPOINTMENT_SCAN_PAGE_SIZE = Number(process.env.BOULEVARD_APPOINTMENT_SCAN_PAGE_SIZE || 100);
+const APPOINTMENT_SCAN_MAX_PAGES = Number(process.env.BOULEVARD_APPOINTMENT_SCAN_MAX_PAGES || 80);
+const UPGRADE_WINDOW_HOURS = Number(process.env.BOULEVARD_UPGRADE_WINDOW_HOURS || 6);
+const PREP_BUFFER_30MIN = Number(process.env.PREP_BUFFER_30MIN || 15);
+const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
+const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
+const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
 
 const membershipCache = new Map();
 const clientFieldCache = new Map();
+const typeFieldCache = new Map();
 
 const WALKIN_PRICES = { '30': 119, '50': 169, '90': 279 };
 const CURRENT_RATES = { '30': 99, '50': 139, '90': 199 };
@@ -96,6 +104,23 @@ function generateAuthHeader(apiKey, apiSecret, businessId) {
   const signature = crypto.createHmac('sha256', rawKey).update(payload, 'utf8').digest('base64');
   const token = `${signature}${payload}`;
   return Buffer.from(`${apiKey}:${token}`, 'utf8').toString('base64');
+}
+
+function getBoulevardAuthContext() {
+  const apiKey = process.env.BOULEVARD_API_KEY;
+  const apiSecret = process.env.BOULEVARD_API_SECRET;
+  const businessId = process.env.BOULEVARD_BUSINESS_ID;
+  if (!apiKey || !apiSecret || !businessId) return null;
+
+  const apiUrl = normalizeBoulevardApiUrl(process.env.BOULEVARD_API_URL || DEFAULT_API_URL);
+  const authCredentials = generateAuthHeader(apiKey, apiSecret, businessId);
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Basic ${authCredentials}`,
+    'X-Boulevard-Business-ID': businessId,
+  };
+
+  return { apiUrl, headers, businessId };
 }
 
 function normalizePhone(phone) {
@@ -462,30 +487,39 @@ async function findMembershipForClient(apiUrl, headers, clientId) {
   return best || null;
 }
 
-async function getClientTypeFieldSet(apiUrl, headers) {
-  const cached = clientFieldCache.get(apiUrl);
+async function getTypeFieldSet(apiUrl, headers, typeName) {
+  const key = `${apiUrl}::${typeName}`;
+  const cached = typeFieldCache.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.fields;
 
   const query = `
-    query IntrospectClientType {
-      __type(name: "Client") {
+    query IntrospectType($typeName: String!) {
+      __type(name: $typeName) {
         fields {
           name
         }
       }
     }
   `;
-  const data = await fetchBoulevardGraphQL(apiUrl, headers, query, {}, { silentErrors: true });
+  const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { typeName }, { silentErrors: true });
   const fields = data?.data?.__type?.fields;
 
   if (!Array.isArray(fields) || fields.length === 0) {
-    clientFieldCache.set(apiUrl, { fields: null, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
+    typeFieldCache.set(key, { fields: null, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
     return null;
   }
 
   const fieldSet = new Set(fields.map(f => String(f?.name || '').trim()).filter(Boolean));
-  clientFieldCache.set(apiUrl, { fields: fieldSet, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
+  typeFieldCache.set(key, { fields: fieldSet, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
   return fieldSet;
+}
+
+async function getClientTypeFieldSet(apiUrl, headers) {
+  const cached = clientFieldCache.get(apiUrl);
+  if (cached && cached.expiresAt > Date.now()) return cached.fields;
+  const fields = await getTypeFieldSet(apiUrl, headers, 'Client');
+  clientFieldCache.set(apiUrl, { fields, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
+  return fields;
 }
 
 async function fetchClientCommerceMetrics(apiUrl, headers, clientNode) {
@@ -538,6 +572,353 @@ async function fetchClientCommerceMetrics(apiUrl, headers, clientNode) {
     edges.find(edge => String(edge?.node?.id || '') === String(clientNode?.id || '')) ||
     edges[0];
   return matched?.node || null;
+}
+
+function pickFirstAvailableField(fieldSet, candidates) {
+  for (const field of candidates) {
+    if (fieldSet.has(field)) return field;
+  }
+  return null;
+}
+
+function minutesBetweenIso(startIso, endIso) {
+  const startMs = new Date(startIso || 0).getTime();
+  const endMs = new Date(endIso || 0).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
+  return Math.round((endMs - startMs) / 60000);
+}
+
+function bucketDurationMinutes(durationMinutes) {
+  if (!isFiniteNumber(durationMinutes)) return null;
+  if (durationMinutes <= 40) return 30;
+  if (durationMinutes <= 70) return 50;
+  return 90;
+}
+
+function tierFromDurationMinutes(durationMinutes) {
+  if (durationMinutes === 30) return '30';
+  if (durationMinutes === 50) return '50';
+  if (durationMinutes === 90) return '90';
+  return null;
+}
+
+function prepBufferMinutesForDuration(durationMinutes) {
+  if (durationMinutes <= 30) return PREP_BUFFER_30MIN;
+  if (durationMinutes <= 50) return PREP_BUFFER_50MIN;
+  return PREP_BUFFER_90MIN;
+}
+
+function isCanceledAppointment(appt) {
+  const status = String(appt?.status || '').toUpperCase();
+  if (appt?.canceledAt) return true;
+  return ['CANCELED', 'CANCELLED', 'NO_SHOW', 'DELETED', 'VOID'].includes(status);
+}
+
+function pickUpgradeTargetDuration(currentDurationMinutes) {
+  if (!isFiniteNumber(currentDurationMinutes)) return null;
+  if (currentDurationMinutes <= 30) return 50;
+  if (currentDurationMinutes <= 50) return 90;
+  return null;
+}
+
+function computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember) {
+  const currentTier = tierFromDurationMinutes(currentDurationMinutes);
+  const targetTier = tierFromDurationMinutes(targetDurationMinutes);
+  if (!currentTier || !targetTier) return null;
+
+  const walkinTotal = WALKIN_PRICES[targetTier];
+  const walkinCurrent = WALKIN_PRICES[currentTier];
+  const memberTotal = CURRENT_RATES[targetTier];
+  const memberCurrent = CURRENT_RATES[currentTier];
+  if (!isFiniteNumber(walkinTotal) || !isFiniteNumber(walkinCurrent) || !isFiniteNumber(memberTotal) || !isFiniteNumber(memberCurrent)) return null;
+
+  return {
+    walkinTotal,
+    walkinDelta: Math.max(walkinTotal - walkinCurrent, 0),
+    memberTotal,
+    memberDelta: Math.max(memberTotal - memberCurrent, 0),
+    offeredTotal: isMember ? memberTotal : walkinTotal,
+    offeredDelta: isMember ? Math.max(memberTotal - memberCurrent, 0) : Math.max(walkinTotal - walkinCurrent, 0),
+  };
+}
+
+async function scanAppointments(apiUrl, headers) {
+  const fieldSet = await getTypeFieldSet(apiUrl, headers, 'Appointment');
+  if (!fieldSet) return null;
+
+  const clientIdField = pickFirstAvailableField(fieldSet, ['clientId', 'customerId']);
+  const providerIdField = pickFirstAvailableField(fieldSet, ['providerId', 'staffId', 'employeeId', 'serviceProviderId']);
+  const locationIdField = pickFirstAvailableField(fieldSet, ['locationId']);
+  const statusField = pickFirstAvailableField(fieldSet, ['status', 'state']);
+  const canceledAtField = pickFirstAvailableField(fieldSet, ['canceledAt', 'cancelledAt']);
+
+  if (!fieldSet.has('id') || !fieldSet.has('startOn') || !fieldSet.has('endOn') || !clientIdField || !providerIdField) {
+    return null;
+  }
+
+  const selectedFields = ['id', 'startOn', 'endOn', clientIdField, providerIdField];
+  if (locationIdField) selectedFields.push(locationIdField);
+  if (statusField) selectedFields.push(statusField);
+  if (canceledAtField) selectedFields.push(canceledAtField);
+
+  const appointments = [];
+  let after = null;
+
+  for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
+    const query = `
+      query ScanAppointments($after: String) {
+        appointments(first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after) {
+          edges {
+            node {
+              ${selectedFields.join('\n              ')}
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+    const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { after }, { silentErrors: true });
+    if (!data) return null;
+
+    const connection = data?.data?.appointments;
+    const edges = connection?.edges || [];
+    if (edges.length === 0) break;
+
+    for (const edge of edges) {
+      const node = edge?.node || {};
+      const normalized = {
+        id: String(node.id || ''),
+        startOn: node.startOn || null,
+        endOn: node.endOn || null,
+        clientId: String(node[clientIdField] || ''),
+        providerId: String(node[providerIdField] || ''),
+        locationId: locationIdField ? String(node[locationIdField] || '') : null,
+        status: statusField ? String(node[statusField] || '') : null,
+        canceledAt: canceledAtField ? node[canceledAtField] : null,
+      };
+      if (!normalized.id || !normalized.startOn || !normalized.endOn || !normalized.clientId || !normalized.providerId) continue;
+      appointments.push(normalized);
+    }
+
+    if (!connection?.pageInfo?.hasNextPage) break;
+    after = connection?.pageInfo?.endCursor || null;
+    if (!after) break;
+  }
+
+  return appointments;
+}
+
+function evaluateUpgradeEligibilityFromAppointments(appointments, profile, options = {}) {
+  if (!Array.isArray(appointments) || appointments.length === 0) {
+    return { eligible: false, reason: 'no_appointments_available' };
+  }
+  const clientId = String(profile?.clientId || '');
+  if (!clientId) return { eligible: false, reason: 'missing_client_id' };
+
+  const now = new Date(options.now || new Date());
+  if (Number.isNaN(now.getTime())) return { eligible: false, reason: 'invalid_now' };
+  const nowMs = now.getTime();
+  const windowHours = Number(options.windowHours || UPGRADE_WINDOW_HOURS);
+  const windowMs = Math.max(windowHours, 0) * 60 * 60 * 1000;
+
+  const upcoming = appointments
+    .filter(appt => appt.clientId === clientId)
+    .filter(appt => !isCanceledAppointment(appt))
+    .filter(appt => {
+      const startMs = new Date(appt.startOn).getTime();
+      return Number.isFinite(startMs) && startMs > nowMs && startMs - nowMs <= windowMs;
+    })
+    .sort((a, b) => new Date(a.startOn).getTime() - new Date(b.startOn).getTime());
+
+  if (upcoming.length === 0) return { eligible: false, reason: 'no_upcoming_appointment_in_window' };
+
+  const targetAppointmentId = String(options.appointmentId || '').trim();
+  const current = targetAppointmentId
+    ? upcoming.find(appt => appt.id === targetAppointmentId) || null
+    : upcoming[0];
+  if (!current) return { eligible: false, reason: 'target_appointment_not_found' };
+
+  const rawDuration = minutesBetweenIso(current.startOn, current.endOn);
+  const currentDurationMinutes = bucketDurationMinutes(rawDuration);
+  if (!isFiniteNumber(currentDurationMinutes)) return { eligible: false, reason: 'invalid_current_duration' };
+
+  const targetDurationMinutes = isFiniteNumber(options.targetDurationMinutes)
+    ? options.targetDurationMinutes
+    : pickUpgradeTargetDuration(currentDurationMinutes);
+  if (!isFiniteNumber(targetDurationMinutes)) return { eligible: false, reason: 'no_upgrade_target_for_duration' };
+
+  const requiredExtraMinutes = targetDurationMinutes - currentDurationMinutes;
+  if (requiredExtraMinutes <= 0) return { eligible: false, reason: 'already_at_or_above_target_duration' };
+
+  const currentEndMs = new Date(current.endOn).getTime();
+  if (!Number.isFinite(currentEndMs)) return { eligible: false, reason: 'invalid_current_end_time' };
+
+  const providerCommitments = appointments
+    .filter(appt => appt.providerId === current.providerId)
+    .filter(appt => appt.id !== current.id)
+    .filter(appt => !isCanceledAppointment(appt))
+    .filter(appt => {
+      const startMs = new Date(appt.startOn).getTime();
+      return Number.isFinite(startMs) && startMs > new Date(current.startOn).getTime();
+    })
+    .sort((a, b) => new Date(a.startOn).getTime() - new Date(b.startOn).getTime());
+
+  const nextCommitment = providerCommitments[0] || null;
+  const prepBufferMinutes = prepBufferMinutesForDuration(currentDurationMinutes);
+  const blockEndMs = currentEndMs + prepBufferMinutes * 60000;
+  const nextStartMs = nextCommitment ? new Date(nextCommitment.startOn).getTime() : null;
+  const hasFiniteGap = Number.isFinite(nextStartMs);
+  const availableGapMinutes = hasFiniteGap
+    ? Math.floor((nextStartMs - blockEndMs) / 60000)
+    : Number.POSITIVE_INFINITY;
+
+  const isMember = Boolean(profile?.tier) && !/inactive|cancel/.test(String(profile?.accountStatus || '').toLowerCase());
+  const pricing = computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember);
+  if (!pricing) return { eligible: false, reason: 'pricing_unavailable' };
+
+  return {
+    eligible: availableGapMinutes >= requiredExtraMinutes,
+    reason: availableGapMinutes >= requiredExtraMinutes ? 'eligible' : 'insufficient_gap',
+    appointmentId: current.id,
+    clientId: current.clientId,
+    providerId: current.providerId,
+    locationId: current.locationId || null,
+    startOn: current.startOn,
+    endOn: current.endOn,
+    nextCommitmentStartOn: nextCommitment?.startOn || null,
+    currentDurationMinutes,
+    targetDurationMinutes,
+    requiredExtraMinutes,
+    prepBufferMinutes,
+    availableGapMinutes: Number.isFinite(availableGapMinutes) ? availableGapMinutes : null,
+    gapUnlimited: !hasFiniteGap,
+    isMember,
+    pricing,
+  };
+}
+
+async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
+  const auth = getBoulevardAuthContext();
+  if (!auth) return { eligible: false, reason: 'boulevard_not_configured' };
+
+  const appointments = await scanAppointments(auth.apiUrl, auth.headers);
+  if (!appointments) return { eligible: false, reason: 'appointment_scan_failed' };
+
+  return evaluateUpgradeEligibilityFromAppointments(appointments, profile, options);
+}
+
+async function tryApplyAppointmentUpgradeMutation(apiUrl, headers, appointmentId, serviceId) {
+  const mutationCandidates = [
+    {
+      root: 'updateAppointment',
+      query: `
+        mutation UpgradeAppointment($appointmentId: ID!, $serviceId: ID!) {
+          updateAppointment(input: { id: $appointmentId, serviceId: $serviceId }) {
+            appointment { id }
+          }
+        }
+      `,
+    },
+    {
+      root: 'appointmentUpdate',
+      query: `
+        mutation UpgradeAppointmentAlt($appointmentId: ID!, $serviceId: ID!) {
+          appointmentUpdate(input: { id: $appointmentId, serviceId: $serviceId }) {
+            appointment { id }
+          }
+        }
+      `,
+    },
+  ];
+
+  for (const candidate of mutationCandidates) {
+    const data = await fetchBoulevardGraphQL(
+      apiUrl,
+      headers,
+      candidate.query,
+      { appointmentId, serviceId },
+      { silentErrors: true },
+    );
+    if (!data) continue;
+    const node = data?.data?.[candidate.root];
+    const updatedId = node?.appointment?.id || node?.id || null;
+    if (updatedId) return { applied: true, mutationRoot: candidate.root, updatedId: String(updatedId) };
+  }
+
+  return { applied: false, reason: 'upgrade_mutation_failed' };
+}
+
+async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options = {}) {
+  if (!pendingOffer || !pendingOffer.appointmentId) return { success: false, reason: 'missing_pending_offer' };
+
+  const fresh = await evaluateUpgradeOpportunityForProfile(profile, {
+    now: options.now,
+    windowHours: options.windowHours,
+    appointmentId: pendingOffer.appointmentId,
+    targetDurationMinutes: pendingOffer.targetDurationMinutes,
+  });
+  if (!fresh?.eligible) {
+    return {
+      success: false,
+      reason: fresh?.reason || 'reverify_failed',
+      reverified: false,
+      opportunity: fresh || null,
+    };
+  }
+
+  if (!ENABLE_UPGRADE_MUTATION) {
+    return {
+      success: false,
+      reason: 'upgrade_mutation_disabled',
+      reverified: true,
+      opportunity: fresh,
+    };
+  }
+
+  const auth = getBoulevardAuthContext();
+  if (!auth) {
+    return {
+      success: false,
+      reason: 'boulevard_not_configured',
+      reverified: true,
+      opportunity: fresh,
+    };
+  }
+
+  const targetDuration = Number(fresh.targetDurationMinutes);
+  const serviceId =
+    targetDuration === 50
+      ? process.env.BOULEVARD_SERVICE_ID_50MIN
+      : targetDuration === 90
+      ? process.env.BOULEVARD_SERVICE_ID_90MIN
+      : null;
+  if (!serviceId) {
+    return {
+      success: false,
+      reason: 'service_id_not_configured',
+      reverified: true,
+      opportunity: fresh,
+    };
+  }
+
+  const applied = await tryApplyAppointmentUpgradeMutation(auth.apiUrl, auth.headers, fresh.appointmentId, serviceId);
+  if (!applied.applied) {
+    return {
+      success: false,
+      reason: applied.reason || 'upgrade_mutation_failed',
+      reverified: true,
+      opportunity: fresh,
+    };
+  }
+
+  return {
+    success: true,
+    reason: 'applied',
+    reverified: true,
+    opportunity: fresh,
+    mutationRoot: applied.mutationRoot,
+    updatedAppointmentId: applied.updatedId,
+  };
 }
 
 async function lookupMember(name, emailOrPhone) {
@@ -646,6 +1027,7 @@ function buildProfile(d) {
   const tenureMonths = isFiniteNumber(d.tenureMonths) ? d.tenureMonths : monthsBetween(memberSince);
 
   const profile = {
+    clientId: d.id || null,
     name: `${d.firstName} ${d.lastName}`, firstName: d.firstName, email: d.email,
     phone: d.mobilePhone || null, location: d.location || d.primaryLocation?.name || 'Unknown',
     tier: tier || null, monthlyRate,
@@ -815,6 +1197,7 @@ function levenshtein(a, b) {
 
 function mockLookup(name, emailOrPhone) {
   return buildProfile({
+    id: 'mock-client-id',
     firstName: name.split(' ')[0] || 'Test', lastName: name.split(' ').slice(1).join(' ') || 'Member',
     email: emailOrPhone.includes('@') ? emailOrPhone : 'test@example.com',
     mobilePhone: emailOrPhone.includes('@') ? null : emailOrPhone,
@@ -831,6 +1214,9 @@ function mockLookup(name, emailOrPhone) {
 
 export {
   lookupMember,
+  evaluateUpgradeOpportunityForProfile,
+  evaluateUpgradeEligibilityFromAppointments,
+  reverifyAndApplyUpgradeForProfile,
   verifyMemberIdentity,
   levenshtein,
   buildProfile,
