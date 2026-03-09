@@ -688,6 +688,22 @@ function compactGraphQLErrorPayload(payload) {
   return payload;
 }
 
+function readNodeFieldAsString(node, scalarField, objectField) {
+  if (!node || typeof node !== 'object') return '';
+  if (scalarField) {
+    const raw = node[scalarField];
+    if (raw !== null && raw !== undefined && String(raw).trim()) return String(raw).trim();
+  }
+  if (objectField) {
+    const nested = node[objectField];
+    if (nested && typeof nested === 'object') {
+      const nestedId = nested.id;
+      if (nestedId !== null && nestedId !== undefined && String(nestedId).trim()) return String(nestedId).trim();
+    }
+  }
+  return '';
+}
+
 async function scanAppointments(apiUrl, headers) {
   const diagnostics = {
     typeIntrospection: null,
@@ -715,25 +731,42 @@ async function scanAppointments(apiUrl, headers) {
   }
 
   const clientIdField = pickFirstAvailableField(fieldSet, ['clientId', 'customerId']);
+  const clientObjectField = pickFirstAvailableField(fieldSet, ['client', 'customer']);
   const providerIdField = pickFirstAvailableField(fieldSet, ['providerId', 'staffId', 'employeeId', 'serviceProviderId']);
+  const providerObjectField = pickFirstAvailableField(fieldSet, ['provider', 'staff', 'employee', 'serviceProvider']);
   const locationIdField = pickFirstAvailableField(fieldSet, ['locationId']);
-  const statusField = pickFirstAvailableField(fieldSet, ['status', 'state']);
+  const locationObjectField = pickFirstAvailableField(fieldSet, ['location']);
+  const statusField = pickFirstAvailableField(fieldSet, ['status', 'state', 'appointmentStatus']);
   const canceledAtField = pickFirstAvailableField(fieldSet, ['canceledAt', 'cancelledAt']);
+  const startField = pickFirstAvailableField(fieldSet, ['startOn', 'startAt', 'startsAt', 'startTime', 'startDateTime', 'start']);
+  const endField = pickFirstAvailableField(fieldSet, ['endOn', 'endAt', 'endsAt', 'endTime', 'endDateTime', 'end']);
 
-  if (!fieldSet.has('id') || !fieldSet.has('startOn') || !fieldSet.has('endOn') || !clientIdField || !providerIdField) {
+  const hasClientIdentity = Boolean(clientIdField || clientObjectField);
+  const hasProviderIdentity = Boolean(providerIdField || providerObjectField);
+  if (!fieldSet.has('id') || !startField || !endField || !hasClientIdentity || !hasProviderIdentity) {
     diagnostics.failure = 'appointment_missing_required_fields';
     diagnostics.requiredFields = {
       hasId: fieldSet.has('id'),
       hasStartOn: fieldSet.has('startOn'),
       hasEndOn: fieldSet.has('endOn'),
+      startField: startField || null,
+      endField: endField || null,
       clientIdField,
+      clientObjectField,
       providerIdField,
+      providerObjectField,
+      availableFields: Array.from(fieldSet).sort(),
     };
     return { appointments: null, diagnostics };
   }
 
-  const selectedFields = ['id', 'startOn', 'endOn', clientIdField, providerIdField];
+  const selectedFields = ['id', startField, endField];
+  if (clientIdField) selectedFields.push(clientIdField);
+  else if (clientObjectField) selectedFields.push(`${clientObjectField} { id }`);
+  if (providerIdField) selectedFields.push(providerIdField);
+  else if (providerObjectField) selectedFields.push(`${providerObjectField} { id }`);
   if (locationIdField) selectedFields.push(locationIdField);
+  else if (locationObjectField) selectedFields.push(`${locationObjectField} { id }`);
   if (statusField) selectedFields.push(statusField);
   if (canceledAtField) selectedFields.push(canceledAtField);
 
@@ -778,11 +811,13 @@ async function scanAppointments(apiUrl, headers) {
         const node = edge?.node || {};
         const normalized = {
           id: String(node.id || ''),
-          startOn: node.startOn || null,
-          endOn: node.endOn || null,
-          clientId: String(node[clientIdField] || ''),
-          providerId: String(node[providerIdField] || ''),
-          locationId: locationIdField ? String(node[locationIdField] || '') : null,
+          startOn: node[startField] || null,
+          endOn: node[endField] || null,
+          clientId: readNodeFieldAsString(node, clientIdField, clientObjectField),
+          providerId: readNodeFieldAsString(node, providerIdField, providerObjectField),
+          locationId: locationIdField
+            ? String(node[locationIdField] || '')
+            : readNodeFieldAsString(node, null, locationObjectField) || null,
           status: statusField ? String(node[statusField] || '') : null,
           canceledAt: canceledAtField ? node[canceledAtField] : null,
         };
@@ -1324,6 +1359,12 @@ function mockLookup(name, emailOrPhone) {
   });
 }
 
+function __resetBoulevardCachesForTests() {
+  membershipCache.clear();
+  clientFieldCache.clear();
+  typeFieldCache.clear();
+}
+
 export {
   lookupMember,
   evaluateUpgradeOpportunityForProfile,
@@ -1339,4 +1380,5 @@ export {
   CURRENT_RATES,
   PERKS,
   LOYALTY_TIERS,
+  __resetBoulevardCachesForTests,
 };
