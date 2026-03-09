@@ -570,6 +570,25 @@ async function getTypeFieldDetailMap(apiUrl, headers, typeName) {
       __type(name: $typeName) {
         fields {
           name
+          args {
+            name
+            type {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                  }
+                }
+              }
+            }
+          }
           type {
             kind
             name
@@ -606,10 +625,22 @@ async function getTypeFieldDetailMap(apiUrl, headers, typeName) {
     const fieldName = String(field?.name || '').trim();
     if (!fieldName) continue;
     const namedType = unwrapNamedType(field?.type || null);
+    const args = Array.isArray(field?.args)
+      ? field.args.map(arg => {
+          const argType = unwrapNamedType(arg?.type || null);
+          return {
+            name: String(arg?.name || '').trim(),
+            kind: argType?.kind || null,
+            namedType: argType?.name || null,
+            required: arg?.type?.kind === 'NON_NULL',
+          };
+        }).filter(arg => arg.name)
+      : null;
     map.set(fieldName, {
       fieldName,
       kind: namedType?.kind || null,
       namedType: namedType?.name || null,
+      args,
     });
   }
   typeFieldDetailCache.set(key, { fields: map, expiresAt: Date.now() + CLIENT_FIELD_CACHE_TTL_MS });
@@ -900,11 +931,148 @@ function readNodeFieldAsString(node, scalarField, objectField) {
   return '';
 }
 
+async function getSchemaQueryTypeName(apiUrl, headers) {
+  const query = `
+    query IntrospectSchemaQueryType {
+      __schema {
+        queryType {
+          name
+        }
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(apiUrl, headers, query, {}, { silentErrors: true, returnErrors: true });
+  if (data?.__error) {
+    return { name: null, error: data.__error };
+  }
+  return {
+    name: String(data?.data?.__schema?.queryType?.name || '').trim() || null,
+    error: null,
+  };
+}
+
+function buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection) {
+  const strategies = [];
+  const seen = new Set();
+  const add = (strategy) => {
+    if (!strategy || seen.has(strategy.id)) return;
+    seen.add(strategy.id);
+    strategies.push(strategy);
+  };
+
+  const args = Array.isArray(rootFieldDetail?.args) ? rootFieldDetail.args : null;
+  const argNames = new Set((args || []).map(arg => arg.name));
+  const hasArgMetadata = Array.isArray(args);
+  const supportsFirst = argNames.has('first');
+  const supportsAfter = argNames.has('after');
+
+  const treatAsConnection = rootLooksLikeConnection !== false;
+  if (treatAsConnection) {
+    if (!hasArgMetadata || (supportsFirst && supportsAfter)) {
+      add({ id: 'connection_first_after', mode: 'connection', supportsPaging: true, argMode: 'first_after' });
+    }
+    if (!hasArgMetadata || supportsFirst) {
+      add({ id: 'connection_first_only', mode: 'connection', supportsPaging: false, argMode: 'first_only' });
+    }
+    if (!hasArgMetadata || argNames.size === 0) {
+      add({ id: 'connection_no_args', mode: 'connection', supportsPaging: false, argMode: 'no_args' });
+    }
+  }
+
+  if (!hasArgMetadata || argNames.size === 0) add({ id: 'list_no_args', mode: 'list', supportsPaging: false, argMode: 'no_args' });
+  if (!hasArgMetadata || supportsFirst) add({ id: 'list_first_only', mode: 'list', supportsPaging: false, argMode: 'first_only' });
+  if (!hasArgMetadata || argNames.size === 0) add({ id: 'list_nodes_no_args', mode: 'nodes_list', supportsPaging: false, argMode: 'no_args' });
+  if (!hasArgMetadata || supportsFirst) add({ id: 'list_nodes_first_only', mode: 'nodes_list', supportsPaging: false, argMode: 'first_only' });
+
+  if (strategies.length === 0) {
+    add({ id: 'connection_no_args', mode: 'connection', supportsPaging: false, argMode: 'no_args' });
+    add({ id: 'list_no_args', mode: 'list', supportsPaging: false, argMode: 'no_args' });
+  }
+  return strategies;
+}
+
+function buildScanAppointmentsQuery(queryRoot, selectedFields, strategy) {
+  const fields = selectedFields.join('\n                ');
+  if (strategy.mode === 'connection') {
+    const argFragment = strategy.argMode === 'first_after'
+      ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after)`
+      : strategy.argMode === 'first_only'
+      ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE})`
+      : '';
+    const variableDef = strategy.argMode === 'first_after' ? '($after: String)' : '';
+    return `
+      query ScanAppointments${variableDef} {
+        ${queryRoot}${argFragment} {
+          edges {
+            node {
+              ${fields}
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+  }
+  if (strategy.mode === 'nodes_list') {
+    const argFragment = strategy.argMode === 'first_only'
+      ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE})`
+      : '';
+    return `
+      query ScanAppointments {
+        ${queryRoot}${argFragment} {
+          nodes {
+            ${fields}
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    `;
+  }
+
+  const argFragment = strategy.argMode === 'first_only'
+    ? `(first: ${APPOINTMENT_SCAN_PAGE_SIZE})`
+    : '';
+  return `
+    query ScanAppointments {
+      ${queryRoot}${argFragment} {
+        ${fields}
+      }
+    }
+  `;
+}
+
+function extractStrategyNodes(payload, strategy) {
+  if (!payload) return { nodes: [], pageInfo: null };
+
+  if (strategy.mode === 'connection') {
+    const edges = Array.isArray(payload?.edges) ? payload.edges : [];
+    const nodes = edges.map(edge => edge?.node).filter(Boolean);
+    return { nodes, pageInfo: payload?.pageInfo || null };
+  }
+
+  if (strategy.mode === 'nodes_list') {
+    const nodes = Array.isArray(payload?.nodes) ? payload.nodes.filter(Boolean) : [];
+    return { nodes, pageInfo: payload?.pageInfo || null };
+  }
+
+  if (Array.isArray(payload)) return { nodes: payload.filter(Boolean), pageInfo: null };
+  if (Array.isArray(payload?.nodes)) return { nodes: payload.nodes.filter(Boolean), pageInfo: payload?.pageInfo || null };
+  if (Array.isArray(payload?.edges)) {
+    const nodes = payload.edges.map(edge => edge?.node).filter(Boolean);
+    return { nodes, pageInfo: payload?.pageInfo || null };
+  }
+  if (payload && typeof payload === 'object') return { nodes: [payload], pageInfo: payload?.pageInfo || null };
+  return { nodes: [], pageInfo: null };
+}
+
 async function scanAppointments(apiUrl, headers) {
   const diagnostics = {
     typeIntrospection: null,
     queryIntrospection: null,
+    queryTypeName: null,
     queryRootTried: [],
+    queryAttempts: [],
+    queryErrors: [],
     failure: null,
   };
 
@@ -915,12 +1083,37 @@ async function scanAppointments(apiUrl, headers) {
     return { appointments: null, diagnostics };
   }
 
-  const queryFieldSet = await getTypeFieldSet(apiUrl, headers, 'Query');
-  diagnostics.queryIntrospection = queryFieldSet ? 'ok' : 'missing_query_type';
   const defaultQueryRootCandidates = ['appointments', 'bookings', 'calendarAppointments'];
-  const queryRootCandidates = queryFieldSet
+  let queryTypeName = 'Query';
+  let queryFieldSet = await getTypeFieldSet(apiUrl, headers, queryTypeName);
+  if (queryFieldSet) {
+    diagnostics.queryIntrospection = 'ok';
+  } else {
+    const schemaRoot = await getSchemaQueryTypeName(apiUrl, headers);
+    if (schemaRoot?.name) {
+      queryTypeName = schemaRoot.name;
+      queryFieldSet = await getTypeFieldSet(apiUrl, headers, queryTypeName);
+      diagnostics.queryIntrospection = queryFieldSet ? 'ok_via_schema_query_type' : 'schema_query_type_missing_fields';
+    } else {
+      queryTypeName = 'RootQueryType';
+      queryFieldSet = await getTypeFieldSet(apiUrl, headers, queryTypeName);
+      diagnostics.queryIntrospection = queryFieldSet ? 'ok_via_root_query_type_fallback' : 'missing_query_type';
+      if (schemaRoot?.error) {
+        diagnostics.queryTypeIntrospectionError = {
+          stage: schemaRoot.error?.stage || null,
+          status: schemaRoot.error?.status || null,
+          errors: compactGraphQLErrorPayload(schemaRoot.error),
+          bodyPreview: schemaRoot.error?.bodyPreview || null,
+        };
+      }
+    }
+  }
+  diagnostics.queryTypeName = queryTypeName;
+
+  const introspectedRoots = queryFieldSet
     ? defaultQueryRootCandidates.filter(root => queryFieldSet.has(root))
-    : defaultQueryRootCandidates;
+    : [];
+  const queryRootCandidates = introspectedRoots.length > 0 ? introspectedRoots : defaultQueryRootCandidates;
   if (queryRootCandidates.length === 0) {
     diagnostics.failure = 'appointments_query_field_not_found';
     return { appointments: null, diagnostics };
@@ -982,82 +1175,107 @@ async function scanAppointments(apiUrl, headers) {
   if (statusField) selectedFields.push(statusField);
   if (canceledAtField) selectedFields.push(canceledAtField);
 
+  const queryFieldDetailMap = await getTypeFieldDetailMap(apiUrl, headers, queryTypeName);
+
   for (const queryRoot of queryRootCandidates) {
     diagnostics.queryRootTried.push(queryRoot);
-    const appointments = [];
-    let after = null;
-    let queryFailed = false;
-    let queryError = null;
+    const rootFieldDetail = queryFieldDetailMap?.get(queryRoot) || null;
+    const rootReturnTypeName = rootFieldDetail?.namedType || null;
+    const rootReturnTypeFieldSet = rootReturnTypeName
+      ? await getTypeFieldSet(apiUrl, headers, rootReturnTypeName)
+      : null;
+    const rootLooksLikeConnection = rootReturnTypeFieldSet
+      ? rootReturnTypeFieldSet.has('edges') || rootReturnTypeFieldSet.has('nodes')
+      : null;
+    const strategies = buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection);
 
-    for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
-      const query = `
-        query ScanAppointments($after: String) {
-          ${queryRoot}(first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after) {
-            edges {
-              node {
-                ${selectedFields.join('\n                ')}
-              }
-            }
-            pageInfo { hasNextPage endCursor }
-          }
+    for (const strategy of strategies) {
+      const appointments = [];
+      let after = null;
+      let queryFailed = false;
+      let queryError = null;
+
+      for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
+        const query = buildScanAppointmentsQuery(queryRoot, selectedFields, strategy);
+        const variables = strategy.argMode === 'first_after' ? { after } : {};
+        const data = await fetchBoulevardGraphQL(
+          apiUrl,
+          headers,
+          query,
+          variables,
+          { silentErrors: true, returnErrors: true },
+        );
+        if (data?.__error) {
+          queryFailed = true;
+          queryError = data.__error;
+          diagnostics.queryAttempts.push({
+            root: queryRoot,
+            strategy: strategy.id,
+            page,
+            ok: false,
+          });
+          break;
         }
-      `;
-      const data = await fetchBoulevardGraphQL(
-        apiUrl,
-        headers,
-        query,
-        { after },
-        { silentErrors: true, returnErrors: true },
-      );
-      if (data?.__error) {
-        queryFailed = true;
-        queryError = data.__error;
-        break;
+
+        diagnostics.queryAttempts.push({
+          root: queryRoot,
+          strategy: strategy.id,
+          page,
+          ok: true,
+        });
+        const payload = data?.data?.[queryRoot];
+        const { nodes, pageInfo } = extractStrategyNodes(payload, strategy);
+        if (nodes.length === 0) break;
+
+        for (const rawNode of nodes) {
+          const node = rawNode || {};
+          const normalized = {
+            id: String(node.id || ''),
+            startOn: node[startField] || null,
+            endOn: node[endField] || null,
+            clientId: readNodeFieldAsString(node, clientIdField, clientObjectField),
+            providerId:
+              readNodeFieldAsString(node, providerIdField, providerObjectField) ||
+              providerNestedPlans.map(plan => readProviderFromNestedPlan(node, plan)).find(Boolean) ||
+              extractProviderIdHeuristic(node) ||
+              '',
+            locationId: locationIdField
+              ? String(node[locationIdField] || '')
+              : readNodeFieldAsString(node, null, locationObjectField) || null,
+            status: statusField ? String(node[statusField] || '') : null,
+            canceledAt: canceledAtField ? node[canceledAtField] : null,
+          };
+          if (!normalized.id || !normalized.startOn || !normalized.endOn || !normalized.clientId) continue;
+          appointments.push(normalized);
+        }
+
+        if (!strategy.supportsPaging) break;
+        if (!pageInfo?.hasNextPage) break;
+        after = pageInfo?.endCursor || null;
+        if (!after) break;
       }
 
-      const connection = data?.data?.[queryRoot];
-      const edges = connection?.edges || [];
-      if (edges.length === 0) break;
-
-      for (const edge of edges) {
-        const node = edge?.node || {};
-        const normalized = {
-          id: String(node.id || ''),
-          startOn: node[startField] || null,
-          endOn: node[endField] || null,
-          clientId: readNodeFieldAsString(node, clientIdField, clientObjectField),
-          providerId:
-            readNodeFieldAsString(node, providerIdField, providerObjectField) ||
-            providerNestedPlans.map(plan => readProviderFromNestedPlan(node, plan)).find(Boolean) ||
-            extractProviderIdHeuristic(node) ||
-            '',
-          locationId: locationIdField
-            ? String(node[locationIdField] || '')
-            : readNodeFieldAsString(node, null, locationObjectField) || null,
-          status: statusField ? String(node[statusField] || '') : null,
-          canceledAt: canceledAtField ? node[canceledAtField] : null,
+      if (!queryFailed) {
+        diagnostics.failure = null;
+        diagnostics.querySuccess = {
+          root: queryRoot,
+          strategy: strategy.id,
+          totalAppointments: appointments.length,
         };
-        if (!normalized.id || !normalized.startOn || !normalized.endOn || !normalized.clientId || !normalized.providerId) continue;
-        appointments.push(normalized);
+        return { appointments, diagnostics };
       }
 
-      if (!connection?.pageInfo?.hasNextPage) break;
-      after = connection?.pageInfo?.endCursor || null;
-      if (!after) break;
+      const formattedError = {
+        root: queryRoot,
+        strategy: strategy.id,
+        stage: queryError?.stage || null,
+        status: queryError?.status || null,
+        errors: compactGraphQLErrorPayload(queryError),
+        bodyPreview: queryError?.bodyPreview || null,
+      };
+      diagnostics.queryErrors.push(formattedError);
+      diagnostics.lastQueryError = formattedError;
     }
-
-    if (!queryFailed) {
-      diagnostics.failure = null;
-      return { appointments, diagnostics };
-    }
-
-    diagnostics.lastQueryError = {
-      root: queryRoot,
-      stage: queryError?.stage || null,
-      status: queryError?.status || null,
-      errors: compactGraphQLErrorPayload(queryError),
-      bodyPreview: queryError?.bodyPreview || null,
-    };
   }
 
   diagnostics.failure = 'appointments_query_failed';

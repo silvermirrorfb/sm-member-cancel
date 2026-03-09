@@ -857,4 +857,263 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(result.providerId).toBe('prov-1');
     expect(result.appointmentId).toBe('appt-1');
   });
+
+  it('falls back to no-arg strategy when appointments rejects cursor args', async () => {
+    const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
+    const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });
+
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const typeName = body?.variables?.typeName;
+
+      if (body.query.includes('IntrospectSchemaQueryType')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              __schema: {
+                queryType: { name: 'RootQueryType' },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.query.includes('IntrospectTypeDetailed')) {
+        if (typeName === 'RootQueryType') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    {
+                      name: 'appointments',
+                      type: objectType('AppointmentConnection'),
+                    },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentConnection') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'edges', args: [], type: objectType('AppointmentEdge') },
+                    { name: 'pageInfo', type: objectType('PageInfo') },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'Query') {
+          return {
+            ok: true,
+            json: async () => ({ data: { __type: null } }),
+          };
+        }
+      }
+
+      if (body.query.includes('IntrospectType')) {
+        if (typeName === 'Query') {
+          return {
+            ok: true,
+            json: async () => ({ data: { __type: null } }),
+          };
+        }
+        if (typeName === 'RootQueryType') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'appointments' }],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'id', type: scalarType('ID') },
+                    { name: 'startAt', type: scalarType('DateTime') },
+                    { name: 'endAt', type: scalarType('DateTime') },
+                    { name: 'clientId', type: scalarType('ID') },
+                    { name: 'providerId', type: scalarType('ID') },
+                    { name: 'state', type: scalarType('AppointmentState') },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'AppointmentConnection') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'edges' }, { name: 'pageInfo' }],
+                },
+              },
+            }),
+          };
+        }
+      }
+
+      if (body.query.includes('ScanAppointments') && body.query.includes('appointments(first:')) {
+        return {
+          ok: true,
+          json: async () => ({
+            errors: [{ message: 'Unknown argument "first" on field "RootQueryType.appointments".' }],
+          }),
+        };
+      }
+
+      if (body.query.includes('ScanAppointments') && body.query.includes('appointments {')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              appointments: {
+                edges: [
+                  {
+                    node: {
+                      id: 'appt-1',
+                      clientId: 'client-1',
+                      providerId: 'prov-1',
+                      startAt: '2026-03-08T10:00:00.000Z',
+                      endAt: '2026-03-08T10:30:00.000Z',
+                      state: 'BOOKED',
+                    },
+                  },
+                  {
+                    node: {
+                      id: 'appt-2',
+                      clientId: 'other',
+                      providerId: 'prov-1',
+                      startAt: '2026-03-08T11:10:00.000Z',
+                      endAt: '2026-03-08T11:40:00.000Z',
+                      state: 'BOOKED',
+                    },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ data: {} }),
+      };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
+    const scanQueries = global.fetch.mock.calls
+      .map(call => JSON.parse(call[1].body).query)
+      .filter(query => query.includes('ScanAppointments'));
+    expect(scanQueries.some(query => query.includes('appointments(first:'))).toBe(true);
+    expect(scanQueries.some(query => query.includes('appointments {'))).toBe(true);
+  });
+
+  it('returns per-root query diagnostics when all appointment scan strategies fail', async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const typeName = body?.variables?.typeName;
+
+      if (body.query.includes('IntrospectSchemaQueryType')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              __schema: {
+                queryType: { name: 'RootQueryType' },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.query.includes('IntrospectType')) {
+        if (typeName === 'Query') {
+          return {
+            ok: true,
+            json: async () => ({ data: { __type: null } }),
+          };
+        }
+        if (typeName === 'RootQueryType') {
+          return {
+            ok: true,
+            json: async () => ({ data: { __type: null } }),
+          };
+        }
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'id' },
+                    { name: 'startOn' },
+                    { name: 'endOn' },
+                    { name: 'clientId' },
+                    { name: 'providerId' },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+      }
+
+      if (body.query.includes('ScanAppointments')) {
+        return {
+          ok: true,
+          json: async () => ({
+            errors: [{ message: 'forced test failure' }],
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ data: {} }),
+      };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('appointment_scan_failed');
+    expect(result.diagnostics?.failure).toBe('appointments_query_failed');
+    expect(result.diagnostics?.queryRootTried).toEqual(['appointments', 'bookings', 'calendarAppointments']);
+    const rootsWithErrors = new Set((result.diagnostics?.queryErrors || []).map(err => err.root));
+    expect(rootsWithErrors.has('appointments')).toBe(true);
+    expect(rootsWithErrors.has('bookings')).toBe(true);
+    expect(rootsWithErrors.has('calendarAppointments')).toBe(true);
+  });
 });
