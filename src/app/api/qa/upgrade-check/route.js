@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server';
 import { lookupMember, evaluateUpgradeOpportunityForProfile } from '../../../../lib/boulevard';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
+const QA_UPGRADE_LIMIT_MAX = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_MAX || 40), 1);
+const QA_UPGRADE_LIMIT_WINDOW_MS = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_WINDOW_MS || 10 * 60 * 1000), 1000);
+
 function parseBodyValue(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -16,6 +19,15 @@ function parseNow(value) {
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
+}
+
+function buildRateLimitHeaders(remaining, retryAfterMs = 0) {
+  const headers = {
+    'X-RateLimit-Limit': String(QA_UPGRADE_LIMIT_MAX),
+    'X-RateLimit-Remaining': String(Math.max(Number(remaining) || 0, 0)),
+  };
+  if (retryAfterMs > 0) headers['Retry-After'] = String(Math.ceil(retryAfterMs / 1000));
+  return headers;
 }
 
 function isAuthorized(request) {
@@ -34,7 +46,7 @@ export async function GET() {
     method: 'POST',
     notes: 'Read-only Boulevard appointment eligibility check for upgrade QA.',
     required: ['firstName', 'lastName', 'email or phone'],
-    optional: ['appointmentId', 'targetDurationMinutes (50|90)', 'now', 'windowHours'],
+    optional: ['appointmentId', 'targetDurationMinutes (50|90)', 'locationId', 'now', 'windowHours'],
   });
 }
 
@@ -45,11 +57,16 @@ export async function POST(request) {
     }
 
     const ip = getClientIP(request);
-    const { allowed, retryAfterMs } = checkRateLimit(ip, 'qa-upgrade-check', 20, 10 * 60 * 1000);
+    const { allowed, remaining, retryAfterMs } = checkRateLimit(
+      ip,
+      'qa-upgrade-check',
+      QA_UPGRADE_LIMIT_MAX,
+      QA_UPGRADE_LIMIT_WINDOW_MS,
+    );
     if (!allowed) {
       return NextResponse.json(
         { error: 'Too many requests. Please try again shortly.' },
-        { status: 429, headers: { 'Retry-After': String(Math.ceil(retryAfterMs / 1000)) } },
+        { status: 429, headers: buildRateLimitHeaders(remaining, retryAfterMs) },
       );
     }
 
@@ -59,6 +76,7 @@ export async function POST(request) {
     const email = parseBodyValue(body.email).toLowerCase();
     const phone = parseBodyValue(body.phone);
     const appointmentId = parseBodyValue(body.appointmentId);
+    const locationId = parseBodyValue(body.locationId);
     const debugMode = body.debug === true || String(body.debug || '').toLowerCase() === 'true';
     const targetDurationMinutes = Number.isFinite(Number(body.targetDurationMinutes))
       ? Number(body.targetDurationMinutes)
@@ -110,6 +128,7 @@ export async function POST(request) {
     const opportunity = await evaluateUpgradeOpportunityForProfile(profile, {
       appointmentId: appointmentId || undefined,
       targetDurationMinutes: targetDurationMinutes || undefined,
+      locationId: locationId || undefined,
       now: nowIso || undefined,
       windowHours: windowHours || undefined,
     });
@@ -139,13 +158,14 @@ export async function POST(request) {
         matchedContact,
         appointmentId: appointmentId || null,
         targetDurationMinutes: targetDurationMinutes || null,
+        locationId: locationId || null,
         now: nowIso || null,
         windowHours: windowHours || null,
         debug: debugMode,
         readOnly: true,
       },
       opportunity: responseOpportunity,
-    });
+    }, { headers: buildRateLimitHeaders(remaining, 0) });
   } catch (err) {
     console.error('QA upgrade check error:', err);
     return NextResponse.json({ error: 'Internal error while running upgrade check.' }, { status: 500 });

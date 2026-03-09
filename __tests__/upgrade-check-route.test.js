@@ -154,4 +154,43 @@ describe('QA upgrade-check route', () => {
     expect(normalBody.qa.debug).toBe(false);
     expect(normalBody.opportunity.diagnostics).toBeUndefined();
   });
+
+  it('passes optional locationId override through to opportunity evaluation', async () => {
+    process.env.NODE_ENV = 'development';
+    mockLookupMember.mockResolvedValue({
+      name: 'Jane Smith',
+      firstName: 'Jane',
+      email: 'jane@example.com',
+      phone: '15555550123',
+      clientId: 'client-1',
+      tier: '30',
+      accountStatus: 'active',
+      location: 'Flatiron',
+      locationId: 'loc-profile',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: false,
+      reason: 'no_upcoming_appointment_in_window',
+    });
+
+    const req = new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Jane',
+        lastName: 'Smith',
+        email: 'jane@example.com',
+        locationId: 'loc-override',
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.qa.locationId).toBe('loc-override');
+    expect(mockEvaluateUpgradeOpportunityForProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ clientId: 'client-1' }),
+      expect.objectContaining({ locationId: 'loc-override' }),
+    );
+  });
 });
