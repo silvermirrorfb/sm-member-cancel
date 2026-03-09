@@ -507,4 +507,83 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(result.targetDurationMinutes).toBe(50);
     expect(global.fetch).toHaveBeenCalled();
   });
+
+  it('falls back to hardcoded query roots when Query introspection is unavailable', async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes('IntrospectType')) {
+        const typeName = body?.variables?.typeName;
+        if (typeName === 'Query') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: null,
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              __type: {
+                fields: [
+                  { name: 'id' },
+                  { name: 'startOn' },
+                  { name: 'endOn' },
+                  { name: 'clientId' },
+                  { name: 'providerId' },
+                  { name: 'status' },
+                  { name: 'canceledAt' },
+                ],
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.query.includes('ScanAppointments')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              appointments: {
+                edges: [
+                  {
+                    node: {
+                      id: 'appt-1',
+                      clientId: 'client-1',
+                      providerId: 'prov-1',
+                      startOn: '2026-03-08T10:00:00.000Z',
+                      endOn: '2026-03-08T10:30:00.000Z',
+                      status: 'BOOKED',
+                      canceledAt: null,
+                    },
+                  },
+                ],
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null,
+                },
+              },
+            },
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ data: {} }),
+      };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
+  });
 });

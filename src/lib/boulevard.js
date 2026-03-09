@@ -705,8 +705,10 @@ async function scanAppointments(apiUrl, headers) {
 
   const queryFieldSet = await getTypeFieldSet(apiUrl, headers, 'Query');
   diagnostics.queryIntrospection = queryFieldSet ? 'ok' : 'missing_query_type';
-  const queryRootCandidates = ['appointments', 'bookings', 'calendarAppointments']
-    .filter(root => queryFieldSet && queryFieldSet.has(root));
+  const defaultQueryRootCandidates = ['appointments', 'bookings', 'calendarAppointments'];
+  const queryRootCandidates = queryFieldSet
+    ? defaultQueryRootCandidates.filter(root => queryFieldSet.has(root))
+    : defaultQueryRootCandidates;
   if (queryRootCandidates.length === 0) {
     diagnostics.failure = 'appointments_query_field_not_found';
     return { appointments: null, diagnostics };
