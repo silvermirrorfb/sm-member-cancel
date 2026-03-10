@@ -96,7 +96,7 @@ describe('upgrade route flows', () => {
     const body = await res.json();
 
     expect(body.pendingUpgradeOffer).toBe(true);
-    expect(body.message).toContain('Reply YES within');
+    expect(body.message).toContain('Reply YES in');
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(session.pendingUpgradeOffer?.appointmentId).toBe('appt-1');
   });
@@ -211,7 +211,7 @@ describe('upgrade route flows', () => {
     const body = await res.json();
 
     expect(body.message).toContain('862 Lexington Ave');
-    expect(body.message).toContain('Reply YES within');
+    expect(body.message).toContain('Reply YES in');
     expect(session.pendingUpgradeOffer?.appointmentId).toBe('appt-1');
   });
 });

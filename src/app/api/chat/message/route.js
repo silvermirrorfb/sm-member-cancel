@@ -203,14 +203,13 @@ function buildUpgradeOfferMessage(opportunity, options = {}) {
     const targetDuration = opportunity.targetDurationMinutes;
     const timeText = formatTimeForGuest(opportunity.startOn);
     const opener = proactive
-      ? `Also, I can see room after your ${timeText} session.`
-      : `I checked your schedule for ${timeText}.`;
-    const memberPhrase = isMember ? 'as a member' : '';
+      ? `I also see room after your ${timeText} session.`
+      : `I checked your ${timeText} appointment.`;
     const priceLine = isMember
-      ? `Upgrading from ${currentDuration} to ${targetDuration} minutes would be $${total} total (${memberPhrase} +$${delta}).`
-      : `Upgrading from ${currentDuration} to ${targetDuration} minutes would be +$${delta} (new total $${total}).`;
+      ? `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} member ($${total} total).`
+      : `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} ($${total} total).`;
 
-    return `${opener} ${priceLine} Reply YES within ${OFFER_WINDOW_MINUTES} minutes to confirm, or NO to skip.`;
+    return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
 }
 
 function buildUpgradeSuccessMessage(result) {

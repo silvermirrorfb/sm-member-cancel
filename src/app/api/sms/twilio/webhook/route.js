@@ -16,6 +16,12 @@ import {
 import { POST as postChatMessage } from '../../../chat/message/route';
 
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
+const SMS_WEB_HANDOFF_LIMIT = Math.max(Number(process.env.SMS_WEB_HANDOFF_MESSAGE_LIMIT || 10), 1);
+const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member-cancel.vercel.app/widget').trim();
+
+function buildSmsWebHandoffReply() {
+  return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
+}
 
 function resolveSessionIdForPhone(phone) {
   const existing = getSessionIdForPhone(phone);
@@ -97,6 +103,20 @@ export async function POST(request) {
     }
 
     const sessionId = resolveSessionIdForPhone(from);
+    const session = getSession(sessionId);
+    if (session) {
+      const currentCount = Number(session.smsInboundCount || 0);
+      session.smsInboundCount = currentCount + 1;
+      if (session.smsHandoffToWeb === true || session.smsInboundCount >= SMS_WEB_HANDOFF_LIMIT) {
+        session.smsHandoffToWeb = true;
+        const handoffTwiml = buildTwimlMessage(buildSmsWebHandoffReply());
+        if (messageSid) storeReplyForMessageSid(messageSid, handoffTwiml);
+        return new NextResponse(handoffTwiml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+        });
+      }
+    }
     const reply = await runChatMessageForSms(sessionId, body, from);
     const twiml = buildTwimlMessage(reply || GENERIC_FAILURE_REPLY);
 

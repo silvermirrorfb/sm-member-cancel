@@ -1,9 +1,19 @@
 import crypto from 'crypto';
 
-const MAX_SMS_CHARS = Number(process.env.SMS_MAX_CHARS || 1200);
+const MAX_SMS_CHARS = Math.max(Number(process.env.SMS_MAX_CHARS || 155), 40);
+
+function sanitizeSmsText(text) {
+  return String(text || '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 function trimSmsBody(text) {
-  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  const value = sanitizeSmsText(text);
   if (!value) return '';
   if (value.length <= MAX_SMS_CHARS) return value;
   return `${value.slice(0, MAX_SMS_CHARS - 1).trimEnd()}…`;
@@ -85,6 +95,7 @@ async function sendTwilioSms({ to, body, from, statusCallback }) {
 }
 
 export {
+  sanitizeSmsText,
   trimSmsBody,
   buildTwimlMessage,
   parseTwilioFormBody,

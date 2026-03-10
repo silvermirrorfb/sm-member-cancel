@@ -142,6 +142,9 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
 - `enableOneHourReminder` (default `true`): enables one follow-up reminder near one hour before appointment, only if prior offer exists and no YES/NO outcome was recorded.
 - `reminderLeadMinutes` (default `60`): target lead time for reminder.
 - `reminderToleranceMinutes` (default `15`): acceptable drift window around `reminderLeadMinutes`.
+- SMS responses are sanitized to plain ASCII and capped (`SMS_MAX_CHARS`, default `155`) so outbound and TwiML replies stay single-text friendly.
+- `SMS_WEB_HANDOFF_MESSAGE_LIMIT` (default `10`): after this many inbound SMS messages in one thread, bot replies with web-chat handoff URL.
+- `SMS_WEB_APP_URL` (default `https://sm-member-cancel.vercel.app/widget`): destination URL for the 10-message handoff.
 
 ### Klaviyo opt-in source of truth (required)
 - Outbound SMS route checks Klaviyo profile `subscriptions.sms.marketing`.

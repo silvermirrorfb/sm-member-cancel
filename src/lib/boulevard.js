@@ -1243,6 +1243,14 @@ function tierFromDurationMinutes(durationMinutes) {
   return null;
 }
 
+function durationMinutesFromTier(tier) {
+  const normalizedTier = String(tier || '').trim();
+  if (normalizedTier === '30') return 30;
+  if (normalizedTier === '50') return 50;
+  if (normalizedTier === '90') return 90;
+  return null;
+}
+
 function prepBufferMinutesForDuration(durationMinutes) {
   if (durationMinutes <= 30) return PREP_BUFFER_30MIN;
   if (durationMinutes <= 50) return PREP_BUFFER_50MIN;
@@ -1814,7 +1822,17 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   if (!current) return { eligible: false, reason: 'target_appointment_not_found' };
 
   const rawDuration = minutesBetweenIso(current.startOn, current.endOn);
-  const currentDurationMinutes = bucketDurationMinutes(rawDuration);
+  let currentDurationMinutes = bucketDurationMinutes(rawDuration);
+  const profileTierDuration = durationMinutesFromTier(profile?.tier);
+  if (
+    isFiniteNumber(profileTierDuration) &&
+    isFiniteNumber(rawDuration) &&
+    rawDuration >= profileTierDuration &&
+    rawDuration <= profileTierDuration + prepBufferMinutesForDuration(profileTierDuration)
+  ) {
+    // Boulevard endOn can include transition time; clamp to base service duration when it matches tier + prep.
+    currentDurationMinutes = profileTierDuration;
+  }
   if (!isFiniteNumber(currentDurationMinutes)) return { eligible: false, reason: 'invalid_current_duration' };
 
   const targetDurationMinutes = isFiniteNumber(options.targetDurationMinutes)

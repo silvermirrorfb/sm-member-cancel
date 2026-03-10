@@ -4,6 +4,7 @@ import {
   buildTwimlMessage,
   isValidTwilioSignature,
   parseTwilioFormBody,
+  sanitizeSmsText,
   trimSmsBody,
 } from '../src/lib/twilio.js';
 
@@ -25,7 +26,12 @@ describe('twilio helpers', () => {
   it('trims long sms content', () => {
     const long = 'x'.repeat(2000);
     const trimmed = trimSmsBody(long);
-    expect(trimmed.length).toBeLessThanOrEqual(1200);
+    expect(trimmed.length).toBeLessThanOrEqual(155);
+  });
+
+  it('sanitizes emoji and non-ascii punctuation for sms-safe output', () => {
+    const sanitized = sanitizeSmsText('Hi — yes 😊 “quoted”');
+    expect(sanitized).toBe('Hi - yes "quoted"');
   });
 
   it('validates and rejects twilio signatures', () => {

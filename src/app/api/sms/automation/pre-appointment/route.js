@@ -85,12 +85,12 @@ function buildOutboundOfferMessage(opportunity, options = {}) {
   const targetDuration = opportunity.targetDurationMinutes;
   const timeText = formatTimeForGuest(opportunity.startOn, options.timeZone || 'America/New_York');
   const opener = reminder
-    ? `Silver Mirror reminder: we still have room after your ${timeText} appointment.`
-    : `Silver Mirror: we have room after your ${timeText} appointment.`;
+    ? `Silver Mirror reminder: room is still open after your ${timeText} appointment.`
+    : `Silver Mirror: room is open after your ${timeText} appointment.`;
   const priceLine = isMember
-    ? `Upgrading from ${currentDuration} to ${targetDuration} minutes would be $${total} total (+$${delta}).`
-    : `Upgrading from ${currentDuration} to ${targetDuration} minutes would be +$${delta} (new total $${total}).`;
-  return `${opener} ${priceLine} Reply YES within ${OFFER_WINDOW_MINUTES} minutes to confirm, or NO to keep your current booking.`;
+    ? `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} member ($${total} total).`
+    : `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} ($${total} total).`;
+  return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
 }
 
 function isSameLocalDay(aIso, bIso, timeZone) {
