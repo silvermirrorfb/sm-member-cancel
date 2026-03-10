@@ -191,7 +191,7 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('finalize it in Boulevard');
+    expect(text).toContain('finalize it before your appointment');
     expect(mockLookupMember).not.toHaveBeenCalled();
     expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();

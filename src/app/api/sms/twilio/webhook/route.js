@@ -48,7 +48,7 @@ function buildUpgradeApplyReply(upgradeResult, opportunity) {
   }
   const reason = String(upgradeResult?.reason || '').toLowerCase();
   if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
-    return 'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.';
+    return 'Thanks for replying YES. We received your upgrade request and our team will finalize it before your appointment.';
   }
   return 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
 }
@@ -152,7 +152,7 @@ export async function POST(request) {
     if (isAffirmative(intentText) || isNegative(intentText)) {
       if (isAffirmative(intentText) && !isUpgradeMutationEnabled()) {
         const teamFinalizeTwiml = buildTwimlMessage(
-          'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.',
+          'Thanks for replying YES. We received your upgrade request and our team will finalize it before your appointment.',
         );
         if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
         return new NextResponse(teamFinalizeTwiml, {
