@@ -12,11 +12,44 @@ function sanitizeSmsText(text) {
     .trim();
 }
 
+function rewriteCommonSmsPhrases(text) {
+  let value = String(text || '');
+  value = value.replace(/How can I help you today\?/gi, 'How can I help today?');
+  value = value.replace(/Whether you have questions about/gi, 'Any questions about');
+  return value;
+}
+
+function trimToWordBoundary(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  const window = text.slice(0, maxChars + 1);
+  const breakpoints = [' ', '.', ',', ';', ':', '?', '!'];
+  let cut = -1;
+  for (const token of breakpoints) cut = Math.max(cut, window.lastIndexOf(token));
+  if (cut < Math.floor(maxChars * 0.6)) cut = maxChars;
+  return text.slice(0, cut).trim();
+}
+
 function trimSmsBody(text) {
-  const value = sanitizeSmsText(text);
+  let value = sanitizeSmsText(text);
+  value = rewriteCommonSmsPhrases(value);
   if (!value) return '';
   if (value.length <= MAX_SMS_CHARS) return value;
-  return `${value.slice(0, MAX_SMS_CHARS - 1).trimEnd()}…`;
+
+  const sentences = value.match(/[^.!?]+[.!?]?/g) || [value];
+  let compact = '';
+  for (const sentenceRaw of sentences) {
+    const sentence = sentenceRaw.trim();
+    if (!sentence) continue;
+    const candidate = compact ? `${compact} ${sentence}` : sentence;
+    if (candidate.length > MAX_SMS_CHARS) break;
+    compact = candidate;
+  }
+
+  if (compact && compact.length >= Math.min(80, MAX_SMS_CHARS - 10)) {
+    return compact;
+  }
+
+  return trimToWordBoundary(value, MAX_SMS_CHARS).replace(/[,:;-]$/, '').trim();
 }
 
 function escapeXml(text) {
