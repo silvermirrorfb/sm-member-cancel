@@ -192,6 +192,7 @@ describe('twilio webhook route', () => {
 
     expect(res.status).toBe(200);
     expect(text).toContain('finalize it in Boulevard');
+    expect(mockLookupMember).not.toHaveBeenCalled();
     expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
   });

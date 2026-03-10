@@ -150,6 +150,17 @@ export async function POST(request) {
 
     const intentText = String(body || '').trim();
     if (isAffirmative(intentText) || isNegative(intentText)) {
+      if (isAffirmative(intentText) && !isUpgradeMutationEnabled()) {
+        const teamFinalizeTwiml = buildTwimlMessage(
+          'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.',
+        );
+        if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
+        return new NextResponse(teamFinalizeTwiml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+        });
+      }
+
       const session = getSession(sessionId);
       let profile = session?.memberProfile || null;
       if (!profile) {
@@ -165,17 +176,6 @@ export async function POST(request) {
           const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
           if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
           return new NextResponse(declineTwiml, {
-            status: 200,
-            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
-          });
-        }
-
-        if (!isUpgradeMutationEnabled()) {
-          const teamFinalizeTwiml = buildTwimlMessage(
-            'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.',
-          );
-          if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
-          return new NextResponse(teamFinalizeTwiml, {
             status: 200,
             headers: { 'Content-Type': 'text/xml; charset=utf-8' },
           });
