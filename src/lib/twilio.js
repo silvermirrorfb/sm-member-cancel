@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 
-const MAX_SMS_CHARS = Math.max(Number(process.env.SMS_MAX_CHARS || 155), 40);
+const SMS_HARD_MAX_CHARS = 150;
+const MAX_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_MAX_CHARS || SMS_HARD_MAX_CHARS), 40), SMS_HARD_MAX_CHARS);
+const TARGET_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_TARGET_CHARS || 140), 40), MAX_SMS_CHARS);
 
 function sanitizeSmsText(text) {
   return String(text || '')
@@ -33,7 +35,7 @@ function trimSmsBody(text) {
   let value = sanitizeSmsText(text);
   value = rewriteCommonSmsPhrases(value);
   if (!value) return '';
-  if (value.length <= MAX_SMS_CHARS) return value;
+  if (value.length <= TARGET_SMS_CHARS) return value;
 
   const sentences = value.match(/[^.!?]+[.!?]?/g) || [value];
   let compact = '';
@@ -41,14 +43,15 @@ function trimSmsBody(text) {
     const sentence = sentenceRaw.trim();
     if (!sentence) continue;
     const candidate = compact ? `${compact} ${sentence}` : sentence;
-    if (candidate.length > MAX_SMS_CHARS) break;
+    if (candidate.length > TARGET_SMS_CHARS) break;
     compact = candidate;
   }
 
-  if (compact && compact.length >= Math.min(80, MAX_SMS_CHARS - 10)) {
+  if (compact && compact.length >= Math.min(80, TARGET_SMS_CHARS - 10)) {
     return compact;
   }
 
+  if (value.length <= MAX_SMS_CHARS) return value;
   return trimToWordBoundary(value, MAX_SMS_CHARS).replace(/[,:;-]$/, '').trim();
 }
 
