@@ -695,6 +695,8 @@ async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options 
 }
 
 function findNameMatch(name, clients, options = {}) {
+  const normalizedRequestedName = String(name || '').trim();
+  const allowAnyName = normalizedRequestedName.length === 0;
   const preferredLocationCanonicalId = canonicalizeBoulevardLocationId(options.preferLocationId || '') || null;
   const excludedClientIds = new Set(
     Array.isArray(options.excludeClientIds)
@@ -703,7 +705,7 @@ function findNameMatch(name, clients, options = {}) {
   );
 
   const candidates = (Array.isArray(clients) ? clients : [])
-    .filter(c => namesLikelyMatch(name, c?.node?.firstName || '', c?.node?.lastName || ''))
+    .filter(c => allowAnyName || namesLikelyMatch(normalizedRequestedName, c?.node?.firstName || '', c?.node?.lastName || ''))
     .filter(c => {
       const id = String(c?.node?.id || '').trim();
       return !excludedClientIds.has(id);

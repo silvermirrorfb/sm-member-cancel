@@ -13,6 +13,9 @@ const mockBuildTwimlMessage = vi.fn();
 const mockIsValidTwilioSignature = vi.fn();
 const mockParseTwilioFormBody = vi.fn();
 const mockPostChatMessage = vi.fn();
+const mockLookupMember = vi.fn();
+const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
+const mockReverifyAndApplyUpgradeForProfile = vi.fn();
 
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
@@ -42,6 +45,12 @@ vi.mock('../src/app/api/chat/message/route.js', () => ({
   POST: (...args) => mockPostChatMessage(...args),
 }));
 
+vi.mock('../src/lib/boulevard.js', () => ({
+  lookupMember: (...args) => mockLookupMember(...args),
+  evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
+  reverifyAndApplyUpgradeForProfile: (...args) => mockReverifyAndApplyUpgradeForProfile(...args),
+}));
+
 import { POST } from '../src/app/api/sms/twilio/webhook/route.js';
 
 describe('twilio webhook route', () => {
@@ -64,6 +73,9 @@ describe('twilio webhook route', () => {
         headers: { 'content-type': 'application/json' },
       }),
     );
+    mockLookupMember.mockResolvedValue(null);
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({ eligible: false, reason: 'no_upcoming_appointment_in_window' });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
   });
 
   it('hands off to web app at message limit and skips chat route', async () => {
@@ -105,5 +117,40 @@ describe('twilio webhook route', () => {
     expect(text).toContain('Handled in chat');
     expect(mockPostChatMessage).toHaveBeenCalledTimes(1);
     expect(session.smsInboundCount).toBe(3);
+  });
+
+  it('handles YES deterministically when profile and opportunity are available', async () => {
+    const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+12134401333',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: true,
+      reason: 'applied',
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Confirmed. You are upgraded to 50 minutes');
+    expect(mockPostChatMessage).not.toHaveBeenCalled();
+    expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
   });
 });

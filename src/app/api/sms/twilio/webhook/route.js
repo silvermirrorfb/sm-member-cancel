@@ -13,14 +13,29 @@ import {
   isValidTwilioSignature,
   parseTwilioFormBody,
 } from '../../../../../lib/twilio';
+import {
+  evaluateUpgradeOpportunityForProfile,
+  lookupMember,
+  reverifyAndApplyUpgradeForProfile,
+} from '../../../../../lib/boulevard';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
 const SMS_WEB_HANDOFF_LIMIT = Math.max(Number(process.env.SMS_WEB_HANDOFF_MESSAGE_LIMIT || 10), 1);
 const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member-cancel.vercel.app/widget').trim();
+const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
+const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 
 function buildSmsWebHandoffReply() {
   return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
+}
+
+function isAffirmative(text) {
+  return YES_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+function isNegative(text) {
+  return NO_KEYWORDS.test(String(text || '').toLowerCase());
 }
 
 function resolveSessionIdForPhone(phone) {
@@ -117,6 +132,55 @@ export async function POST(request) {
         });
       }
     }
+
+    const intentText = String(body || '').trim();
+    if (isAffirmative(intentText) || isNegative(intentText)) {
+      const session = getSession(sessionId);
+      let profile = session?.memberProfile || null;
+      if (!profile) {
+        profile = await lookupMember('', from);
+        if (session && profile) {
+          session.memberId = profile.clientId || null;
+          session.memberProfile = profile;
+        }
+      }
+
+      if (profile) {
+        if (isNegative(intentText)) {
+          const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
+          if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
+          return new NextResponse(declineTwiml, {
+            status: 200,
+            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          });
+        }
+
+        const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
+        if (!opportunity?.eligible) {
+          const noSlotTwiml = buildTwimlMessage('Thanks for replying. I checked and there is no upgrade slot available right now.');
+          if (messageSid) storeReplyForMessageSid(messageSid, noSlotTwiml);
+          return new NextResponse(noSlotTwiml, {
+            status: 200,
+            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          });
+        }
+
+        const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, {
+          appointmentId: opportunity.appointmentId || null,
+          targetDurationMinutes: opportunity.targetDurationMinutes || null,
+        });
+        const upgradeText = upgradeResult?.success
+          ? `Confirmed. You are upgraded to ${opportunity.targetDurationMinutes} minutes for your upcoming appointment.`
+          : 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
+        const upgradeTwiml = buildTwimlMessage(upgradeText);
+        if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
+        return new NextResponse(upgradeTwiml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+        });
+      }
+    }
+
     const reply = await runChatMessageForSms(sessionId, body, from);
     const twiml = buildTwimlMessage(reply || GENERIC_FAILURE_REPLY);
 
