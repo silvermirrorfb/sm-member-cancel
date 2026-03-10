@@ -18,6 +18,7 @@ import {
   lookupMember,
   reverifyAndApplyUpgradeForProfile,
 } from '../../../../../lib/boulevard';
+import { logSupportIncident } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
@@ -26,6 +27,7 @@ const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member
 const SMS_REBOOK_URL = String(process.env.SMS_REBOOK_URL || 'https://booking.silvermirror.com/booking/location').trim();
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
+const MANUAL_UPGRADE_REASONS = new Set(['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed']);
 
 function buildSmsWebHandoffReply() {
   return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
@@ -90,6 +92,58 @@ function buildUpgradeApplyReply(upgradeResult, opportunity) {
     return buildPendingOfferFinalizeReply(opportunity);
   }
   return 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
+}
+
+function queueSupportIncident(incident) {
+  logSupportIncident(incident).catch(err => {
+    console.error('SMS support incident logging failed:', err);
+  });
+}
+
+function toIncidentPhone(from, profile) {
+  return String(profile?.phone || from || '').trim();
+}
+
+function toIncidentSummary({ from, incomingText, pendingOffer, opportunity, upgradeResult }) {
+  const offerKind = String(pendingOffer?.offerKind || opportunity?.offerKind || 'duration').toLowerCase();
+  const appointmentId = pendingOffer?.appointmentId || opportunity?.appointmentId || null;
+  const addOnName = String(pendingOffer?.addOnName || opportunity?.addOnName || '').trim();
+  const currentDuration = Number(pendingOffer?.currentDurationMinutes || opportunity?.currentDurationMinutes || 0) || null;
+  const targetDuration = Number(pendingOffer?.targetDurationMinutes || opportunity?.targetDurationMinutes || 0) || null;
+  const reason = String(upgradeResult?.reason || '').trim() || 'manual_confirmation_required';
+  const parts = [
+    `Inbound SMS YES from ${String(from || '').trim() || 'unknown'}.`,
+    `reason=${reason}`,
+    `offerKind=${offerKind}`,
+    appointmentId ? `appointmentId=${appointmentId}` : null,
+    addOnName ? `addOn=${addOnName}` : null,
+    currentDuration && targetDuration ? `duration=${currentDuration}->${targetDuration}` : null,
+    incomingText ? `message="${incomingText}"` : null,
+  ].filter(Boolean);
+  return parts.join(' | ');
+}
+
+function buildUpgradeSupportIncident({
+  sessionId,
+  from,
+  incomingText,
+  profile,
+  pendingOffer = null,
+  opportunity = null,
+  upgradeResult = null,
+}) {
+  const reason = String(upgradeResult?.reason || '').toLowerCase() || 'manual_confirmation_required';
+  return {
+    date: new Date().toISOString(),
+    session_id: sessionId,
+    issue_type: 'sms_upgrade_manual_followup',
+    name: String(profile?.fullName || '').trim() || null,
+    email: String(profile?.email || '').trim() || null,
+    phone: toIncidentPhone(from, profile) || null,
+    location: String(profile?.location || opportunity?.locationName || pendingOffer?.locationName || '').trim() || null,
+    user_message: toIncidentSummary({ from, incomingText, pendingOffer, opportunity, upgradeResult }),
+    reason,
+  };
 }
 
 function resolveSessionIdForPhone(phone) {
@@ -211,6 +265,18 @@ export async function POST(request) {
         pendingOfferKind === 'addon' || !isUpgradeMutationEnabled()
       );
       if (isAffirmative(intentText) && canFinalizeWithoutMutation) {
+        const incident = buildUpgradeSupportIncident({
+          sessionId,
+          from,
+          incomingText: intentText,
+          profile: activeSession?.memberProfile || null,
+          pendingOffer,
+          upgradeResult: {
+            success: false,
+            reason: pendingOfferKind === 'addon' ? 'manual_addon_confirmation' : 'upgrade_mutation_disabled',
+          },
+        });
+        queueSupportIncident(incident);
         activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
         activeSession.pendingUpgradeOffer = null;
         const teamFinalizeTwiml = buildTwimlMessage(buildPendingOfferFinalizeReply(pendingOffer));
@@ -222,6 +288,14 @@ export async function POST(request) {
       }
 
       if (isAffirmative(intentText) && !isUpgradeMutationEnabled()) {
+        const incident = buildUpgradeSupportIncident({
+          sessionId,
+          from,
+          incomingText: intentText,
+          profile: activeSession?.memberProfile || null,
+          upgradeResult: { success: false, reason: 'upgrade_mutation_disabled' },
+        });
+        queueSupportIncident(incident);
         const fallbackTwiml = buildTwimlMessage(
           'Thanks for replying YES. We received your request and our team will confirm it before your appointment.',
         );
@@ -265,6 +339,17 @@ export async function POST(request) {
           appointmentId: opportunity.appointmentId || null,
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
         });
+        if (!upgradeResult?.success && MANUAL_UPGRADE_REASONS.has(String(upgradeResult?.reason || '').toLowerCase())) {
+          const incident = buildUpgradeSupportIncident({
+            sessionId,
+            from,
+            incomingText: intentText,
+            profile,
+            opportunity,
+            upgradeResult,
+          });
+          queueSupportIncident(incident);
+        }
         const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity);
         const upgradeTwiml = buildTwimlMessage(upgradeText);
         if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);

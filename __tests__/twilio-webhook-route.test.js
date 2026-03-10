@@ -16,6 +16,7 @@ const mockPostChatMessage = vi.fn();
 const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockReverifyAndApplyUpgradeForProfile = vi.fn();
+const mockLogSupportIncident = vi.fn();
 const originalEnv = process.env;
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -52,6 +53,10 @@ vi.mock('../src/lib/boulevard.js', () => ({
   reverifyAndApplyUpgradeForProfile: (...args) => mockReverifyAndApplyUpgradeForProfile(...args),
 }));
 
+vi.mock('../src/lib/notify.js', () => ({
+  logSupportIncident: (...args) => mockLogSupportIncident(...args),
+}));
+
 import { POST } from '../src/app/api/sms/twilio/webhook/route.js';
 
 describe('twilio webhook route', () => {
@@ -78,6 +83,10 @@ describe('twilio webhook route', () => {
     mockLookupMember.mockResolvedValue(null);
     mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({ eligible: false, reason: 'no_upcoming_appointment_in_window' });
     mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+    mockLogSupportIncident.mockResolvedValue({
+      email: { sent: true },
+      sheet: { logged: true },
+    });
   });
 
   afterEach(() => {
@@ -161,6 +170,7 @@ describe('twilio webhook route', () => {
     expect(text).toContain("You're all set. See you soon.");
     expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
+    expect(mockLogSupportIncident).not.toHaveBeenCalled();
   });
 
   it('returns human-finalization copy when upgrade mutation is disabled', async () => {
@@ -198,6 +208,12 @@ describe('twilio webhook route', () => {
     expect(mockLookupMember).not.toHaveBeenCalled();
     expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'upgrade_mutation_disabled',
+      phone: '+12134401333',
+    });
   });
 
   it('returns add-on confirmation with member/non-member pricing from pending offer', async () => {
@@ -234,5 +250,57 @@ describe('twilio webhook route', () => {
     expect(mockLookupMember).not.toHaveBeenCalled();
     expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'manual_addon_confirmation',
+    });
+  });
+
+  it('logs support incident when mutation attempt fails and team follow-up is required', async () => {
+    const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      fullName: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Penn Quarter',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      currentDurationMinutes: 30,
+      targetDurationMinutes: 50,
+      pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: false,
+      reason: 'upgrade_mutation_failed',
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Please use');
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'upgrade_mutation_failed',
+      name: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Penn Quarter',
+    });
   });
 });
