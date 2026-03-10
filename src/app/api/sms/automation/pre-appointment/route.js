@@ -60,11 +60,12 @@ function isPendingOfferExpired(offer) {
   return !Number.isFinite(expires) || Date.now() > expires;
 }
 
-function formatTimeForGuest(iso) {
+function formatTimeForGuest(iso, timeZone = 'America/New_York') {
   if (!iso) return 'your upcoming appointment';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return 'your upcoming appointment';
   return d.toLocaleString('en-US', {
+    timeZone,
     hour: 'numeric',
     minute: '2-digit',
     month: 'short',
@@ -81,7 +82,7 @@ function buildOutboundOfferMessage(opportunity, options = {}) {
   const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
   const currentDuration = opportunity.currentDurationMinutes;
   const targetDuration = opportunity.targetDurationMinutes;
-  const timeText = formatTimeForGuest(opportunity.startOn);
+  const timeText = formatTimeForGuest(opportunity.startOn, options.timeZone || 'America/New_York');
   const opener = reminder
     ? `Silver Mirror reminder: we still have room after your ${timeText} appointment.`
     : `Silver Mirror: we have room after your ${timeText} appointment.`;
@@ -598,6 +599,7 @@ export async function POST(request) {
 
       const offerMessage = buildOutboundOfferMessage(opportunity, {
         reminder: offerType === 'reminder',
+        timeZone: sendTimezone,
       });
       if (!offerMessage) {
         results.push({
