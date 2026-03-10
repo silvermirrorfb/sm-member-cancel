@@ -28,6 +28,12 @@ const SMS_REBOOK_URL = String(process.env.SMS_REBOOK_URL || 'https://booking.sil
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const MANUAL_UPGRADE_REASONS = new Set(['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed']);
+const ALLOWED_ADDON_NAME_SET = new Set([
+  'antioxidant peel',
+  'neck firming',
+  'eye puff minimizer',
+  'lip plump and scrub',
+]);
 
 function buildSmsWebHandoffReply() {
   return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
@@ -62,15 +68,29 @@ function buildDurationPricingText(opportunity) {
   return `${current}->${target} is +$${delta} ($${total} total; members get 20% off).`;
 }
 
+function getAllowedAddonDisplayName(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const normalized = raw.toLowerCase();
+  if (!ALLOWED_ADDON_NAME_SET.has(normalized)) return null;
+  return raw;
+}
+
 function buildPendingOfferFinalizeReply(offer) {
   const offerKind = String(offer?.offerKind || 'duration').toLowerCase();
   if (offerKind === 'addon') {
     const price = Number(offer?.pricing?.walkinPrice || 0);
-    const name = String(offer?.addOnName || 'your add-on').trim();
+    const allowedName = getAllowedAddonDisplayName(offer?.addOnName);
     if (Number.isFinite(price)) {
-      return `Thanks, we got your YES. ${name} is $${price} (members get 20% off). Our team will confirm before your appointment.`;
+      if (allowedName) {
+        return `Thanks, we got your YES. ${allowedName} is $${price} (members get 20% off). Our team will confirm before your appointment.`;
+      }
+      return `Thanks, we got your YES. The add-on is $${price} (members get 20% off). Our team will confirm before your appointment.`;
     }
-    return `Thanks, we got your YES. We received your request for ${name} and our team will confirm before your appointment.`;
+    if (allowedName) {
+      return `Thanks, we got your YES. We received your request for ${allowedName} and our team will confirm before your appointment.`;
+    }
+    return 'Thanks, we got your YES. We received your add-on request and our team will confirm before your appointment.';
   }
 
   const pricingText = buildDurationPricingText(offer);

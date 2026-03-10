@@ -225,6 +225,47 @@ describe('twilio webhook route', () => {
       pendingUpgradeOffer: {
         offerKind: 'addon',
         appointmentId: 'appt-1',
+        addOnName: 'Antioxidant Peel',
+        isMember: false,
+        pricing: { memberPrice: 76, walkinPrice: 95 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Antioxidant Peel is $95 (members get 20% off).');
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(session.pendingUpgradeOffer).toBeNull();
+    expect(mockLookupMember).not.toHaveBeenCalled();
+    expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
+    expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'manual_addon_confirmation',
+    });
+  });
+
+  it('does not expose disallowed add-on names in manual confirmation SMS', async () => {
+    process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
         addOnName: 'Hydradermabrasion',
         isMember: false,
         pricing: { memberPrice: 76, walkinPrice: 95 },
@@ -244,17 +285,8 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('Hydradermabrasion is $95 (members get 20% off).');
-    expect(text).toContain('Our team will confirm before your appointment.');
-    expect(session.pendingUpgradeOffer).toBeNull();
-    expect(mockLookupMember).not.toHaveBeenCalled();
-    expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
-    expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
-    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
-    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
-      issue_type: 'sms_upgrade_manual_followup',
-      reason: 'manual_addon_confirmation',
-    });
+    expect(text).toContain('The add-on is $95');
+    expect(text).not.toContain('Hydradermabrasion');
   });
 
   it('logs support incident when mutation attempt fails and team follow-up is required', async () => {
