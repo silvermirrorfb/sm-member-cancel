@@ -129,6 +129,12 @@ function normalizeBoulevardApiUrl(rawUrl) {
   return apiUrl;
 }
 
+function isInactiveMembershipStatus(status) {
+  const normalized = String(status || '').trim().toUpperCase();
+  if (!normalized) return false;
+  return ['INACTIVE', 'CANCELED', 'CANCELLED', 'PAST_DUE', 'EXPIRED', 'TERMINATED'].includes(normalized);
+}
+
 function generateAuthHeader(apiKey, apiSecret, businessId) {
   const prefix = 'blvd-admin-v1';
   const timestamp = Math.floor(Date.now() / 1000);
@@ -1998,6 +2004,14 @@ async function lookupMember(name, emailOrPhone, options = {}) {
     console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName} via ${lookupStrategy}`);
     const membership = await findMembershipForClient(apiUrl, headers, match.node.id);
     const commerce = await fetchClientCommerceMetrics(apiUrl, headers, match.node);
+    const preferMembershipLocation = membership && !isInactiveMembershipStatus(membership.status);
+    const resolvedLocationName = preferMembershipLocation
+      ? (membership?.location?.name || match.node?.primaryLocation?.name || match.node.location)
+      : (match.node?.primaryLocation?.name || membership?.location?.name || match.node.location);
+    const resolvedLocationId = preferMembershipLocation
+      ? (membership?.location?.id || match.node?.primaryLocation?.id || null)
+      : (match.node?.primaryLocation?.id || membership?.location?.id || null);
+
     const source = membership ? {
       ...match.node,
       ...(commerce || {}),
@@ -2007,8 +2021,8 @@ async function lookupMember(name, emailOrPhone, options = {}) {
       membershipTermNumber: membership.termNumber,
       nextChargeDate: membership.nextChargeDate,
       unitPrice: membership.unitPrice,
-      location: membership?.location?.name || match.node?.primaryLocation?.name || match.node.location,
-      locationId: membership?.location?.id || match.node?.primaryLocation?.id || null,
+      location: resolvedLocationName,
+      locationId: resolvedLocationId,
       lookupStrategy,
     } : {
       ...match.node,
