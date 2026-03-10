@@ -131,6 +131,35 @@ describe('upgrade route flows', () => {
     expect(body.message).toContain('confirmed the upgrade');
   });
 
+  it('YES inside active window routes to human-finalization copy when mutation is disabled', async () => {
+    const session = createSession({
+      pendingUpgradeOffer: {
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    });
+    sessionStore.set('sess-1', session);
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: false,
+      reason: 'upgrade_mutation_disabled',
+      opportunity: {
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        startOn: '2026-03-09T16:00:00.000Z',
+      },
+    });
+
+    const res = await POST(makeRequest('yes'));
+    const body = await res.json();
+
+    expect(body.upgradeHandled).toBe(true);
+    expect(body.upgradeResult.success).toBe(false);
+    expect(body.message).toContain('finalize it in Boulevard');
+    expect(session.pendingUpgradeOffer).toBeNull();
+  });
+
   it('YES after expiry falls back to normal AI flow', async () => {
     const session = createSession({
       pendingUpgradeOffer: {

@@ -38,6 +38,17 @@ function isNegative(text) {
   return NO_KEYWORDS.test(String(text || '').toLowerCase());
 }
 
+function buildUpgradeApplyReply(upgradeResult, opportunity) {
+  if (upgradeResult?.success) {
+    return `Confirmed. You are upgraded to ${opportunity?.targetDurationMinutes} minutes for your upcoming appointment.`;
+  }
+  const reason = String(upgradeResult?.reason || '').toLowerCase();
+  if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
+    return 'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.';
+  }
+  return 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
+}
+
 function resolveSessionIdForPhone(phone) {
   const existing = getSessionIdForPhone(phone);
   if (existing) {
@@ -169,9 +180,7 @@ export async function POST(request) {
           appointmentId: opportunity.appointmentId || null,
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
         });
-        const upgradeText = upgradeResult?.success
-          ? `Confirmed. You are upgraded to ${opportunity.targetDurationMinutes} minutes for your upcoming appointment.`
-          : 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
+        const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity);
         const upgradeTwiml = buildTwimlMessage(upgradeText);
         if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
         return new NextResponse(upgradeTwiml, {

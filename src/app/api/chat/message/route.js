@@ -221,8 +221,12 @@ function buildUpgradeSuccessMessage(result) {
     return "You're all set. I confirmed the upgrade.";
 }
 
-function buildUpgradeUnavailableMessage() {
-    return "Thanks for the quick reply. I re-checked availability and that upgrade slot is no longer open right now.";
+function buildUpgradeUnavailableMessage(result = null) {
+    const reason = String(result?.reason || '').toLowerCase();
+    if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
+      return 'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.';
+    }
+    return 'Thanks for the quick reply. I re-checked availability and that upgrade slot is no longer open right now.';
 }
 
 function isPendingOfferExpired(offer) {
@@ -662,7 +666,7 @@ export async function POST(request) {
                   }
                   const upgradeMessage = upgradeResult.success
                     ? buildUpgradeSuccessMessage(upgradeResult)
-                    : buildUpgradeUnavailableMessage();
+                    : buildUpgradeUnavailableMessage(upgradeResult);
                   addMessage(sessionId, 'assistant', upgradeMessage);
                   logChatMessage(sessionId, sessionCreated, 'assistant', upgradeMessage).catch(err =>
                       console.warn('Chatlog failed for upgrade response:', err)

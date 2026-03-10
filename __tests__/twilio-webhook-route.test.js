@@ -153,4 +153,38 @@ describe('twilio webhook route', () => {
     expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
   });
+
+  it('returns human-finalization copy when upgrade mutation is disabled', async () => {
+    const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+12134401333',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: false,
+      reason: 'upgrade_mutation_disabled',
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('finalize it in Boulevard');
+    expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
+  });
 });
