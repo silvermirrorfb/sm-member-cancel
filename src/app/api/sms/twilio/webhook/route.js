@@ -38,6 +38,10 @@ function isNegative(text) {
   return NO_KEYWORDS.test(String(text || '').toLowerCase());
 }
 
+function isUpgradeMutationEnabled() {
+  return process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
+}
+
 function buildUpgradeApplyReply(upgradeResult, opportunity) {
   if (upgradeResult?.success) {
     return `Confirmed. You are upgraded to ${opportunity?.targetDurationMinutes} minutes for your upcoming appointment.`;
@@ -161,6 +165,17 @@ export async function POST(request) {
           const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
           if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
           return new NextResponse(declineTwiml, {
+            status: 200,
+            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          });
+        }
+
+        if (!isUpgradeMutationEnabled()) {
+          const teamFinalizeTwiml = buildTwimlMessage(
+            'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.',
+          );
+          if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
+          return new NextResponse(teamFinalizeTwiml, {
             status: 200,
             headers: { 'Content-Type': 'text/xml; charset=utf-8' },
           });

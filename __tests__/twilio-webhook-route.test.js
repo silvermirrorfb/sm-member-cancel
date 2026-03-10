@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockCheckRateLimit = vi.fn();
 const mockGetClientIP = vi.fn();
@@ -16,6 +16,7 @@ const mockPostChatMessage = vi.fn();
 const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockReverifyAndApplyUpgradeForProfile = vi.fn();
+const originalEnv = process.env;
 
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
@@ -55,6 +56,7 @@ import { POST } from '../src/app/api/sms/twilio/webhook/route.js';
 
 describe('twilio webhook route', () => {
   beforeEach(() => {
+    process.env = { ...originalEnv, BOULEVARD_ENABLE_UPGRADE_MUTATION: 'true' };
     vi.clearAllMocks();
     mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0 });
     mockGetClientIP.mockReturnValue('127.0.0.1');
@@ -76,6 +78,10 @@ describe('twilio webhook route', () => {
     mockLookupMember.mockResolvedValue(null);
     mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({ eligible: false, reason: 'no_upcoming_appointment_in_window' });
     mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
   });
 
   it('hands off to web app at message limit and skips chat route', async () => {
@@ -155,6 +161,7 @@ describe('twilio webhook route', () => {
   });
 
   it('returns human-finalization copy when upgrade mutation is disabled', async () => {
+    process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
     const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
     mockGetSessionIdForPhone.mockReturnValue('sess-1');
     mockGetSession.mockReturnValue(session);
@@ -185,6 +192,7 @@ describe('twilio webhook route', () => {
 
     expect(res.status).toBe(200);
     expect(text).toContain('finalize it in Boulevard');
-    expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
+    expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
+    expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
   });
 });
