@@ -1233,9 +1233,26 @@ function minutesBetweenIso(startIso, endIso) {
 
 function bucketDurationMinutes(durationMinutes) {
   if (!isFiniteNumber(durationMinutes)) return null;
-  if (durationMinutes <= 40) return 30;
-  if (durationMinutes <= 70) return 50;
-  return 90;
+  const raw = Number(durationMinutes);
+
+  // Treat "service + transition" windows as their base service tier first.
+  // This prevents 30-min appointments with built-in transition time from
+  // being misclassified as 50-min when membership tier is unknown.
+  const thirtyWithPrep = 30 + Math.max(PREP_BUFFER_30MIN, 0);
+  if (raw <= thirtyWithPrep) return 30;
+
+  const candidates = [50, 90];
+  let bestTier = 50;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const tier of candidates) {
+    const withPrep = tier + prepBufferMinutesForDuration(tier);
+    const distance = Math.min(Math.abs(raw - tier), Math.abs(raw - withPrep));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestTier = tier;
+    }
+  }
+  return bestTier;
 }
 
 function tierFromDurationMinutes(durationMinutes) {

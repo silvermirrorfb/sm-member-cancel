@@ -374,6 +374,40 @@ describe('upgrade eligibility engine', () => {
     expect(result.requiredExtraMinutes).toBe(20);
   });
 
+  it('infers 30-minute service for guests when raw appointment length is 30 + transition', () => {
+    const appointments = [
+      {
+        id: 'appt-guest-1',
+        clientId: 'client-1',
+        providerId: 'prov-1',
+        startOn: '2026-03-08T10:00:00.000Z',
+        endOn: '2026-03-08T10:45:00.000Z', // 30 min service + 15 min transition
+        status: 'BOOKED',
+      },
+      {
+        id: 'appt-guest-2',
+        clientId: 'other',
+        providerId: 'prov-1',
+        startOn: '2026-03-08T11:20:00.000Z',
+        endOn: '2026-03-08T11:50:00.000Z',
+        status: 'BOOKED',
+      },
+    ];
+
+    const result = evaluateUpgradeEligibilityFromAppointments(appointments, {
+      clientId: 'client-1',
+      tier: null,
+      accountStatus: 'active',
+    }, {
+      now: '2026-03-08T08:00:00.000Z',
+      windowHours: 6,
+    });
+
+    expect(result.eligible).toBe(true);
+    expect(result.currentDurationMinutes).toBe(30);
+    expect(result.targetDurationMinutes).toBe(50);
+  });
+
   it('marks upgrade ineligible when provider gap is too small', () => {
     const appointments = [
       {
