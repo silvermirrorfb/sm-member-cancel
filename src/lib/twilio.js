@@ -18,6 +18,10 @@ function rewriteCommonSmsPhrases(text) {
   let value = String(text || '');
   value = value.replace(/How can I help you today\?/gi, 'How can I help today?');
   value = value.replace(/Whether you have questions about/gi, 'Any questions about');
+  value = value.replace(
+    /^Hello!\s*I'm Silver Mirror's virtual assistant\.\s*I'm here to help with questions about our facials,\s*services,\s*memberships,\s*products,\s*and skincare\.\s*What can I help you with today\?/i,
+    "Hi! I'm Silver Mirror's virtual assistant. How can I help today? Any questions about facials, memberships, booking, or skincare advice?",
+  );
   return value;
 }
 
@@ -48,11 +52,14 @@ function trimSmsBody(text) {
   }
 
   if (compact && compact.length >= Math.min(80, TARGET_SMS_CHARS - 10)) {
-    return compact;
+    return compact.replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '').trim();
   }
 
   if (value.length <= MAX_SMS_CHARS) return value;
-  return trimToWordBoundary(value, MAX_SMS_CHARS).replace(/[,:;-]$/, '').trim();
+  return trimToWordBoundary(value, MAX_SMS_CHARS)
+    .replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '')
+    .replace(/[,:;-]$/, '')
+    .trim();
 }
 
 function escapeXml(text) {

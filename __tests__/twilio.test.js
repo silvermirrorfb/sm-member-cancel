@@ -36,6 +36,13 @@ describe('twilio helpers', () => {
     expect(compact.length).toBeLessThanOrEqual(150);
   });
 
+  it('rewrites long hello greeting from chat flow', () => {
+    const verbose = "Hello! I'm Silver Mirror's virtual assistant. I'm here to help with questions about our facials, services, memberships, products, and skincare. What can I help you with today?";
+    const compact = trimSmsBody(verbose);
+    expect(compact).toBe("Hi! I'm Silver Mirror's virtual assistant. How can I help today? Any questions about facials, memberships, booking, or skincare advice?");
+    expect(compact.length).toBeLessThanOrEqual(150);
+  });
+
   it('sanitizes emoji and non-ascii punctuation for sms-safe output', () => {
     const sanitized = sanitizeSmsText('Hi — yes 😊 “quoted”');
     expect(sanitized).toBe('Hi - yes "quoted"');
