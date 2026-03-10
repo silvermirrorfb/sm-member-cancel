@@ -2,6 +2,7 @@
 
 ## Endpoint
 - `POST /api/qa/upgrade-check`
+- Canonical location IDs: see [LOCATION_ID_REGISTRY.md](./LOCATION_ID_REGISTRY.md)
 
 ## Auth Headers
 - `x-qa-token: <QA_UPGRADE_CHECK_TOKEN>`

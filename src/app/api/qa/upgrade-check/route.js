@@ -6,6 +6,7 @@ import {
   evaluateUpgradeEligibilityFromAppointments,
   resolveNameScanFallbackCandidate,
   buildProfile,
+  resolveBoulevardLocationInput,
 } from '../../../../lib/boulevard';
 import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
@@ -13,7 +14,6 @@ const QA_UPGRADE_LIMIT_MAX = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_L
 const QA_UPGRADE_LIMIT_WINDOW_MS = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_WINDOW_MS || 10 * 60 * 1000), 1000);
 const QA_UPGRADE_IDEMPOTENCY_TTL_MS = Math.max(Number(process.env.QA_UPGRADE_IDEMPOTENCY_TTL_MS || 15 * 60 * 1000), 1000);
 const QA_SYNTHETIC_MODE_TOKEN = String(process.env.QA_SYNTHETIC_MODE_TOKEN || '').trim();
-const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const idempotencyCache = new Map();
 
 function parseBodyValue(value) {
@@ -49,14 +49,6 @@ function buildRateLimitHeaders(remaining, retryAfterMs = 0) {
   };
   if (retryAfterMs > 0) headers['Retry-After'] = String(Math.ceil(retryAfterMs / 1000));
   return headers;
-}
-
-function normalizeLocationIdInput(rawLocationId) {
-  const value = parseBodyValue(rawLocationId);
-  if (!value) return '';
-  if (value.startsWith('urn:')) return value;
-  if (UUID_V4_LIKE_RE.test(value)) return `urn:blvd:Location:${value}`;
-  return value;
 }
 
 function parseSyntheticMode(rawValue) {
@@ -172,7 +164,8 @@ export async function POST(request) {
     const phone = parseBodyValue(body.phone);
     const appointmentId = parseBodyValue(body.appointmentId);
     const rawLocationId = parseBodyValue(body.locationId);
-    const resolvedLocationId = normalizeLocationIdInput(rawLocationId);
+    const locationResolution = resolveBoulevardLocationInput(rawLocationId);
+    const resolvedLocationId = locationResolution.locationId;
     const syntheticMode = parseSyntheticMode(body.syntheticMode);
     const debugMode = body.debug === true || String(body.debug || '').toLowerCase() === 'true';
     const targetDurationMinutes = Number.isFinite(Number(body.targetDurationMinutes))
@@ -336,6 +329,8 @@ export async function POST(request) {
           targetDurationMinutes: targetDurationMinutes || null,
           locationId: rawLocationId || null,
           resolvedLocationId: resolvedLocationId || null,
+          resolvedLocationName: locationResolution.locationName || null,
+          resolvedLocationOfficial: locationResolution.official === true,
           now: nowIso || null,
           windowHours: windowHours || null,
           debug: debugMode,
@@ -452,6 +447,8 @@ export async function POST(request) {
         targetDurationMinutes: targetDurationMinutes || null,
         locationId: rawLocationId || null,
         resolvedLocationId: resolvedLocationId || null,
+        resolvedLocationName: locationResolution.locationName || null,
+        resolvedLocationOfficial: locationResolution.official === true,
         now: nowIso || null,
         windowHours: windowHours || null,
         debug: debugMode,

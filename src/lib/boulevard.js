@@ -22,27 +22,154 @@ const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
 const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
 const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const DEFAULT_LOCATION_ALIAS_GROUPS = [
-  [
-    'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
-    'urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb',
-  ],
-];
+const OFFICIAL_LOCATION_REGISTRY = Object.freeze([
+  { slug: 'brickell', name: 'Brickell', id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65' },
+  { slug: 'bryant-park', name: 'Bryant Park', id: 'urn:blvd:Location:c80e43fc-22f5-4adf-b406-f50f59a85b80' },
+  { slug: 'coral-gables', name: 'Coral Gables', id: 'urn:blvd:Location:01b80da8-0b5e-440a-b18b-03afbf5686bd' },
+  { slug: 'dupont-circle', name: 'Dupont Circle', id: 'urn:blvd:Location:b11142af-3d1a-4d11-8194-0c50d023fd75' },
+  { slug: 'flatiron', name: 'Flatiron', id: 'urn:blvd:Location:9482e4e3-e33a-4e31-baa1-9d14acb6c1c8' },
+  { slug: 'manhattan-west', name: 'Manhattan West', id: 'urn:blvd:Location:bee8d08c-1a4b-4d7d-bf59-94b9dcd1523f' },
+  { slug: 'navy-yard', name: 'Navy Yard', id: 'urn:blvd:Location:ce941e99-975b-4d98-9343-3139260821bb' },
+  { slug: 'penn-quarter', name: 'Penn Quarter', id: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa' },
+  { slug: 'upper-east-side', name: 'Upper East Side', id: 'urn:blvd:Location:5feecb61-9bcb-458a-ab42-09478386adbb' },
+  { slug: 'upper-west-side', name: 'Upper West Side', id: 'urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb' },
+]);
+const OFFICIAL_LOCATION_NAME_ALIASES = Object.freeze({
+  uws: 'urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb',
+  'upper west': 'urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb',
+  'upper west side nyc': 'urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb',
+  ues: 'urn:blvd:Location:5feecb61-9bcb-458a-ab42-09478386adbb',
+  'upper east': 'urn:blvd:Location:5feecb61-9bcb-458a-ab42-09478386adbb',
+  'upper east side nyc': 'urn:blvd:Location:5feecb61-9bcb-458a-ab42-09478386adbb',
+  dupont: 'urn:blvd:Location:b11142af-3d1a-4d11-8194-0c50d023fd75',
+  'dupont dc': 'urn:blvd:Location:b11142af-3d1a-4d11-8194-0c50d023fd75',
+  'penn quarter dc': 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa',
+  'navy yard dc': 'urn:blvd:Location:ce941e99-975b-4d98-9343-3139260821bb',
+  'manhattan west plaza': 'urn:blvd:Location:bee8d08c-1a4b-4d7d-bf59-94b9dcd1523f',
+  'brickell miami': 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
+  'coral gables miami': 'urn:blvd:Location:01b80da8-0b5e-440a-b18b-03afbf5686bd',
+  'flatiron nyc': 'urn:blvd:Location:9482e4e3-e33a-4e31-baa1-9d14acb6c1c8',
+  'bryant park nyc': 'urn:blvd:Location:c80e43fc-22f5-4adf-b406-f50f59a85b80',
+});
+const DEFAULT_LEGACY_LOCATION_ID_REMAP = Object.freeze({
+  'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc': 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa',
+});
+const DEFAULT_LOCATION_ALIAS_GROUPS = Object.freeze([]);
 
 const membershipCache = new Map();
 const clientFieldCache = new Map();
 const typeFieldCache = new Map();
 const typeFieldDetailCache = new Map();
 
+function normalizeLocationNameKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeLocationUrnLike(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const urnMatch = raw.match(/^urn:blvd:location:([0-9a-f-]{36})$/i);
+  if (urnMatch) return `urn:blvd:Location:${urnMatch[1].toLowerCase()}`;
+  if (UUID_V4_LIKE_RE.test(raw)) return `urn:blvd:Location:${raw.toLowerCase()}`;
+  return '';
+}
+
+function parseLegacyLocationRemap(rawValue) {
+  const map = new Map();
+  for (const [from, to] of Object.entries(DEFAULT_LEGACY_LOCATION_ID_REMAP)) {
+    const fromId = normalizeLocationUrnLike(from);
+    const toId = normalizeLocationUrnLike(to);
+    if (fromId && toId) map.set(fromId, toId);
+  }
+  if (!rawValue) return map;
+  try {
+    const parsed = JSON.parse(rawValue);
+    const entries = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object'
+      ? Object.entries(parsed)
+      : [];
+    for (const entry of entries) {
+      let from = '';
+      let to = '';
+      if (Array.isArray(entry)) {
+        from = String(entry[0] || '').trim();
+        to = String(entry[1] || '').trim();
+      } else if (entry && typeof entry === 'object') {
+        from = String(entry.from || entry.source || entry.old || '').trim();
+        to = String(entry.to || entry.target || entry.new || '').trim();
+      }
+      const fromId = normalizeLocationUrnLike(from);
+      const toId = normalizeLocationUrnLike(to);
+      if (fromId && toId) map.set(fromId, toId);
+    }
+    return map;
+  } catch {
+    return map;
+  }
+}
+
+const LEGACY_LOCATION_ID_REMAP = parseLegacyLocationRemap(process.env.BOULEVARD_LOCATION_REMAP_JSON || '');
+
+function remapLegacyBoulevardLocationId(locationId) {
+  const normalized = normalizeLocationUrnLike(locationId);
+  if (!normalized) return '';
+  return LEGACY_LOCATION_ID_REMAP.get(normalized) || normalized;
+}
+
+const OFFICIAL_LOCATION_BY_ID = new Map(
+  OFFICIAL_LOCATION_REGISTRY.map(entry => [normalizeLocationUrnLike(entry.id), {
+    slug: String(entry.slug || '').trim(),
+    name: String(entry.name || '').trim(),
+    id: normalizeLocationUrnLike(entry.id),
+  }]),
+);
+
+const OFFICIAL_LOCATION_ID_BY_NAME_KEY = (() => {
+  const map = new Map();
+  for (const entry of OFFICIAL_LOCATION_REGISTRY) {
+    const id = normalizeLocationUrnLike(entry.id);
+    if (!id) continue;
+    const nameKey = normalizeLocationNameKey(entry.name);
+    const slugKey = normalizeLocationNameKey(entry.slug);
+    if (nameKey) map.set(nameKey, id);
+    if (slugKey) map.set(slugKey, id);
+  }
+  for (const [alias, idValue] of Object.entries(OFFICIAL_LOCATION_NAME_ALIASES)) {
+    const key = normalizeLocationNameKey(alias);
+    const id = normalizeLocationUrnLike(idValue);
+    if (key && id) map.set(key, id);
+  }
+  return map;
+})();
+
 function parseLocationAliasGroups(rawValue) {
   if (!rawValue) return DEFAULT_LOCATION_ALIAS_GROUPS;
   try {
     const parsed = JSON.parse(rawValue);
     if (!Array.isArray(parsed)) return DEFAULT_LOCATION_ALIAS_GROUPS;
-    const groups = parsed
-      .filter(group => Array.isArray(group))
-      .map(group => group.map(item => normalizeBoulevardLocationId(item)).filter(Boolean))
-      .filter(group => group.length >= 2);
+    const groups = [];
+    for (const group of parsed) {
+      if (!Array.isArray(group)) continue;
+      const normalizedGroup = [...new Set(group
+        .map(item => remapLegacyBoulevardLocationId(item))
+        .filter(Boolean))];
+      if (normalizedGroup.length < 2) continue;
+      const officialNames = new Set(
+        normalizedGroup
+          .map(id => OFFICIAL_LOCATION_BY_ID.get(id)?.name || '')
+          .filter(Boolean),
+      );
+      // Safety guard: never alias two known, different storefronts.
+      if (officialNames.size > 1) continue;
+      groups.push(normalizedGroup);
+    }
     return groups.length > 0 ? groups : DEFAULT_LOCATION_ALIAS_GROUPS;
   } catch {
     return DEFAULT_LOCATION_ALIAS_GROUPS;
@@ -172,8 +299,11 @@ function normalizePhone(phone) {
 function normalizeBoulevardLocationId(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
-  if (raw.startsWith('urn:')) return raw;
-  if (UUID_V4_LIKE_RE.test(raw)) return `urn:blvd:Location:${raw}`;
+  const urnLike = normalizeLocationUrnLike(raw);
+  if (urnLike) return remapLegacyBoulevardLocationId(urnLike);
+  const nameKey = normalizeLocationNameKey(raw);
+  const idByName = OFFICIAL_LOCATION_ID_BY_NAME_KEY.get(nameKey);
+  if (idByName) return idByName;
   return raw;
 }
 
@@ -181,6 +311,43 @@ function canonicalizeBoulevardLocationId(value) {
   const normalized = normalizeBoulevardLocationId(value);
   if (!normalized) return '';
   return LOCATION_ALIAS_CANONICAL_MAP.get(normalized) || normalized;
+}
+
+function resolveBoulevardLocationInput(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return {
+      input: '',
+      locationId: '',
+      canonicalId: '',
+      locationName: null,
+      official: false,
+      source: 'empty',
+    };
+  }
+
+  const normalized = normalizeBoulevardLocationId(raw);
+  const canonical = canonicalizeBoulevardLocationId(normalized);
+  const officialEntry = OFFICIAL_LOCATION_BY_ID.get(canonical) || OFFICIAL_LOCATION_BY_ID.get(normalized) || null;
+  const isLocationUrn = Boolean(normalizeLocationUrnLike(normalized));
+  const resolvedLocationId = officialEntry
+    ? officialEntry.id
+    : isLocationUrn
+    ? canonical || normalized
+    : '';
+
+  let source = 'unknown';
+  if (isLocationUrn) source = 'id';
+  else if (officialEntry) source = 'name';
+
+  return {
+    input: raw,
+    locationId: resolvedLocationId,
+    canonicalId: officialEntry?.id || (isLocationUrn ? (canonical || normalized) : ''),
+    locationName: officialEntry?.name || null,
+    official: Boolean(officialEntry),
+    source,
+  };
 }
 
 function toIsoDate(value) {
@@ -1719,13 +1886,14 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   const auth = getBoulevardAuthContext();
   if (!auth) return { eligible: false, reason: 'boulevard_not_configured' };
 
-  const profileLocationId = normalizeBoulevardLocationId(
+  const locationInput = (
     options?.locationId ||
     profile?.locationId ||
     profile?.primaryLocationId ||
     profile?.location?.id ||
     ''
-  ) || null;
+  );
+  const profileLocationId = resolveBoulevardLocationInput(locationInput).locationId || null;
 
   const scan = await scanAppointments(auth.apiUrl, auth.headers, {
     locationId: profileLocationId,
@@ -2254,6 +2422,10 @@ export {
   computeValues,
   formatProfileForPrompt,
   normalizePhone,
+  normalizeBoulevardLocationId,
+  canonicalizeBoulevardLocationId,
+  resolveBoulevardLocationInput,
+  OFFICIAL_LOCATION_REGISTRY,
   WALKIN_PRICES,
   CURRENT_RATES,
   PERKS,

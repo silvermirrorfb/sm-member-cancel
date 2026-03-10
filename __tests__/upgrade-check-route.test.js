@@ -5,6 +5,7 @@ const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockEvaluateUpgradeEligibilityFromAppointments = vi.fn();
 const mockResolveNameScanFallbackCandidate = vi.fn();
 const mockBuildProfile = vi.fn();
+const mockResolveBoulevardLocationInput = vi.fn();
 
 vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
@@ -12,6 +13,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
   evaluateUpgradeEligibilityFromAppointments: (...args) => mockEvaluateUpgradeEligibilityFromAppointments(...args),
   resolveNameScanFallbackCandidate: (...args) => mockResolveNameScanFallbackCandidate(...args),
   buildProfile: (...args) => mockBuildProfile(...args),
+  resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
 }));
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -30,6 +32,14 @@ describe('QA upgrade-check route', () => {
     mockBuildProfile.mockImplementation(input => input);
     mockResolveNameScanFallbackCandidate.mockReturnValue({ candidate: null, strategy: null, reason: 'no_match' });
     mockEvaluateUpgradeEligibilityFromAppointments.mockReturnValue({ eligible: false, reason: 'synthetic_default' });
+    mockResolveBoulevardLocationInput.mockImplementation(value => {
+      const raw = String(value || '').trim();
+      if (!raw) return { locationId: '', locationName: null, official: false };
+      if (/^[0-9a-f-]{36}$/i.test(raw)) {
+        return { locationId: `urn:blvd:Location:${raw.toLowerCase()}`, locationName: null, official: false };
+      }
+      return { locationId: raw, locationName: null, official: false };
+    });
   });
 
   afterEach(() => {

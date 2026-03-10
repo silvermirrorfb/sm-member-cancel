@@ -5,6 +5,7 @@ import {
   evaluateUpgradeOpportunityForProfile,
   formatProfileForPrompt,
   lookupMember,
+  resolveBoulevardLocationInput,
 } from '../../../../../lib/boulevard';
 import {
   bindPhoneToSession,
@@ -187,7 +188,8 @@ export async function POST(request) {
     const now = asText(body.now) || null;
     const runNow = now || new Date().toISOString();
     const windowHours = asInt(body.windowHours, null);
-    const fallbackLocationId = asText(body.locationId) || null;
+    const fallbackLocationInput = asText(body.locationId) || null;
+    const fallbackLocationId = resolveBoulevardLocationInput(fallbackLocationInput).locationId || null;
     const targetDurationMinutes = asInt(body.targetDurationMinutes, null);
     const maxSends = Math.max(1, asInt(body.maxSends, 50));
     const fromNumber = asText(body.fromNumber) || null;
@@ -389,11 +391,14 @@ export async function POST(request) {
       const phone = asText(candidate.phone);
       const fullName = `${firstName} ${lastName}`.trim();
       const effectiveWindowHours = asInt(candidate.windowHours, asInt(queuedOptions.windowHours, windowHours));
-      const effectiveFallbackLocationId =
+      const effectiveFallbackLocationInput =
         asText(candidate.locationId) ||
         asText(queuedOptions.fallbackLocationId) ||
-        fallbackLocationId ||
-        null;
+        fallbackLocationInput ||
+        '';
+      const effectiveFallbackLocationId = resolveBoulevardLocationInput(effectiveFallbackLocationInput).locationId
+        || fallbackLocationId
+        || null;
       const effectiveTargetDurationMinutes = asInt(
         candidate.targetDurationMinutes,
         asInt(queuedOptions.targetDurationMinutes, targetDurationMinutes),

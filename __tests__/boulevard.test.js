@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   lookupMember,
   normalizePhone,
+  normalizeBoulevardLocationId,
+  resolveBoulevardLocationInput,
   verifyMemberIdentity,
   levenshtein,
+  OFFICIAL_LOCATION_REGISTRY,
   WALKIN_PRICES,
   CURRENT_RATES,
   PERKS,
@@ -25,6 +28,31 @@ describe('normalizePhone', () => {
     expect(normalizePhone('')).toBe('');
     expect(normalizePhone(null)).toBe('');
     expect(normalizePhone(undefined)).toBe('');
+  });
+});
+
+describe('location registry and normalization', () => {
+  it('defines exactly 10 canonical storefront locations', () => {
+    expect(Array.isArray(OFFICIAL_LOCATION_REGISTRY)).toBe(true);
+    expect(OFFICIAL_LOCATION_REGISTRY).toHaveLength(10);
+    const ids = new Set(OFFICIAL_LOCATION_REGISTRY.map(entry => entry.id));
+    expect(ids.size).toBe(10);
+  });
+
+  it('remaps known legacy Penn Quarter ID to the canonical ID', () => {
+    const normalized = normalizeBoulevardLocationId('urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc');
+    expect(normalized).toBe('urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa');
+  });
+
+  it('resolves location names and short aliases to canonical IDs', () => {
+    expect(normalizeBoulevardLocationId('Penn Quarter')).toBe('urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa');
+    expect(normalizeBoulevardLocationId('uws')).toBe('urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb');
+  });
+
+  it('fails safe for unknown plain-text location overrides', () => {
+    const resolved = resolveBoulevardLocationInput('Made Up Storefront');
+    expect(resolved.locationId).toBe('');
+    expect(resolved.official).toBe(false);
   });
 });
 
@@ -145,7 +173,7 @@ describe('lookupMember fallback matching', () => {
                     createdAt: '2024-01-01T00:00:00.000Z',
                     appointmentCount: 3,
                     active: true,
-                    primaryLocation: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Upper West Side' },
+                    primaryLocation: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Brickell' },
                   },
                 }],
                 pageInfo: { hasNextPage: false, endCursor: null },
@@ -170,7 +198,7 @@ describe('lookupMember fallback matching', () => {
                     termNumber: 1,
                     unitPrice: 13900,
                     nextChargeDate: '2026-04-01',
-                    location: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Upper West Side' },
+                    location: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Brickell' },
                   },
                 }],
                 pageInfo: { hasNextPage: false, endCursor: null },
@@ -224,7 +252,7 @@ describe('lookupMember fallback matching', () => {
                       createdAt: '2026-01-01T00:00:00.000Z',
                       appointmentCount: 27,
                       active: true,
-                      primaryLocation: { id: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc', name: 'Penn Quarter' },
+                      primaryLocation: { id: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa', name: 'Penn Quarter' },
                     },
                   },
                 ],
@@ -253,7 +281,7 @@ describe('lookupMember fallback matching', () => {
     });
 
     const result = await lookupMember('Matt Maroone', 'mattmaroone@gmail.com', {
-      preferLocationId: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc',
+      preferLocationId: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa',
     });
     expect(result).not.toBeNull();
     expect(result.clientId).toBe('client-pq');
@@ -584,7 +612,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.availableGapMinutes).toBe(20);
   });
 
-  it('treats aliased location IDs as equivalent when provider identity is unavailable', () => {
+  it('does not alias Brickell and Upper West Side by default when provider identity is unavailable', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -612,8 +640,9 @@ describe('upgrade eligibility engine', () => {
     });
 
     expect(result.eligible).toBe(true);
-    expect(result.locationCanonicalId).toBe('urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65');
-    expect(result.availableGapMinutes).toBe(20);
+    expect(result.locationCanonicalId).toBe('urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb');
+    expect(result.nextCommitmentStartOn).toBeNull();
+    expect(result.gapUnlimited).toBe(true);
   });
 });
 
@@ -1545,7 +1574,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                       id: 'appt-1',
                       clientId: 'client-1',
                       providerId: 'prov-1',
-                      locationId: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc',
+                      locationId: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa',
                       startAt: '2026-03-08T10:00:00.000Z',
                       endAt: '2026-03-08T10:30:00.000Z',
                       state: 'BOOKED',
@@ -1556,7 +1585,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                       id: 'appt-2',
                       clientId: 'other',
                       providerId: 'prov-1',
-                      locationId: 'urn:blvd:Location:79afa932-6e84-49c7-9f0f-605c680599cc',
+                      locationId: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa',
                       startAt: '2026-03-08T11:10:00.000Z',
                       endAt: '2026-03-08T11:40:00.000Z',
                       state: 'BOOKED',

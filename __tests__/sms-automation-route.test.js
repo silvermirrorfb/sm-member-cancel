@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
+const mockResolveBoulevardLocationInput = vi.fn();
 const mockCreateSession = vi.fn();
 const mockGetSession = vi.fn();
 const mockBuildSystemPromptWithProfile = vi.fn();
@@ -20,6 +21,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
   formatProfileForPrompt: (...args) => mockFormatProfileForPrompt(...args),
+  resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
 }));
 
 vi.mock('../src/lib/sessions.js', () => ({
@@ -64,6 +66,12 @@ describe('sms automation route', () => {
     mockCreateSession.mockReturnValue({ id: 'sess-1', status: 'active' });
     mockGetUpgradeOfferState.mockReturnValue(null);
     mockMarkUpgradeOfferEvent.mockReturnValue(null);
+    mockResolveBoulevardLocationInput.mockImplementation(value => {
+      const raw = String(value || '').trim();
+      if (!raw) return { locationId: '' };
+      if (/^[0-9a-f-]{36}$/i.test(raw)) return { locationId: `urn:blvd:Location:${raw.toLowerCase()}` };
+      return { locationId: raw };
+    });
     mockEnqueueOutboundCandidate.mockReturnValue({
       id: 'q-1',
       runAfter: '2026-03-09T14:00:00Z',
