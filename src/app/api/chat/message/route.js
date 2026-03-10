@@ -212,7 +212,31 @@ function buildUpgradeOfferMessage(opportunity, options = {}) {
     return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
 }
 
-function buildUpgradeSuccessMessage(result) {
+function buildUpgradePricingContext(primary = null, fallback = null) {
+    const first = primary || {};
+    const second = fallback || {};
+    return {
+      isMember: (first.isMember === true) || (second.isMember === true),
+      currentDurationMinutes: Number(first.currentDurationMinutes || second.currentDurationMinutes || 0) || null,
+      targetDurationMinutes: Number(first.targetDurationMinutes || second.targetDurationMinutes || 0) || null,
+      pricing: first.pricing || second.pricing || null,
+    };
+}
+
+function buildUpgradeSuccessMessage(result, pendingOffer = null) {
+    const opportunity = result?.opportunity || null;
+    const context = buildUpgradePricingContext(opportunity, pendingOffer);
+    const pricing = context.pricing;
+    if (pricing) {
+      const isMember = context.isMember === true;
+      const current = context.currentDurationMinutes;
+      const target = context.targetDurationMinutes;
+      const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
+      const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
+      if (current && target && Number.isFinite(delta) && Number.isFinite(total)) {
+        return `Confirmed. ${isMember ? 'Member' : 'Non-member'} ${current}->${target} is +$${delta} ($${total} total).`;
+      }
+    }
     const target = result?.opportunity?.targetDurationMinutes;
     const timeText = formatTimeForGuest(result?.opportunity?.startOn);
     if (target) {
@@ -221,10 +245,23 @@ function buildUpgradeSuccessMessage(result) {
     return "You're all set. I confirmed the upgrade.";
 }
 
-function buildUpgradeUnavailableMessage(result = null) {
+function buildUpgradeUnavailableMessage(result = null, pendingOffer = null) {
     const reason = String(result?.reason || '').toLowerCase();
     if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
-      return 'Thanks for replying YES. We received your upgrade request and our team will finalize it in Boulevard before your appointment.';
+      const opportunity = result?.opportunity || null;
+      const context = buildUpgradePricingContext(opportunity, pendingOffer);
+      const pricing = context.pricing;
+      if (pricing) {
+        const isMember = context.isMember === true;
+        const current = context.currentDurationMinutes;
+        const target = context.targetDurationMinutes;
+        const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
+        const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
+        if (current && target && Number.isFinite(delta) && Number.isFinite(total)) {
+          return `Thanks, we got your YES. ${isMember ? 'Member' : 'Non-member'} ${current}->${target} is +$${delta} ($${total} total). Our team will confirm before your appointment.`;
+        }
+      }
+      return 'Thanks for replying YES. We received your request and our team will confirm before your appointment.';
     }
     return 'Thanks for the quick reply. I re-checked availability and that upgrade slot is no longer open right now.';
 }
@@ -657,6 +694,7 @@ export async function POST(request) {
                     session.memberProfile,
                     session.pendingUpgradeOffer,
                   );
+                  const pendingOffer = session.pendingUpgradeOffer || null;
                   if (profilePhone && appointmentId) {
                         markUpgradeOfferEvent(
                           profilePhone,
@@ -665,8 +703,8 @@ export async function POST(request) {
                         );
                   }
                   const upgradeMessage = upgradeResult.success
-                    ? buildUpgradeSuccessMessage(upgradeResult)
-                    : buildUpgradeUnavailableMessage(upgradeResult);
+                    ? buildUpgradeSuccessMessage(upgradeResult, pendingOffer)
+                    : buildUpgradeUnavailableMessage(upgradeResult, pendingOffer);
                   addMessage(sessionId, 'assistant', upgradeMessage);
                   logChatMessage(sessionId, sessionCreated, 'assistant', upgradeMessage).catch(err =>
                       console.warn('Chatlog failed for upgrade response:', err)
@@ -717,7 +755,11 @@ export async function POST(request) {
                         if (offerMessage) {
                               session.pendingUpgradeOffer = {
                                     appointmentId: opportunity.appointmentId,
+                                    offerKind: 'duration',
+                                    currentDurationMinutes: opportunity.currentDurationMinutes || null,
                                     targetDurationMinutes: opportunity.targetDurationMinutes,
+                                    isMember: opportunity.isMember === true,
+                                    pricing: opportunity.pricing || null,
                                     createdAt: new Date().toISOString(),
                                     expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
                               };
@@ -886,7 +928,11 @@ export async function POST(request) {
                   if (proactiveOffer) {
                         session.pendingUpgradeOffer = {
                               appointmentId: opportunity.appointmentId,
+                              offerKind: 'duration',
+                              currentDurationMinutes: opportunity.currentDurationMinutes || null,
                               targetDurationMinutes: opportunity.targetDurationMinutes,
+                              isMember: opportunity.isMember === true,
+                              pricing: opportunity.pricing || null,
                               createdAt: new Date().toISOString(),
                               expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
                         };

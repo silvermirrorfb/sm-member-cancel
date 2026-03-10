@@ -105,7 +105,11 @@ describe('upgrade route flows', () => {
     const session = createSession({
       pendingUpgradeOffer: {
         appointmentId: 'appt-1',
+        offerKind: 'duration',
+        currentDurationMinutes: 30,
         targetDurationMinutes: 50,
+        isMember: true,
+        pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
         createdAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       },
@@ -128,14 +132,18 @@ describe('upgrade route flows', () => {
     expect(body.upgradeHandled).toBe(true);
     expect(body.upgradeResult.success).toBe(true);
     expect(session.pendingUpgradeOffer).toBeNull();
-    expect(body.message).toContain('confirmed the upgrade');
+    expect(body.message).toContain('Member 30->50 is +$40 ($139 total).');
   });
 
   it('YES inside active window routes to human-finalization copy when mutation is disabled', async () => {
     const session = createSession({
       pendingUpgradeOffer: {
         appointmentId: 'appt-1',
+        offerKind: 'duration',
+        currentDurationMinutes: 30,
         targetDurationMinutes: 50,
+        isMember: true,
+        pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
         createdAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       },
@@ -156,7 +164,7 @@ describe('upgrade route flows', () => {
 
     expect(body.upgradeHandled).toBe(true);
     expect(body.upgradeResult.success).toBe(false);
-    expect(body.message).toContain('finalize it in Boulevard');
+    expect(body.message).toContain('Our team will confirm before your appointment');
     expect(session.pendingUpgradeOffer).toBeNull();
   });
 

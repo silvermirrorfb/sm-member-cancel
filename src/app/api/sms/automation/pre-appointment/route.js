@@ -28,6 +28,26 @@ import {
 import { checkKlaviyoSmsOptIn } from '../../../../../lib/klaviyo';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 10);
+const ADDON_CATALOG = {
+  hydradermabrasion: { code: 'hydradermabrasion', name: 'Hydradermabrasion', memberPrice: 76, walkinPrice: 95 },
+  dermaplaning: { code: 'dermaplaning', name: 'Dermaplaning', memberPrice: 76, walkinPrice: 95 },
+  custom_jelly_mask: { code: 'custom_jelly_mask', name: 'Custom Jelly Mask', memberPrice: 40, walkinPrice: 50 },
+  eye_puff_minimizer: { code: 'eye_puff_minimizer', name: 'Eye Puff Minimizer', memberPrice: 40, walkinPrice: 50 },
+  extra_extractions: { code: 'extra_extractions', name: 'Extra Extractions', memberPrice: 20, walkinPrice: 25 },
+};
+const ADDON_CODE_ALIASES = {
+  hydradermabrasion: 'hydradermabrasion',
+  hydra: 'hydradermabrasion',
+  dermaplaning: 'dermaplaning',
+  jellymask: 'custom_jelly_mask',
+  customjellymask: 'custom_jelly_mask',
+  custom_jelly_mask: 'custom_jelly_mask',
+  eyepuff: 'eye_puff_minimizer',
+  eyepuffminimizer: 'eye_puff_minimizer',
+  eye_puff_minimizer: 'eye_puff_minimizer',
+  extractions: 'extra_extractions',
+  extra_extractions: 'extra_extractions',
+};
 
 function isAuthorized(request) {
   const configured = String(process.env.SMS_AUTOMATION_TOKEN || '').trim();
@@ -55,6 +75,66 @@ function asBool(value, fallback = false) {
   return fallback;
 }
 
+function normalizeOfferType(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'addon') return 'addon';
+  if (raw === 'auto') return 'auto';
+  return 'duration';
+}
+
+function normalizeAddonCode(value) {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!raw) return '';
+  return ADDON_CODE_ALIASES[raw] || raw;
+}
+
+function isAddonFallbackReason(opportunity) {
+  if (!opportunity || opportunity.eligible) return false;
+  const reason = String(opportunity.reason || '').toLowerCase();
+  if (!opportunity.appointmentId || !opportunity.startOn) return false;
+  return [
+    'insufficient_gap',
+    'already_at_or_above_target_duration',
+    'no_upgrade_target_for_duration',
+  ].includes(reason);
+}
+
+function pickDefaultAddonCode(opportunity) {
+  const currentDuration = Number(opportunity?.currentDurationMinutes || 0);
+  if (currentDuration > 30) return 'custom_jelly_mask';
+  return 'hydradermabrasion';
+}
+
+function buildAddonOffer(profile, opportunity, options = {}) {
+  const requestedCode = normalizeAddonCode(options.addOnCode || '');
+  const selectedCode = requestedCode || pickDefaultAddonCode(opportunity);
+  const addon = ADDON_CATALOG[selectedCode];
+  if (!addon) return null;
+  if (!opportunity?.appointmentId || !opportunity?.startOn) return null;
+
+  const isMember = typeof opportunity?.isMember === 'boolean'
+    ? opportunity.isMember
+    : Boolean(profile?.tier) && !/inactive|cancel/i.test(String(profile?.accountStatus || '').toLowerCase());
+  return {
+    offerKind: 'addon',
+    appointmentId: opportunity.appointmentId || null,
+    startOn: opportunity.startOn || null,
+    currentDurationMinutes: Number(opportunity?.currentDurationMinutes || 0) || null,
+    isMember,
+    addOnCode: addon.code,
+    addOnName: addon.name,
+    pricing: {
+      memberPrice: addon.memberPrice,
+      walkinPrice: addon.walkinPrice,
+      offeredPrice: isMember ? addon.memberPrice : addon.walkinPrice,
+    },
+  };
+}
+
 function isPendingOfferExpired(offer) {
   if (!offer?.expiresAt) return true;
   const expires = new Date(offer.expiresAt).getTime();
@@ -74,7 +154,7 @@ function formatTimeForGuest(iso, timeZone = 'America/New_York') {
   });
 }
 
-function buildOutboundOfferMessage(opportunity, options = {}) {
+function buildDurationOfferMessage(opportunity, options = {}) {
   if (!opportunity?.pricing) return null;
   const reminder = options.reminder === true;
   const isMember = opportunity.isMember === true;
@@ -88,9 +168,29 @@ function buildOutboundOfferMessage(opportunity, options = {}) {
     ? `Silver Mirror reminder: room is still open after your ${timeText} appointment.`
     : `Silver Mirror: room is open after your ${timeText} appointment.`;
   const priceLine = isMember
-    ? `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} member ($${total} total).`
-    : `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} ($${total} total).`;
+    ? `Member upgrade ${currentDuration}->${targetDuration} is +$${delta} ($${total} total).`
+    : `Non-member upgrade ${currentDuration}->${targetDuration} is +$${delta} ($${total} total).`;
   return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
+}
+
+function buildAddonOfferMessage(offer, options = {}) {
+  if (!offer?.pricing || !offer?.addOnName) return null;
+  const reminder = options.reminder === true;
+  const isMember = offer.isMember === true;
+  const timeText = formatTimeForGuest(offer.startOn, options.timeZone || 'America/New_York');
+  const opener = reminder
+    ? `Silver Mirror reminder: add-on opening for your ${timeText} facial.`
+    : `Silver Mirror: add-on opening for your ${timeText} facial.`;
+  const priceLine = isMember
+    ? `${offer.addOnName} is $${offer.pricing.memberPrice} member.`
+    : `${offer.addOnName} is $${offer.pricing.walkinPrice} non-member.`;
+  return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
+}
+
+function buildOutboundOfferMessage(offer, options = {}) {
+  if (!offer) return null;
+  if (offer.offerKind === 'addon') return buildAddonOfferMessage(offer, options);
+  return buildDurationOfferMessage(offer, options);
 }
 
 function isSameLocalDay(aIso, bIso, timeZone) {
@@ -191,6 +291,8 @@ export async function POST(request) {
     const fallbackLocationInput = asText(body.locationId) || null;
     const fallbackLocationId = resolveBoulevardLocationInput(fallbackLocationInput).locationId || null;
     const targetDurationMinutes = asInt(body.targetDurationMinutes, null);
+    const defaultOfferType = normalizeOfferType(body.offerType);
+    const defaultAddOnCode = normalizeAddonCode(body.addOnCode);
     const maxSends = Math.max(1, asInt(body.maxSends, 50));
     const fromNumber = asText(body.fromNumber) || null;
     const statusCallback = asText(body.statusCallback) || null;
@@ -222,6 +324,10 @@ export async function POST(request) {
     const reminderToleranceMinutes = Math.max(
       0,
       asInt(body.reminderToleranceMinutes, asInt(process.env.SMS_REMINDER_TOLERANCE_MINUTES, 15)),
+    );
+    const enableAddonFallback = asBool(
+      body.enableAddonFallback,
+      asBool(process.env.SMS_ENABLE_ADDON_FALLBACK, true),
     );
     const directCandidates = useQueuedOnly ? [] : resolveCandidates(body);
 
@@ -259,6 +365,9 @@ export async function POST(request) {
           phone: asText(candidate.phone),
           appointmentId: asText(candidate.appointmentId),
           targetDurationMinutes: asInt(candidate.targetDurationMinutes, null),
+          offerType: normalizeOfferType(candidate.offerType || defaultOfferType),
+          addOnCode: normalizeAddonCode(candidate.addOnCode || defaultAddOnCode),
+          enableAddonFallback: asBool(candidate.enableAddonFallback, enableAddonFallback),
           locationId: asText(candidate.locationId),
         };
         if (!queuedCandidate.firstName || !queuedCandidate.lastName || (!queuedCandidate.email && !queuedCandidate.phone)) {
@@ -283,6 +392,9 @@ export async function POST(request) {
                 windowHours,
                 fallbackLocationId,
                 targetDurationMinutes,
+                offerType: defaultOfferType,
+                addOnCode: defaultAddOnCode || null,
+                enableAddonFallback,
                 fromNumber,
                 statusCallback,
               },
@@ -403,6 +515,16 @@ export async function POST(request) {
         candidate.targetDurationMinutes,
         asInt(queuedOptions.targetDurationMinutes, targetDurationMinutes),
       );
+      const effectiveOfferType = normalizeOfferType(
+        asText(candidate.offerType) || asText(queuedOptions.offerType) || defaultOfferType,
+      );
+      const effectiveAddOnCode = normalizeAddonCode(
+        asText(candidate.addOnCode) || asText(queuedOptions.addOnCode) || defaultAddOnCode,
+      );
+      const effectiveEnableAddonFallback = asBool(
+        candidate.enableAddonFallback,
+        asBool(queuedOptions.enableAddonFallback, enableAddonFallback),
+      );
       const effectiveFromNumber = asText(candidate.fromNumber) || asText(queuedOptions.fromNumber) || fromNumber || null;
       const effectiveStatusCallback =
         asText(candidate.statusCallback) || asText(queuedOptions.statusCallback) || statusCallback || null;
@@ -451,12 +573,29 @@ export async function POST(request) {
         windowHours: effectiveWindowHours || undefined,
       });
 
-      if (!opportunity?.eligible) {
+      let selectedOffer = null;
+      if (effectiveOfferType === 'addon') {
+        selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
+      } else if (effectiveOfferType === 'auto') {
+        if (opportunity?.eligible) {
+          selectedOffer = { offerKind: 'duration', ...opportunity };
+        } else if (effectiveEnableAddonFallback && isAddonFallbackReason(opportunity)) {
+          selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
+        }
+      } else if (opportunity?.eligible) {
+        selectedOffer = { offerKind: 'duration', ...opportunity };
+      } else if (effectiveEnableAddonFallback && isAddonFallbackReason(opportunity)) {
+        selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
+      }
+
+      if (!selectedOffer) {
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           profile: { clientId: profile.clientId || null, phone: profile.phone || null, tier: profile.tier || null },
           status: 'skipped',
-          reason: opportunity?.reason || 'not_eligible',
+          reason: effectiveOfferType === 'addon'
+            ? 'addon_offer_unavailable'
+            : (opportunity?.reason || 'not_eligible'),
           matchedContact,
           source: work.source,
           queueId: work.queueId,
@@ -479,7 +618,7 @@ export async function POST(request) {
       }
 
       const session = getOrCreateSmsSession(profile);
-      const appointmentId = opportunity.appointmentId || null;
+      const appointmentId = selectedOffer.appointmentId || null;
       const offerState = appointmentId ? getUpgradeOfferState(profilePhone, appointmentId) : null;
       if (offerState?.upgradedAt || offerState?.acceptedAt) {
         results.push({
@@ -547,7 +686,7 @@ export async function POST(request) {
         pending.appointmentId &&
         pending.appointmentId === appointmentId;
       const timing = resolveOfferTiming({
-        startOn: opportunity.startOn,
+        startOn: selectedOffer.startOn,
         runNow,
         sendTimezone,
         sendStartHour,
@@ -602,7 +741,7 @@ export async function POST(request) {
         continue;
       }
 
-      const offerMessage = buildOutboundOfferMessage(opportunity, {
+      const offerMessage = buildOutboundOfferMessage(selectedOffer, {
         reminder: offerType === 'reminder',
         timeZone: sendTimezone,
       });
@@ -642,7 +781,10 @@ export async function POST(request) {
           status: 'dry_run',
           sessionId: session.id,
           appointmentId,
-          targetDurationMinutes: opportunity.targetDurationMinutes || null,
+          offerKind: selectedOffer.offerKind || 'duration',
+          targetDurationMinutes: selectedOffer.targetDurationMinutes || null,
+          addOnCode: selectedOffer.addOnCode || null,
+          addOnName: selectedOffer.addOnName || null,
           offerType,
           reminderMode: offerType === 'reminder' ? timing.reminderMode : null,
           minutesUntilStart: timing.minutesUntilStart,
@@ -672,8 +814,14 @@ export async function POST(request) {
         }
         const nowIso = new Date().toISOString();
         session.pendingUpgradeOffer = {
+          offerKind: selectedOffer.offerKind || 'duration',
           appointmentId,
-          targetDurationMinutes: opportunity.targetDurationMinutes || null,
+          currentDurationMinutes: selectedOffer.currentDurationMinutes || null,
+          targetDurationMinutes: selectedOffer.targetDurationMinutes || null,
+          addOnCode: selectedOffer.addOnCode || null,
+          addOnName: selectedOffer.addOnName || null,
+          isMember: selectedOffer.isMember === true,
+          pricing: selectedOffer.pricing || null,
           createdAt: pending?.createdAt || nowIso,
           expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
           reminderSentAt: offerType === 'reminder' ? nowIso : pending?.reminderSentAt || null,
@@ -685,7 +833,10 @@ export async function POST(request) {
           status: 'sent',
           sessionId: session.id,
           appointmentId,
-          targetDurationMinutes: opportunity.targetDurationMinutes || null,
+          offerKind: selectedOffer.offerKind || 'duration',
+          targetDurationMinutes: selectedOffer.targetDurationMinutes || null,
+          addOnCode: selectedOffer.addOnCode || null,
+          addOnName: selectedOffer.addOnName || null,
           offerType,
           reminderMode: offerType === 'reminder' ? timing.reminderMode : null,
           minutesUntilStart: timing.minutesUntilStart,
@@ -706,7 +857,7 @@ export async function POST(request) {
           profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
           status: 'error',
           sessionId: session.id,
-          appointmentId: opportunity.appointmentId || null,
+          appointmentId,
           reason: err?.message || 'twilio_send_failed',
           matchedContact,
           source: work.source,

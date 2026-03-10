@@ -42,13 +42,52 @@ function isUpgradeMutationEnabled() {
   return process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
 }
 
+function isPendingOfferExpired(offer) {
+  if (!offer?.expiresAt) return true;
+  const expiresMs = new Date(offer.expiresAt).getTime();
+  return !Number.isFinite(expiresMs) || Date.now() > expiresMs;
+}
+
+function buildDurationPricingText(opportunity) {
+  const pricing = opportunity?.pricing || null;
+  if (!pricing) return '';
+  const isMember = opportunity?.isMember === true;
+  const current = Number(opportunity?.currentDurationMinutes || 0) || null;
+  const target = Number(opportunity?.targetDurationMinutes || 0) || null;
+  const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
+  const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
+  if (!current || !target || !Number.isFinite(delta) || !Number.isFinite(total)) return '';
+  return `${isMember ? 'Member' : 'Non-member'} ${current}->${target}: +$${delta} ($${total} total).`;
+}
+
+function buildPendingOfferFinalizeReply(offer) {
+  const offerKind = String(offer?.offerKind || 'duration').toLowerCase();
+  if (offerKind === 'addon') {
+    const isMember = offer?.isMember === true;
+    const price = isMember ? offer?.pricing?.memberPrice : offer?.pricing?.walkinPrice;
+    const name = String(offer?.addOnName || 'your add-on').trim();
+    if (Number.isFinite(price)) {
+      return `Thanks, we got your YES. ${isMember ? 'Member' : 'Non-member'} price for ${name} is $${price}. Our team will confirm before your appointment.`;
+    }
+    return `Thanks, we got your YES. We received your request for ${name} and our team will confirm before your appointment.`;
+  }
+
+  const pricingText = buildDurationPricingText(offer);
+  if (pricingText) {
+    return `Thanks, we got your YES. ${pricingText} Our team will confirm before your appointment.`;
+  }
+  return 'Thanks for replying YES. We received your upgrade request and our team will confirm it before your appointment.';
+}
+
 function buildUpgradeApplyReply(upgradeResult, opportunity) {
   if (upgradeResult?.success) {
+    const pricingText = buildDurationPricingText(opportunity);
+    if (pricingText) return `Confirmed. ${pricingText}`;
     return `Confirmed. You are upgraded to ${opportunity?.targetDurationMinutes} minutes for your upcoming appointment.`;
   }
   const reason = String(upgradeResult?.reason || '').toLowerCase();
   if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
-    return 'Thanks for replying YES. We received your upgrade request and our team will finalize it before your appointment.';
+    return buildPendingOfferFinalizeReply(opportunity);
   }
   return 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
 }
@@ -133,12 +172,12 @@ export async function POST(request) {
     }
 
     const sessionId = resolveSessionIdForPhone(from);
-    const session = getSession(sessionId);
-    if (session) {
-      const currentCount = Number(session.smsInboundCount || 0);
-      session.smsInboundCount = currentCount + 1;
-      if (session.smsHandoffToWeb === true || session.smsInboundCount >= SMS_WEB_HANDOFF_LIMIT) {
-        session.smsHandoffToWeb = true;
+    const activeSession = getSession(sessionId);
+    if (activeSession) {
+      const currentCount = Number(activeSession.smsInboundCount || 0);
+      activeSession.smsInboundCount = currentCount + 1;
+      if (activeSession.smsHandoffToWeb === true || activeSession.smsInboundCount >= SMS_WEB_HANDOFF_LIMIT) {
+        activeSession.smsHandoffToWeb = true;
         const handoffTwiml = buildTwimlMessage(buildSmsWebHandoffReply());
         if (messageSid) storeReplyForMessageSid(messageSid, handoffTwiml);
         return new NextResponse(handoffTwiml, {
@@ -150,10 +189,31 @@ export async function POST(request) {
 
     const intentText = String(body || '').trim();
     if (isAffirmative(intentText) || isNegative(intentText)) {
-      if (isAffirmative(intentText) && !isUpgradeMutationEnabled()) {
-        const teamFinalizeTwiml = buildTwimlMessage(
-          'Thanks for replying YES. We received your upgrade request and our team will finalize it before your appointment.',
-        );
+      const pendingOffer = activeSession?.pendingUpgradeOffer || null;
+      const hasPendingOffer = pendingOffer && !isPendingOfferExpired(pendingOffer);
+      if (activeSession?.pendingUpgradeOffer && !hasPendingOffer) {
+        activeSession.pendingUpgradeOffer = null;
+      }
+
+      if (hasPendingOffer && isNegative(intentText)) {
+        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
+        activeSession.pendingUpgradeOffer = null;
+        const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
+        if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
+        return new NextResponse(declineTwiml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+        });
+      }
+
+      const pendingOfferKind = String(pendingOffer?.offerKind || 'duration').toLowerCase();
+      const canFinalizeWithoutMutation = hasPendingOffer && (
+        pendingOfferKind === 'addon' || !isUpgradeMutationEnabled()
+      );
+      if (isAffirmative(intentText) && canFinalizeWithoutMutation) {
+        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
+        activeSession.pendingUpgradeOffer = null;
+        const teamFinalizeTwiml = buildTwimlMessage(buildPendingOfferFinalizeReply(pendingOffer));
         if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
         return new NextResponse(teamFinalizeTwiml, {
           status: 200,
@@ -161,13 +221,23 @@ export async function POST(request) {
         });
       }
 
-      const session = getSession(sessionId);
-      let profile = session?.memberProfile || null;
+      if (isAffirmative(intentText) && !isUpgradeMutationEnabled()) {
+        const fallbackTwiml = buildTwimlMessage(
+          'Thanks for replying YES. We received your request and our team will confirm it before your appointment.',
+        );
+        if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
+        return new NextResponse(fallbackTwiml, {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+        });
+      }
+
+      let profile = activeSession?.memberProfile || null;
       if (!profile) {
         profile = await lookupMember('', from);
-        if (session && profile) {
-          session.memberId = profile.clientId || null;
-          session.memberProfile = profile;
+        if (activeSession && profile) {
+          activeSession.memberId = profile.clientId || null;
+          activeSession.memberProfile = profile;
         }
       }
 

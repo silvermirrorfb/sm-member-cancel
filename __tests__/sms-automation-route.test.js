@@ -499,4 +499,58 @@ describe('sms automation route', () => {
     expect(body.results[0].status).toBe('skipped');
     expect(body.results[0].reason).toBe('offer_declined');
   });
+
+  it('supports add-on offers with non-member pricing', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-9',
+      phone: '+19175550000',
+      tier: null,
+      accountStatus: 'ACTIVE',
+      firstName: 'Taylor',
+      name: 'Taylor Guest',
+      email: 'taylor@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: false,
+      reason: 'insufficient_gap',
+      appointmentId: 'appt-9',
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+      isMember: false,
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        offerType: 'addon',
+        addOnCode: 'hydradermabrasion',
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Taylor',
+            lastName: 'Guest',
+            email: 'taylor@example.com',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].offerKind).toBe('addon');
+    expect(body.results[0].addOnCode).toBe('hydradermabrasion');
+    expect(body.results[0].message).toContain('Hydradermabrasion');
+    expect(body.results[0].message).toContain('$95 non-member');
+  });
 });

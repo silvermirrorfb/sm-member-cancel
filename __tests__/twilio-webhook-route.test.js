@@ -138,7 +138,10 @@ describe('twilio webhook route', () => {
     mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
       eligible: true,
       appointmentId: 'appt-1',
+      currentDurationMinutes: 30,
       targetDurationMinutes: 50,
+      isMember: true,
+      pricing: { memberDelta: 40, memberTotal: 139, walkinDelta: 50, walkinTotal: 169 },
     });
     mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
       success: true,
@@ -155,7 +158,7 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('Confirmed. You are upgraded to 50 minutes');
+    expect(text).toContain('Confirmed. Member 30->50: +$40 ($139 total).');
     expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
   });
@@ -191,7 +194,43 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('finalize it before your appointment');
+    expect(text).toContain('confirm it before your appointment');
+    expect(mockLookupMember).not.toHaveBeenCalled();
+    expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
+    expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+  });
+
+  it('returns add-on confirmation with member/non-member pricing from pending offer', async () => {
+    process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Hydradermabrasion',
+        isMember: false,
+        pricing: { memberPrice: 76, walkinPrice: 95 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Non-member price for Hydradermabrasion is $95.');
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(session.pendingUpgradeOffer).toBeNull();
     expect(mockLookupMember).not.toHaveBeenCalled();
     expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
