@@ -244,7 +244,7 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('Antioxidant Peel is $95 (members get 20% off).');
+    expect(text).toContain('an Antioxidant Peel is $95 (members get 20% off).');
     expect(text).toContain('Our team will confirm before your appointment.');
     expect(session.pendingUpgradeOffer).toBeNull();
     expect(mockLookupMember).not.toHaveBeenCalled();

@@ -76,6 +76,23 @@ function getAllowedAddonDisplayName(value) {
   return raw;
 }
 
+function pickIndefiniteArticle(phrase) {
+  const token = String(phrase || '')
+    .trim()
+    .toLowerCase()
+    .split(/[\s-]+/)[0];
+  if (!token) return 'a';
+  if (/^(honest|honor|hour|heir)/.test(token)) return 'an';
+  if (/^(one|uni|use|euro|user|u[bcfhjkqrstnlg])/i.test(token)) return 'a';
+  return /^[aeiou]/.test(token) ? 'an' : 'a';
+}
+
+function withIndefiniteArticle(phrase) {
+  const value = String(phrase || '').trim();
+  if (!value) return 'an add-on';
+  return `${pickIndefiniteArticle(value)} ${value}`;
+}
+
 function buildPendingOfferFinalizeReply(offer) {
   const offerKind = String(offer?.offerKind || 'duration').toLowerCase();
   if (offerKind === 'addon') {
@@ -83,12 +100,12 @@ function buildPendingOfferFinalizeReply(offer) {
     const allowedName = getAllowedAddonDisplayName(offer?.addOnName);
     if (Number.isFinite(price)) {
       if (allowedName) {
-        return `Thanks, we got your YES. ${allowedName} is $${price} (members get 20% off). Our team will confirm before your appointment.`;
+        return `Thanks, we got your YES. ${withIndefiniteArticle(allowedName)} is $${price} (members get 20% off). Our team will confirm before your appointment.`;
       }
       return `Thanks, we got your YES. The add-on is $${price} (members get 20% off). Our team will confirm before your appointment.`;
     }
     if (allowedName) {
-      return `Thanks, we got your YES. We received your request for ${allowedName} and our team will confirm before your appointment.`;
+      return `Thanks, we got your YES. We received your request for ${withIndefiniteArticle(allowedName)} and our team will confirm before your appointment.`;
     }
     return 'Thanks, we got your YES. We received your add-on request and our team will confirm before your appointment.';
   }

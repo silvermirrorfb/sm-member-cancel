@@ -561,4 +561,56 @@ describe('sms automation route', () => {
     expect(body.results[0].message).toContain('$50');
     expect(body.results[0].message).toContain('Members get 20% off');
   });
+
+  it('uses correct article for add-on copy (a Lip Plump and Scrub)', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-10',
+      phone: '+19175550001',
+      tier: null,
+      accountStatus: 'ACTIVE',
+      firstName: 'Taylor',
+      name: 'Taylor Guest',
+      email: 'taylor@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: false,
+      reason: 'no_upgrade_target_for_duration',
+      appointmentId: 'appt-10',
+      currentDurationMinutes: 50,
+      availableGapMinutes: 10,
+      startOn: '2026-03-09T18:00:00Z',
+      isMember: false,
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        offerType: 'addon',
+        addOnCode: 'lip_plump_and_scrub',
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Taylor',
+            lastName: 'Guest',
+            email: 'taylor@example.com',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].message).toContain('add a Lip Plump and Scrub');
+  });
 });

@@ -185,9 +185,10 @@ function formatTimeForGuest(iso) {
     if (!iso) return 'your upcoming appointment';
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return 'your upcoming appointment';
+    const includeMinutes = d.getMinutes() !== 0;
     return d.toLocaleString('en-US', {
       hour: 'numeric',
-      minute: '2-digit',
+      ...(includeMinutes ? { minute: '2-digit' } : {}),
       month: 'short',
       day: 'numeric',
     });
@@ -202,9 +203,9 @@ function buildUpgradeOfferMessage(opportunity, options = {}) {
     const opener = proactive
       ? `I also see room after your ${timeText} session.`
       : `I checked your ${timeText} appointment.`;
-    const priceLine = `Upgrade to 50-Min Esthetician's Choice is +$${delta} (members get 20% off).`;
+    const priceLine = `Upgrade to a 50-Min Esthetician's Choice Facial for $${delta} more.`;
 
-    return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
+    return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} minutes or NO.`;
 }
 
 function buildUpgradeSuccessMessage(result, pendingOffer = null) {

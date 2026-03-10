@@ -30,6 +30,7 @@ import {
 import { checkKlaviyoSmsOptIn } from '../../../../../lib/klaviyo';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
+const REMINDER_YES_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_REMINDER_MIN || 10);
 const ADDON_MIN_GAP_MINUTES = Number(process.env.SMS_ADDON_MIN_GAP_MINUTES || 5);
 const ADDON_CATALOG = {
   antioxidant_peel: { code: 'antioxidant_peel', name: 'Antioxidant Peel', memberPrice: 40, walkinPrice: 50 },
@@ -151,6 +152,23 @@ function isPendingOfferExpired(offer) {
   return !Number.isFinite(expires) || Date.now() > expires;
 }
 
+function pickIndefiniteArticle(phrase) {
+  const token = String(phrase || '')
+    .trim()
+    .toLowerCase()
+    .split(/[\s-]+/)[0];
+  if (!token) return 'a';
+  if (/^(honest|honor|hour|heir)/.test(token)) return 'an';
+  if (/^(one|uni|use|euro|user|u[bcfhjkqrstnlg])/i.test(token)) return 'a';
+  return /^[aeiou]/.test(token) ? 'an' : 'a';
+}
+
+function withIndefiniteArticle(phrase) {
+  const value = asText(phrase);
+  if (!value) return 'an add-on';
+  return `${pickIndefiniteArticle(value)} ${value}`;
+}
+
 function formatTimeForGuest(iso, timeZone = 'America/New_York') {
   if (!iso) return 'your upcoming appointment';
   const d = new Date(iso);
@@ -170,11 +188,15 @@ function buildDurationOfferMessage(opportunity, options = {}) {
   const firstName = asText(options.firstName);
   const pricing = opportunity.pricing;
   const delta = Number(pricing.walkinDelta || 50);
+  const responseWindowMinutes = Math.max(
+    1,
+    Number(options.responseWindowMinutes || (reminder ? REMINDER_YES_WINDOW_MINUTES : OFFER_WINDOW_MINUTES)) || OFFER_WINDOW_MINUTES,
+  );
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
   if (reminder) {
-    return `${greeting} reminder: space is still open to extend your facial today to 50-Min Esthetician's Choice (+$${delta}; members get 20% off). Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
+    return `${greeting} reminder: space is still open to extend your facial today to a 50-Min Esthetician's Choice Facial for $${delta} more. Reply YES in ${responseWindowMinutes} minutes.`;
   }
-  return `${greeting} we have space to extend your facial today. Upgrade to 50-Min Esthetician's Choice (+$${delta}; members get 20% off). Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
+  return `${greeting} we have space to extend your facial today. Upgrade to a 50-Min Esthetician's Choice Facial for $${delta} more. Reply YES in ${responseWindowMinutes} minutes.`;
 }
 
 function buildAddonOfferMessage(offer, options = {}) {
@@ -183,10 +205,15 @@ function buildAddonOfferMessage(offer, options = {}) {
   const firstName = asText(options.firstName);
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
   const price = Number(offer?.pricing?.walkinPrice || 0);
+  const responseWindowMinutes = Math.max(
+    1,
+    Number(options.responseWindowMinutes || (reminder ? REMINDER_YES_WINDOW_MINUTES : OFFER_WINDOW_MINUTES)) || OFFER_WINDOW_MINUTES,
+  );
+  const addonWithArticle = withIndefiniteArticle(offer.addOnName);
   if (reminder) {
-    return `${greeting} reminder: want to add ${offer.addOnName} today for $${price}? Members get 20% off. Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
+    return `${greeting} reminder: want to add ${addonWithArticle} today for $${price}? Members get 20% off. Reply YES in ${responseWindowMinutes} minutes.`;
   }
-  return `${greeting} want to add ${offer.addOnName} today for $${price}? Members get 20% off. Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
+  return `${greeting} want to add ${addonWithArticle} today for $${price}? Members get 20% off. Reply YES in ${responseWindowMinutes} minutes.`;
 }
 
 function buildOutboundOfferMessage(offer, options = {}) {
