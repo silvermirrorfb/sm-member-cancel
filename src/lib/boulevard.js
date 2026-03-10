@@ -1835,6 +1835,9 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   if (upcoming.length === 0) return { eligible: false, reason: 'no_upcoming_appointment_in_window' };
 
   const targetAppointmentId = String(options.appointmentId || '').trim();
+  if (!targetAppointmentId && upcoming.length > 1) {
+    return { eligible: false, reason: 'multiple_upcoming_appointments_require_appointment_id' };
+  }
   const current = targetAppointmentId
     ? upcoming.find(appt => appt.id === targetAppointmentId) || null
     : upcoming[0];

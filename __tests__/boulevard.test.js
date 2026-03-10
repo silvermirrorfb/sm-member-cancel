@@ -677,6 +677,74 @@ describe('upgrade eligibility engine', () => {
     expect(result.availableGapMinutes).toBe(20);
   });
 
+  it('fails safe when multiple upcoming appointments exist without explicit appointmentId', () => {
+    const appointments = [
+      {
+        id: 'appt-a',
+        clientId: 'client-1',
+        providerId: 'prov-1',
+        startOn: '2026-03-08T10:00:00.000Z',
+        endOn: '2026-03-08T10:30:00.000Z',
+        status: 'BOOKED',
+      },
+      {
+        id: 'appt-b',
+        clientId: 'client-1',
+        providerId: 'prov-2',
+        startOn: '2026-03-08T12:00:00.000Z',
+        endOn: '2026-03-08T12:30:00.000Z',
+        status: 'BOOKED',
+      },
+    ];
+
+    const result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, {
+      now: '2026-03-08T08:00:00.000Z',
+      windowHours: 6,
+    });
+
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('multiple_upcoming_appointments_require_appointment_id');
+  });
+
+  it('uses provided appointmentId when multiple upcoming appointments exist', () => {
+    const appointments = [
+      {
+        id: 'appt-a',
+        clientId: 'client-1',
+        providerId: 'prov-1',
+        startOn: '2026-03-08T10:00:00.000Z',
+        endOn: '2026-03-08T10:30:00.000Z',
+        status: 'BOOKED',
+      },
+      {
+        id: 'appt-b',
+        clientId: 'client-1',
+        providerId: 'prov-2',
+        startOn: '2026-03-08T12:00:00.000Z',
+        endOn: '2026-03-08T12:30:00.000Z',
+        status: 'BOOKED',
+      },
+      {
+        id: 'prov-2-next',
+        clientId: 'other',
+        providerId: 'prov-2',
+        startOn: '2026-03-08T13:05:00.000Z',
+        endOn: '2026-03-08T13:35:00.000Z',
+        status: 'BOOKED',
+      },
+    ];
+
+    const result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, {
+      now: '2026-03-08T08:00:00.000Z',
+      windowHours: 6,
+      appointmentId: 'appt-b',
+    });
+
+    expect(result.eligible).toBe(true);
+    expect(result.appointmentId).toBe('appt-b');
+    expect(result.availableGapMinutes).toBe(20);
+  });
+
   it('does not alias Brickell and Upper West Side by default when provider identity is unavailable', () => {
     const appointments = [
       {
