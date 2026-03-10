@@ -1285,7 +1285,6 @@ function isCanceledAppointment(appt) {
 function pickUpgradeTargetDuration(currentDurationMinutes) {
   if (!isFiniteNumber(currentDurationMinutes)) return null;
   if (currentDurationMinutes <= 30) return 50;
-  if (currentDurationMinutes <= 50) return 90;
   return null;
 }
 
@@ -1856,14 +1855,11 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     currentDurationMinutes = profileTierDuration;
   }
   if (!isFiniteNumber(currentDurationMinutes)) return { eligible: false, reason: 'invalid_current_duration' };
-
-  const targetDurationMinutes = isFiniteNumber(options.targetDurationMinutes)
-    ? options.targetDurationMinutes
-    : pickUpgradeTargetDuration(currentDurationMinutes);
-  if (!isFiniteNumber(targetDurationMinutes)) return { eligible: false, reason: 'no_upgrade_target_for_duration' };
-
-  const requiredExtraMinutes = targetDurationMinutes - currentDurationMinutes;
-  if (requiredExtraMinutes <= 0) return { eligible: false, reason: 'already_at_or_above_target_duration' };
+  const hasAddonOnBooking = Boolean(
+    currentDurationMinutes === 50 &&
+    isFiniteNumber(rawDuration) &&
+    rawDuration > 60,
+  );
 
   const currentEndMs = new Date(current.endOn).getTime();
   if (!Number.isFinite(currentEndMs)) return { eligible: false, reason: 'invalid_current_end_time' };
@@ -1887,15 +1883,52 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     .sort((a, b) => new Date(a.startOn).getTime() - new Date(b.startOn).getTime());
 
   const nextCommitment = providerCommitments[0] || null;
-  const prepBufferMinutes = prepBufferMinutesForDuration(currentDurationMinutes);
-  const blockEndMs = currentEndMs + prepBufferMinutes * 60000;
   const nextStartMs = nextCommitment ? new Date(nextCommitment.startOn).getTime() : null;
   const hasFiniteGap = Number.isFinite(nextStartMs);
   const availableGapMinutes = hasFiniteGap
-    ? Math.floor((nextStartMs - blockEndMs) / 60000)
+    ? Math.floor((nextStartMs - currentEndMs) / 60000)
     : Number.POSITIVE_INFINITY;
 
+  const targetDurationMinutes = isFiniteNumber(options.targetDurationMinutes)
+    ? options.targetDurationMinutes
+    : pickUpgradeTargetDuration(currentDurationMinutes);
   const isMember = Boolean(profile?.tier) && !/inactive|cancel/.test(String(profile?.accountStatus || '').toLowerCase());
+  if (!isFiniteNumber(targetDurationMinutes)) {
+    return {
+      eligible: false,
+      reason: 'no_upgrade_target_for_duration',
+      appointmentId: current.id,
+      clientId: current.clientId,
+      providerId: current.providerId || null,
+      providerIdentityMode: hasProviderIdentity ? 'exact_provider' : 'fallback_no_provider_id',
+      locationId: current.locationId || null,
+      locationCanonicalId: currentLocationCanonicalId,
+      startOn: current.startOn,
+      endOn: current.endOn,
+      nextCommitmentStartOn: nextCommitment?.startOn || null,
+      currentDurationMinutes,
+      targetDurationMinutes: null,
+      requiredExtraMinutes: null,
+      requiredGapMinutes: null,
+      prepBufferMinutes: 0,
+      availableGapMinutes: Number.isFinite(availableGapMinutes) ? availableGapMinutes : null,
+      gapUnlimited: !hasFiniteGap,
+      hasAddonOnBooking,
+      isMember,
+      pricing: null,
+    };
+  }
+  if (Number(targetDurationMinutes) !== 50) {
+    return { eligible: false, reason: 'unsupported_upgrade_target' };
+  }
+  if (currentDurationMinutes >= 50) {
+    return { eligible: false, reason: 'already_at_or_above_target_duration' };
+  }
+
+  // V1 SMS spec: 30->50 is eligible when there are at least 15 free minutes
+  // after the current appointment block ends.
+  const requiredExtraMinutes = 15;
+  const prepBufferMinutes = 0;
   const pricing = computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember);
   if (!pricing) return { eligible: false, reason: 'pricing_unavailable' };
 
@@ -1914,9 +1947,11 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     currentDurationMinutes,
     targetDurationMinutes,
     requiredExtraMinutes,
+    requiredGapMinutes: requiredExtraMinutes,
     prepBufferMinutes,
     availableGapMinutes: Number.isFinite(availableGapMinutes) ? availableGapMinutes : null,
     gapUnlimited: !hasFiniteGap,
+    hasAddonOnBooking,
     isMember,
     pricing,
   };

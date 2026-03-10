@@ -132,7 +132,7 @@ describe('upgrade route flows', () => {
     expect(body.upgradeHandled).toBe(true);
     expect(body.upgradeResult.success).toBe(true);
     expect(session.pendingUpgradeOffer).toBeNull();
-    expect(body.message).toContain('Member 30->50 is +$40 ($139 total).');
+    expect(body.message).toContain("You're all set. See you soon.");
   });
 
   it('YES inside active window routes to human-finalization copy when mutation is disabled', async () => {
@@ -164,7 +164,7 @@ describe('upgrade route flows', () => {
 
     expect(body.upgradeHandled).toBe(true);
     expect(body.upgradeResult.success).toBe(false);
-    expect(body.message).toContain('Our team will confirm before your appointment');
+    expect(body.message).toContain('our team will confirm before your appointment');
     expect(session.pendingUpgradeOffer).toBeNull();
   });
 

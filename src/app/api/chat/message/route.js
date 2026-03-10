@@ -30,6 +30,7 @@ const MAX_RECOVERY_TOTAL_CHARS = 30000;
 const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
 const HELLO_EMAIL = 'hello@silvermirror.com';
 const SUPPORT_PHONE = '(888) 677-0055';
+const SMS_REBOOK_URL = String(process.env.SMS_REBOOK_URL || 'https://booking.silvermirror.com/booking/location').trim();
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
 const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
 const PAUSE_CREDIT_KEYWORDS = /\b(credit|credits)\b/i;
@@ -45,7 +46,7 @@ const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const UPGRADE_INTEREST_KEYWORDS = /\b(upgrade|extend|longer|50[-\s]?min|50[-\s]?minute|90[-\s]?min|90[-\s]?minute|add[-\s]?on|add on|add[-\s]?it)\b/i;
 const LOGISTICS_CONTEXT_KEYWORDS = /\b(direction|directions|address|where (is|are)|location|parking|how do i get|closest|map)\b/i;
-const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 10);
+const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
 
 function formatMoney(value) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -195,71 +196,26 @@ function formatTimeForGuest(iso) {
 function buildUpgradeOfferMessage(opportunity, options = {}) {
     if (!opportunity?.pricing) return null;
     const proactive = options.proactive === true;
-    const isMember = opportunity.isMember === true;
     const pricing = opportunity.pricing;
-    const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
-    const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
-    const currentDuration = opportunity.currentDurationMinutes;
-    const targetDuration = opportunity.targetDurationMinutes;
+    const delta = Number(pricing.walkinDelta || 50);
     const timeText = formatTimeForGuest(opportunity.startOn);
     const opener = proactive
       ? `I also see room after your ${timeText} session.`
       : `I checked your ${timeText} appointment.`;
-    const priceLine = isMember
-      ? `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} member ($${total} total).`
-      : `Upgrade ${currentDuration}->${targetDuration} min is +$${delta} ($${total} total).`;
+    const priceLine = `Upgrade to 50-Min Esthetician's Choice is +$${delta} (members get 20% off).`;
 
     return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
 }
 
-function buildUpgradePricingContext(primary = null, fallback = null) {
-    const first = primary || {};
-    const second = fallback || {};
-    return {
-      isMember: (first.isMember === true) || (second.isMember === true),
-      currentDurationMinutes: Number(first.currentDurationMinutes || second.currentDurationMinutes || 0) || null,
-      targetDurationMinutes: Number(first.targetDurationMinutes || second.targetDurationMinutes || 0) || null,
-      pricing: first.pricing || second.pricing || null,
-    };
-}
-
 function buildUpgradeSuccessMessage(result, pendingOffer = null) {
-    const opportunity = result?.opportunity || null;
-    const context = buildUpgradePricingContext(opportunity, pendingOffer);
-    const pricing = context.pricing;
-    if (pricing) {
-      const isMember = context.isMember === true;
-      const current = context.currentDurationMinutes;
-      const target = context.targetDurationMinutes;
-      const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
-      const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
-      if (current && target && Number.isFinite(delta) && Number.isFinite(total)) {
-        return `Confirmed. ${isMember ? 'Member' : 'Non-member'} ${current}->${target} is +$${delta} ($${total} total).`;
-      }
-    }
-    const target = result?.opportunity?.targetDurationMinutes;
-    const timeText = formatTimeForGuest(result?.opportunity?.startOn);
-    if (target) {
-      return `You're all set. I confirmed the upgrade to ${target} minutes for ${timeText}.`;
-    }
-    return "You're all set. I confirmed the upgrade.";
+    return "You're all set. See you soon.";
 }
 
 function buildUpgradeUnavailableMessage(result = null, pendingOffer = null) {
     const reason = String(result?.reason || '').toLowerCase();
     if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
-      const opportunity = result?.opportunity || null;
-      const context = buildUpgradePricingContext(opportunity, pendingOffer);
-      const pricing = context.pricing;
-      if (pricing) {
-        const isMember = context.isMember === true;
-        const current = context.currentDurationMinutes;
-        const target = context.targetDurationMinutes;
-        const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
-        const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
-        if (current && target && Number.isFinite(delta) && Number.isFinite(total)) {
-          return `Thanks, we got your YES. ${isMember ? 'Member' : 'Non-member'} ${current}->${target} is +$${delta} ($${total} total). Our team will confirm before your appointment.`;
-        }
+      if (reason === 'upgrade_mutation_failed') {
+        return `I couldn't complete that change instantly. Please use ${SMS_REBOOK_URL} and we'll alert the front desk to assist.`;
       }
       return 'Thanks for replying YES. We received your request and our team will confirm before your appointment.';
     }

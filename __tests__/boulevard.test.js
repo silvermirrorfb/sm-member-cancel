@@ -338,8 +338,8 @@ describe('upgrade eligibility engine', () => {
     expect(result.eligible).toBe(true);
     expect(result.currentDurationMinutes).toBe(30);
     expect(result.targetDurationMinutes).toBe(50);
-    expect(result.requiredExtraMinutes).toBe(20);
-    expect(result.availableGapMinutes).toBe(25);
+    expect(result.requiredExtraMinutes).toBe(15);
+    expect(result.availableGapMinutes).toBe(40);
     expect(result.pricing.memberDelta).toBe(40);
   });
 
@@ -371,7 +371,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.eligible).toBe(true);
     expect(result.currentDurationMinutes).toBe(30);
     expect(result.targetDurationMinutes).toBe(50);
-    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.requiredExtraMinutes).toBe(15);
   });
 
   it('infers 30-minute service for guests when raw appointment length is 30 + transition', () => {
@@ -408,7 +408,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.targetDurationMinutes).toBe(50);
   });
 
-  it('marks upgrade ineligible when provider gap is too small', () => {
+  it('treats 15 minutes after appointment end as eligible for 30->50', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -433,9 +433,9 @@ describe('upgrade eligibility engine', () => {
       windowHours: 6,
     });
 
-    expect(result.eligible).toBe(false);
-    expect(result.reason).toBe('insufficient_gap');
-    expect(result.availableGapMinutes).toBe(15);
+    expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
+    expect(result.availableGapMinutes).toBe(30);
   });
 
   it('treats exactly 20 minutes of post-prep gap as eligible for 30->50', () => {
@@ -464,11 +464,11 @@ describe('upgrade eligibility engine', () => {
     });
 
     expect(result.eligible).toBe(true);
-    expect(result.availableGapMinutes).toBe(20);
-    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.availableGapMinutes).toBe(35);
+    expect(result.requiredExtraMinutes).toBe(15);
   });
 
-  it('treats 19 minutes of post-prep gap as ineligible for 30->50', () => {
+  it('treats less than 15 minutes after appointment end as ineligible for 30->50', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -482,8 +482,8 @@ describe('upgrade eligibility engine', () => {
         id: 'appt-2',
         clientId: 'other',
         providerId: 'prov-1',
-        startOn: '2026-03-08T11:04:00.000Z',
-        endOn: '2026-03-08T11:34:00.000Z',
+        startOn: '2026-03-08T10:44:00.000Z',
+        endOn: '2026-03-08T11:14:00.000Z',
         status: 'BOOKED',
       },
     ];
@@ -495,7 +495,7 @@ describe('upgrade eligibility engine', () => {
 
     expect(result.eligible).toBe(false);
     expect(result.reason).toBe('insufficient_gap');
-    expect(result.availableGapMinutes).toBe(19);
+    expect(result.availableGapMinutes).toBe(14);
   });
 
   it('treats no next provider commitment as unlimited gap', () => {
@@ -518,12 +518,13 @@ describe('upgrade eligibility engine', () => {
       windowHours: 6,
     });
 
-    expect(result.eligible).toBe(true);
+    expect(result.eligible).toBe(false);
     expect(result.currentDurationMinutes).toBe(50);
-    expect(result.targetDurationMinutes).toBe(90);
+    expect(result.targetDurationMinutes).toBeNull();
+    expect(result.reason).toBe('no_upgrade_target_for_duration');
     expect(result.gapUnlimited).toBe(true);
     expect(result.availableGapMinutes).toBeNull();
-    expect(result.pricing.memberDelta).toBe(60);
+    expect(result.pricing).toBeNull();
   });
 
   it('ignores canceled and no-show entries when selecting next provider commitment', () => {
@@ -569,7 +570,7 @@ describe('upgrade eligibility engine', () => {
 
     expect(result.eligible).toBe(true);
     expect(result.nextCommitmentStartOn).toBe('2026-03-08T11:20:00.000Z');
-    expect(result.availableGapMinutes).toBe(35);
+    expect(result.availableGapMinutes).toBe(50);
   });
 
   it('uses non-member pricing for inactive/canceled accounts', () => {
@@ -641,7 +642,7 @@ describe('upgrade eligibility engine', () => {
     });
 
     expect(result.eligible).toBe(true);
-    expect(result.availableGapMinutes).toBe(20);
+    expect(result.availableGapMinutes).toBe(35);
     expect(result.nextCommitmentStartOn).toBe('2026-03-08T11:05:00.000Z');
   });
 
@@ -674,7 +675,7 @@ describe('upgrade eligibility engine', () => {
 
     expect(result.eligible).toBe(true);
     expect(result.providerIdentityMode).toBe('fallback_no_provider_id');
-    expect(result.availableGapMinutes).toBe(20);
+    expect(result.availableGapMinutes).toBe(35);
   });
 
   it('fails safe when multiple upcoming appointments exist without explicit appointmentId', () => {
@@ -742,7 +743,7 @@ describe('upgrade eligibility engine', () => {
 
     expect(result.eligible).toBe(true);
     expect(result.appointmentId).toBe('appt-b');
-    expect(result.availableGapMinutes).toBe(20);
+    expect(result.availableGapMinutes).toBe(35);
   });
 
   it('does not alias Brickell and Upper West Side by default when provider identity is unavailable', () => {
@@ -1062,7 +1063,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
 
     expect(result.eligible).toBe(true);
     expect(result.appointmentId).toBe('appt-1');
-    expect(result.availableGapMinutes).toBe(25);
+    expect(result.availableGapMinutes).toBe(40);
   });
 
   it('derives provider identity from appointmentServices when provider fields are nested', async () => {

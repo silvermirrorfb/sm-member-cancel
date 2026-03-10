@@ -23,6 +23,7 @@ import { POST as postChatMessage } from '../../../chat/message/route';
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
 const SMS_WEB_HANDOFF_LIMIT = Math.max(Number(process.env.SMS_WEB_HANDOFF_MESSAGE_LIMIT || 10), 1);
 const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member-cancel.vercel.app/widget').trim();
+const SMS_REBOOK_URL = String(process.env.SMS_REBOOK_URL || 'https://booking.silvermirror.com/booking/location').trim();
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 
@@ -51,23 +52,21 @@ function isPendingOfferExpired(offer) {
 function buildDurationPricingText(opportunity) {
   const pricing = opportunity?.pricing || null;
   if (!pricing) return '';
-  const isMember = opportunity?.isMember === true;
   const current = Number(opportunity?.currentDurationMinutes || 0) || null;
   const target = Number(opportunity?.targetDurationMinutes || 0) || null;
-  const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
-  const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
+  const delta = Number(pricing.walkinDelta || 0);
+  const total = Number(pricing.walkinTotal || 0);
   if (!current || !target || !Number.isFinite(delta) || !Number.isFinite(total)) return '';
-  return `${isMember ? 'Member' : 'Non-member'} ${current}->${target}: +$${delta} ($${total} total).`;
+  return `${current}->${target} is +$${delta} ($${total} total; members get 20% off).`;
 }
 
 function buildPendingOfferFinalizeReply(offer) {
   const offerKind = String(offer?.offerKind || 'duration').toLowerCase();
   if (offerKind === 'addon') {
-    const isMember = offer?.isMember === true;
-    const price = isMember ? offer?.pricing?.memberPrice : offer?.pricing?.walkinPrice;
+    const price = Number(offer?.pricing?.walkinPrice || 0);
     const name = String(offer?.addOnName || 'your add-on').trim();
     if (Number.isFinite(price)) {
-      return `Thanks, we got your YES. ${isMember ? 'Member' : 'Non-member'} price for ${name} is $${price}. Our team will confirm before your appointment.`;
+      return `Thanks, we got your YES. ${name} is $${price} (members get 20% off). Our team will confirm before your appointment.`;
     }
     return `Thanks, we got your YES. We received your request for ${name} and our team will confirm before your appointment.`;
   }
@@ -81,12 +80,13 @@ function buildPendingOfferFinalizeReply(offer) {
 
 function buildUpgradeApplyReply(upgradeResult, opportunity) {
   if (upgradeResult?.success) {
-    const pricingText = buildDurationPricingText(opportunity);
-    if (pricingText) return `Confirmed. ${pricingText}`;
-    return `Confirmed. You are upgraded to ${opportunity?.targetDurationMinutes} minutes for your upcoming appointment.`;
+    return "You're all set. See you soon.";
   }
   const reason = String(upgradeResult?.reason || '').toLowerCase();
   if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
+    if (reason === 'upgrade_mutation_failed') {
+      return `I couldn't complete that change instantly. Please use ${SMS_REBOOK_URL} and we'll alert the front desk to assist.`;
+    }
     return buildPendingOfferFinalizeReply(opportunity);
   }
   return 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';

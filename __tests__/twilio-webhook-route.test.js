@@ -158,7 +158,7 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('Confirmed. Member 30->50: +$40 ($139 total).');
+    expect(text).toContain("You're all set. See you soon.");
     expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
   });
@@ -228,7 +228,7 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('Non-member price for Hydradermabrasion is $95.');
+    expect(text).toContain('Hydradermabrasion is $95 (members get 20% off).');
     expect(text).toContain('Our team will confirm before your appointment.');
     expect(session.pendingUpgradeOffer).toBeNull();
     expect(mockLookupMember).not.toHaveBeenCalled();

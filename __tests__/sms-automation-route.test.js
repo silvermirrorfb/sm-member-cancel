@@ -10,6 +10,8 @@ const mockFormatProfileForPrompt = vi.fn();
 const mockBindPhoneToSession = vi.fn();
 const mockGetSessionIdForPhone = vi.fn();
 const mockGetUpgradeOfferState = vi.fn();
+const mockGetUpsellCooldown = vi.fn();
+const mockMarkUpsellInitialSent = vi.fn();
 const mockMarkUpgradeOfferEvent = vi.fn();
 const mockSendTwilioSms = vi.fn();
 const mockEnqueueOutboundCandidate = vi.fn();
@@ -37,6 +39,8 @@ vi.mock('../src/lib/sms-sessions.js', () => ({
   bindPhoneToSession: (...args) => mockBindPhoneToSession(...args),
   getSessionIdForPhone: (...args) => mockGetSessionIdForPhone(...args),
   getUpgradeOfferState: (...args) => mockGetUpgradeOfferState(...args),
+  getUpsellCooldown: (...args) => mockGetUpsellCooldown(...args),
+  markUpsellInitialSent: (...args) => mockMarkUpsellInitialSent(...args),
   markUpgradeOfferEvent: (...args) => mockMarkUpgradeOfferEvent(...args),
 }));
 
@@ -65,6 +69,8 @@ describe('sms automation route', () => {
     mockBuildSystemPromptWithProfile.mockReturnValue('prompt');
     mockCreateSession.mockReturnValue({ id: 'sess-1', status: 'active' });
     mockGetUpgradeOfferState.mockReturnValue(null);
+    mockGetUpsellCooldown.mockReturnValue(null);
+    mockMarkUpsellInitialSent.mockReturnValue(null);
     mockMarkUpgradeOfferEvent.mockReturnValue(null);
     mockResolveBoulevardLocationInput.mockImplementation(value => {
       const raw = String(value || '').trim();
@@ -512,9 +518,10 @@ describe('sms automation route', () => {
     });
     mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
       eligible: false,
-      reason: 'insufficient_gap',
+      reason: 'no_upgrade_target_for_duration',
       appointmentId: 'appt-9',
-      currentDurationMinutes: 30,
+      currentDurationMinutes: 50,
+      availableGapMinutes: 10,
       startOn: '2026-03-09T18:00:00Z',
       isMember: false,
     });
@@ -528,7 +535,7 @@ describe('sms automation route', () => {
       body: JSON.stringify({
         dryRun: true,
         offerType: 'addon',
-        addOnCode: 'hydradermabrasion',
+        addOnCode: 'antioxidant_peel',
         now: '2026-03-09T15:00:00Z',
         sendTimezone: 'America/New_York',
         sendStartHour: 9,
@@ -549,8 +556,9 @@ describe('sms automation route', () => {
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].offerKind).toBe('addon');
-    expect(body.results[0].addOnCode).toBe('hydradermabrasion');
-    expect(body.results[0].message).toContain('Hydradermabrasion');
-    expect(body.results[0].message).toContain('$95 non-member');
+    expect(body.results[0].addOnCode).toBe('antioxidant_peel');
+    expect(body.results[0].message).toContain('Antioxidant Peel');
+    expect(body.results[0].message).toContain('$50');
+    expect(body.results[0].message).toContain('Members get 20% off');
   });
 });

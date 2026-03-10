@@ -1,10 +1,13 @@
 const PHONE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_SID_TTL_MS = 24 * 60 * 60 * 1000;
 const UPGRADE_OFFER_STATE_TTL_MS = 48 * 60 * 60 * 1000;
+const UPSELL_COOLDOWN_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
+const UPSELL_COOLDOWN_TTL_MS = 35 * 24 * 60 * 60 * 1000;
 
 const phoneToSession = new Map();
 const sidToReply = new Map();
 const offerStateByKey = new Map();
+const upsellCooldownByPhone = new Map();
 
 function normalizePhone(raw) {
   const digits = String(raw || '').replace(/\D/g, '');
@@ -107,6 +110,35 @@ function markUpgradeOfferEvent(phone, appointmentId, eventName, atIso = null) {
   return { ...row };
 }
 
+function getUpsellCooldown(phone) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) return null;
+  const row = upsellCooldownByPhone.get(normalizedPhone);
+  if (!row) return null;
+  if (Date.now() - row.updatedAt > UPSELL_COOLDOWN_TTL_MS) {
+    upsellCooldownByPhone.delete(normalizedPhone);
+    return null;
+  }
+  return {
+    ...row,
+    cooldownActive: Date.now() - new Date(row.lastInitialSentAt).getTime() < UPSELL_COOLDOWN_WINDOW_MS,
+  };
+}
+
+function markUpsellInitialSent(phone, appointmentId, atIso = null) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) return null;
+  const nowIso = atIso || new Date().toISOString();
+  const row = {
+    phone: normalizedPhone,
+    appointmentId: String(appointmentId || '').trim() || null,
+    lastInitialSentAt: nowIso,
+    updatedAt: Date.now(),
+  };
+  upsellCooldownByPhone.set(normalizedPhone, row);
+  return { ...row };
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [key, row] of phoneToSession.entries()) {
@@ -118,6 +150,9 @@ setInterval(() => {
   for (const [key, row] of offerStateByKey.entries()) {
     if (now - row.updatedAt > UPGRADE_OFFER_STATE_TTL_MS) offerStateByKey.delete(key);
   }
+  for (const [phone, row] of upsellCooldownByPhone.entries()) {
+    if (now - row.updatedAt > UPSELL_COOLDOWN_TTL_MS) upsellCooldownByPhone.delete(phone);
+  }
 }, 5 * 60 * 1000);
 
 export {
@@ -128,4 +163,6 @@ export {
   getReplyForMessageSid,
   getUpgradeOfferState,
   markUpgradeOfferEvent,
+  getUpsellCooldown,
+  markUpsellInitialSent,
 };

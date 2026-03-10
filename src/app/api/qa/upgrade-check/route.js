@@ -21,7 +21,7 @@ function parseBodyValue(value) {
 }
 
 function isValidTargetDuration(value) {
-  return value === 50 || value === 90;
+  return value === 50;
 }
 
 function parseNow(value) {
@@ -127,7 +127,7 @@ export async function GET() {
     method: 'POST',
     notes: 'Read-only Boulevard appointment eligibility check for upgrade QA.',
     required: ['firstName', 'lastName', 'email or phone'],
-    optional: ['appointmentId', 'targetDurationMinutes (50|90)', 'locationId', 'now', 'windowHours', 'syntheticMode'],
+    optional: ['appointmentId', 'targetDurationMinutes (50 only)', 'locationId', 'now', 'windowHours', 'syntheticMode'],
     syntheticModes: {
       eligibility: ['syntheticProfile', 'syntheticAppointments'],
       lookup: ['firstName', 'lastName', 'email', 'syntheticCandidates'],
@@ -260,7 +260,7 @@ export async function POST(request) {
     }
     if (targetDurationMinutes !== null && !isValidTargetDuration(targetDurationMinutes)) {
       const payload = {
-        error: 'targetDurationMinutes must be 50 or 90 when provided.',
+        error: 'targetDurationMinutes must be 50 when provided.',
         requestId,
       };
       if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 400, payload);

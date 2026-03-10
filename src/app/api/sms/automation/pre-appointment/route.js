@@ -11,6 +11,8 @@ import {
   bindPhoneToSession,
   getSessionIdForPhone,
   getUpgradeOfferState,
+  getUpsellCooldown,
+  markUpsellInitialSent,
   markUpgradeOfferEvent,
 } from '../../../../../lib/sms-sessions';
 import { sendTwilioSms } from '../../../../../lib/twilio';
@@ -27,26 +29,32 @@ import {
 } from '../../../../../lib/sms-outbound-queue';
 import { checkKlaviyoSmsOptIn } from '../../../../../lib/klaviyo';
 
-const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 10);
+const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
+const ADDON_MIN_GAP_MINUTES = Number(process.env.SMS_ADDON_MIN_GAP_MINUTES || 5);
 const ADDON_CATALOG = {
-  hydradermabrasion: { code: 'hydradermabrasion', name: 'Hydradermabrasion', memberPrice: 76, walkinPrice: 95 },
-  dermaplaning: { code: 'dermaplaning', name: 'Dermaplaning', memberPrice: 76, walkinPrice: 95 },
-  custom_jelly_mask: { code: 'custom_jelly_mask', name: 'Custom Jelly Mask', memberPrice: 40, walkinPrice: 50 },
+  antioxidant_peel: { code: 'antioxidant_peel', name: 'Antioxidant Peel', memberPrice: 40, walkinPrice: 50 },
+  neck_firming: { code: 'neck_firming', name: 'Neck Firming', memberPrice: 20, walkinPrice: 25 },
   eye_puff_minimizer: { code: 'eye_puff_minimizer', name: 'Eye Puff Minimizer', memberPrice: 40, walkinPrice: 50 },
-  extra_extractions: { code: 'extra_extractions', name: 'Extra Extractions', memberPrice: 20, walkinPrice: 25 },
+  lip_plump_and_scrub: { code: 'lip_plump_and_scrub', name: 'Lip Plump and Scrub', memberPrice: 28, walkinPrice: 35 },
 };
+const ADDON_PRIORITY_50_MIN = [
+  'antioxidant_peel',
+  'neck_firming',
+  'eye_puff_minimizer',
+  'lip_plump_and_scrub',
+];
 const ADDON_CODE_ALIASES = {
-  hydradermabrasion: 'hydradermabrasion',
-  hydra: 'hydradermabrasion',
-  dermaplaning: 'dermaplaning',
-  jellymask: 'custom_jelly_mask',
-  customjellymask: 'custom_jelly_mask',
-  custom_jelly_mask: 'custom_jelly_mask',
+  antioxidant: 'antioxidant_peel',
+  antioxidant_peel: 'antioxidant_peel',
+  peel: 'antioxidant_peel',
+  neck: 'neck_firming',
+  neck_firming: 'neck_firming',
   eyepuff: 'eye_puff_minimizer',
   eyepuffminimizer: 'eye_puff_minimizer',
   eye_puff_minimizer: 'eye_puff_minimizer',
-  extractions: 'extra_extractions',
-  extra_extractions: 'extra_extractions',
+  lip: 'lip_plump_and_scrub',
+  lip_plump: 'lip_plump_and_scrub',
+  lip_plump_and_scrub: 'lip_plump_and_scrub',
 };
 
 function isAuthorized(request) {
@@ -79,7 +87,7 @@ function normalizeOfferType(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (raw === 'addon') return 'addon';
   if (raw === 'auto') return 'auto';
-  return 'duration';
+  return 'auto';
 }
 
 function normalizeAddonCode(value) {
@@ -103,16 +111,18 @@ function isAddonFallbackReason(opportunity) {
   ].includes(reason);
 }
 
-function pickDefaultAddonCode(opportunity) {
-  const currentDuration = Number(opportunity?.currentDurationMinutes || 0);
-  if (currentDuration > 30) return 'custom_jelly_mask';
-  return 'hydradermabrasion';
-}
-
 function buildAddonOffer(profile, opportunity, options = {}) {
+  const currentDuration = Number(opportunity?.currentDurationMinutes || 0) || null;
+  const availableGapMinutes = Number(opportunity?.availableGapMinutes);
+  const gapUnlimited = opportunity?.gapUnlimited === true;
+  const hasAddonOnBooking = opportunity?.hasAddonOnBooking === true;
+  if (currentDuration !== 50) return null;
+  if (hasAddonOnBooking) return null;
+  if (!gapUnlimited && (!Number.isFinite(availableGapMinutes) || availableGapMinutes < ADDON_MIN_GAP_MINUTES)) return null;
+
   const requestedCode = normalizeAddonCode(options.addOnCode || '');
-  const selectedCode = requestedCode || pickDefaultAddonCode(opportunity);
-  const addon = ADDON_CATALOG[selectedCode];
+  const fallbackCode = requestedCode || ADDON_PRIORITY_50_MIN.find(code => Boolean(ADDON_CATALOG[code]));
+  const addon = fallbackCode ? ADDON_CATALOG[fallbackCode] : null;
   if (!addon) return null;
   if (!opportunity?.appointmentId || !opportunity?.startOn) return null;
 
@@ -123,7 +133,7 @@ function buildAddonOffer(profile, opportunity, options = {}) {
     offerKind: 'addon',
     appointmentId: opportunity.appointmentId || null,
     startOn: opportunity.startOn || null,
-    currentDurationMinutes: Number(opportunity?.currentDurationMinutes || 0) || null,
+    currentDurationMinutes: currentDuration,
     isMember,
     addOnCode: addon.code,
     addOnName: addon.name,
@@ -157,34 +167,26 @@ function formatTimeForGuest(iso, timeZone = 'America/New_York') {
 function buildDurationOfferMessage(opportunity, options = {}) {
   if (!opportunity?.pricing) return null;
   const reminder = options.reminder === true;
-  const isMember = opportunity.isMember === true;
+  const firstName = asText(options.firstName);
   const pricing = opportunity.pricing;
-  const total = isMember ? pricing.memberTotal : pricing.walkinTotal;
-  const delta = isMember ? pricing.memberDelta : pricing.walkinDelta;
-  const currentDuration = opportunity.currentDurationMinutes;
-  const targetDuration = opportunity.targetDurationMinutes;
-  const timeText = formatTimeForGuest(opportunity.startOn, options.timeZone || 'America/New_York');
-  const opener = reminder
-    ? `Silver Mirror reminder: room is still open after your ${timeText} appointment.`
-    : `Silver Mirror: room is open after your ${timeText} appointment.`;
-  const priceLine = isMember
-    ? `Member upgrade ${currentDuration}->${targetDuration} is +$${delta} ($${total} total).`
-    : `Non-member upgrade ${currentDuration}->${targetDuration} is +$${delta} ($${total} total).`;
-  return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
+  const delta = Number(pricing.walkinDelta || 50);
+  const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
+  if (reminder) {
+    return `${greeting} reminder: space is still open to extend your facial today to 50-Min Esthetician's Choice (+$${delta}; members get 20% off). Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
+  }
+  return `${greeting} we have space to extend your facial today. Upgrade to 50-Min Esthetician's Choice (+$${delta}; members get 20% off). Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
 }
 
 function buildAddonOfferMessage(offer, options = {}) {
   if (!offer?.pricing || !offer?.addOnName) return null;
   const reminder = options.reminder === true;
-  const isMember = offer.isMember === true;
-  const timeText = formatTimeForGuest(offer.startOn, options.timeZone || 'America/New_York');
-  const opener = reminder
-    ? `Silver Mirror reminder: add-on opening for your ${timeText} facial.`
-    : `Silver Mirror: add-on opening for your ${timeText} facial.`;
-  const priceLine = isMember
-    ? `${offer.addOnName} is $${offer.pricing.memberPrice} member.`
-    : `${offer.addOnName} is $${offer.pricing.walkinPrice} non-member.`;
-  return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} min or NO.`;
+  const firstName = asText(options.firstName);
+  const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
+  const price = Number(offer?.pricing?.walkinPrice || 0);
+  if (reminder) {
+    return `${greeting} reminder: want to add ${offer.addOnName} today for $${price}? Members get 20% off. Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
+  }
+  return `${greeting} want to add ${offer.addOnName} today for $${price}? Members get 20% off. Reply YES in ${OFFER_WINDOW_MINUTES} min.`;
 }
 
 function buildOutboundOfferMessage(offer, options = {}) {
@@ -298,7 +300,7 @@ export async function POST(request) {
     const statusCallback = asText(body.statusCallback) || null;
     const sendTimezone = asText(body.sendTimezone) || process.env.SMS_OUTBOUND_TIMEZONE || 'America/New_York';
     const sendStartHour = parseHour(body.sendStartHour, parseHour(process.env.SMS_OUTBOUND_START_HOUR, 9));
-    const sendEndHour = parseHour(body.sendEndHour, parseHour(process.env.SMS_OUTBOUND_END_HOUR, 17));
+    const sendEndHour = parseHour(body.sendEndHour, parseHour(process.env.SMS_OUTBOUND_END_HOUR, 19));
     const enforceSendWindow = body.enforceSendWindow !== false;
     const queueWhenOutsideWindow = asBool(body.queueWhenOutsideWindow, true);
     const processQueued = asBool(body.processQueued, true);
@@ -589,12 +591,19 @@ export async function POST(request) {
       }
 
       if (!selectedOffer) {
+        const currentDuration = Number(opportunity?.currentDurationMinutes || 0) || null;
+        const addonGap = Number(opportunity?.availableGapMinutes);
+        const addonUnavailableReason = opportunity?.hasAddonOnBooking
+          ? 'addon_already_on_booking'
+          : (!opportunity?.gapUnlimited && Number.isFinite(addonGap) && addonGap < ADDON_MIN_GAP_MINUTES)
+            ? 'insufficient_addon_gap'
+            : 'addon_offer_unavailable';
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           profile: { clientId: profile.clientId || null, phone: profile.phone || null, tier: profile.tier || null },
           status: 'skipped',
-          reason: effectiveOfferType === 'addon'
-            ? 'addon_offer_unavailable'
+          reason: (effectiveOfferType === 'addon' || currentDuration === 50)
+            ? addonUnavailableReason
             : (opportunity?.reason || 'not_eligible'),
           matchedContact,
           source: work.source,
@@ -697,6 +706,27 @@ export async function POST(request) {
       const hasPriorOffer = Boolean(offerState?.initialSentAt || hasPendingForAppointment);
       const shouldUseReminder = enableOneHourReminder && timing.isReminderWindow && hasPriorOffer;
       const offerType = shouldUseReminder ? 'reminder' : 'initial';
+      const cooldown = getUpsellCooldown(profilePhone);
+      const cooldownActive = cooldown?.cooldownActive === true;
+      const sameAppointmentAsCooldown = Boolean(
+        cooldown?.appointmentId &&
+        appointmentId &&
+        String(cooldown.appointmentId) === String(appointmentId),
+      );
+      if (offerType === 'initial' && !hasPriorOffer && cooldownActive && !sameAppointmentAsCooldown) {
+        results.push({
+          candidate: { firstName, lastName, email: email || null, phone: phone || null },
+          profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+          status: 'skipped',
+          reason: 'upsell_cooldown_4w',
+          sessionId: session.id,
+          appointmentId,
+          matchedContact,
+          source: work.source,
+          queueId: work.queueId,
+        });
+        continue;
+      }
 
       if (offerType === 'initial' && hasPendingForAppointment) {
         results.push({
@@ -744,6 +774,7 @@ export async function POST(request) {
       const offerMessage = buildOutboundOfferMessage(selectedOffer, {
         reminder: offerType === 'reminder',
         timeZone: sendTimezone,
+        firstName,
       });
       if (!offerMessage) {
         results.push({
@@ -811,6 +842,7 @@ export async function POST(request) {
         });
         if (appointmentId) {
           markUpgradeOfferEvent(profilePhone, appointmentId, offerType === 'reminder' ? 'reminder_sent' : 'initial_sent');
+          if (offerType === 'initial') markUpsellInitialSent(profilePhone, appointmentId);
         }
         const nowIso = new Date().toISOString();
         session.pendingUpgradeOffer = {
