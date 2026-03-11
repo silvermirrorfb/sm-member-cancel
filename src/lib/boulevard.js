@@ -1357,6 +1357,123 @@ async function getSchemaQueryTypeName(apiUrl, headers) {
   };
 }
 
+async function getSchemaMutationTypeName(apiUrl, headers) {
+  const query = `
+    query IntrospectSchemaMutationType {
+      __schema {
+        mutationType {
+          name
+        }
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(apiUrl, headers, query, {}, { silentErrors: true, returnErrors: true });
+  if (data?.__error) {
+    return { name: null, error: data.__error };
+  }
+  return {
+    name: String(data?.data?.__schema?.mutationType?.name || '').trim() || null,
+    error: null,
+  };
+}
+
+function summarizeMutationField(detail) {
+  if (!detail) return null;
+  return {
+    exists: true,
+    namedType: detail.namedType || null,
+    args: Array.isArray(detail.args)
+      ? detail.args.map(arg => ({
+          name: arg.name || null,
+          required: arg.required === true,
+          typeText: arg.typeText || null,
+          namedType: arg.namedType || null,
+        }))
+      : [],
+  };
+}
+
+async function probeCancelRebookCapabilities() {
+  const auth = getBoulevardAuthContext();
+  if (!auth) return { ok: false, reason: 'boulevard_not_configured' };
+
+  let mutationTypeName = 'Mutation';
+  let mutationFieldSet = await getTypeFieldSet(auth.apiUrl, auth.headers, mutationTypeName);
+  let mutationRootSource = mutationFieldSet ? 'mutation_type_default' : null;
+  let mutationIntrospectionError = null;
+
+  if (!mutationFieldSet) {
+    const schemaRoot = await getSchemaMutationTypeName(auth.apiUrl, auth.headers);
+    if (schemaRoot?.name) {
+      mutationTypeName = schemaRoot.name;
+      mutationFieldSet = await getTypeFieldSet(auth.apiUrl, auth.headers, mutationTypeName);
+      mutationRootSource = mutationFieldSet ? 'mutation_type_schema' : null;
+    } else {
+      mutationTypeName = 'RootMutationType';
+      mutationFieldSet = await getTypeFieldSet(auth.apiUrl, auth.headers, mutationTypeName);
+      mutationRootSource = mutationFieldSet ? 'mutation_type_fallback' : null;
+      if (schemaRoot?.error) {
+        mutationIntrospectionError = {
+          stage: schemaRoot.error?.stage || null,
+          status: schemaRoot.error?.status || null,
+          errors: compactGraphQLErrorPayload(schemaRoot.error),
+          bodyPreview: schemaRoot.error?.bodyPreview || null,
+        };
+      }
+    }
+  }
+
+  if (!mutationFieldSet) {
+    return {
+      ok: false,
+      reason: 'mutation_type_introspection_failed',
+      mutationTypeName,
+      mutationRootSource,
+      mutationIntrospectionError,
+    };
+  }
+
+  const mutationFieldDetailMap = await getTypeFieldDetailMap(auth.apiUrl, auth.headers, mutationTypeName);
+  const fieldNames = [
+    'appointmentCancel',
+    'cancelAppointment',
+    'appointmentUpdate',
+    'updateAppointment',
+    'appointmentCreate',
+    'createAppointment',
+    'bookingCreate',
+    'bookingCreateFromAppointment',
+    'bookingAddService',
+  ];
+
+  const fieldSummary = {};
+  for (const fieldName of fieldNames) {
+    const detail = mutationFieldDetailMap?.get(fieldName) || null;
+    fieldSummary[fieldName] = summarizeMutationField(detail);
+  }
+
+  const hasCancelMutation = Boolean(fieldSummary.appointmentCancel || fieldSummary.cancelAppointment);
+  const hasCreateMutation = Boolean(
+    fieldSummary.appointmentCreate ||
+    fieldSummary.createAppointment ||
+    fieldSummary.bookingCreate ||
+    fieldSummary.bookingCreateFromAppointment,
+  );
+  const hasServiceMutation = Boolean(fieldSummary.bookingAddService);
+  const canAttemptCancelRebook = hasCancelMutation && (hasCreateMutation || hasServiceMutation);
+
+  return {
+    ok: true,
+    mutationTypeName,
+    mutationRootSource,
+    hasCancelMutation,
+    hasCreateMutation,
+    hasServiceMutation,
+    canAttemptCancelRebook,
+    fields: fieldSummary,
+  };
+}
+
 function buildQueryRootStrategies(rootFieldDetail, rootLooksLikeConnection) {
   const strategies = [];
   const seen = new Set();
@@ -2489,6 +2606,7 @@ export {
   lookupMember,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
+  probeCancelRebookCapabilities,
   resolveNameScanFallbackCandidate,
   reverifyAndApplyUpgradeForProfile,
   verifyMemberIdentity,

@@ -4,6 +4,7 @@ import {
   lookupMember,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
+  probeCancelRebookCapabilities,
   resolveNameScanFallbackCandidate,
   buildProfile,
   resolveBoulevardLocationInput,
@@ -30,6 +31,14 @@ function parseNow(value) {
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
+}
+
+function parseBooleanFlag(value) {
+  if (value === true) return true;
+  if (value === 1) return true;
+  if (value === false || value === 0) return false;
+  const raw = parseBodyValue(value).toLowerCase();
+  return raw === 'true' || raw === '1' || raw === 'yes';
 }
 
 function stableStringify(value) {
@@ -127,7 +136,15 @@ export async function GET() {
     method: 'POST',
     notes: 'Read-only Boulevard appointment eligibility check for upgrade QA.',
     required: ['firstName', 'lastName', 'email or phone'],
-    optional: ['appointmentId', 'targetDurationMinutes (50 only)', 'locationId', 'now', 'windowHours', 'syntheticMode'],
+    optional: [
+      'appointmentId',
+      'targetDurationMinutes (50 only)',
+      'locationId',
+      'now',
+      'windowHours',
+      'syntheticMode',
+      'probeCancelRebook',
+    ],
     syntheticModes: {
       eligibility: ['syntheticProfile', 'syntheticAppointments'],
       lookup: ['firstName', 'lastName', 'email', 'syntheticCandidates'],
@@ -168,6 +185,7 @@ export async function POST(request) {
     const resolvedLocationId = locationResolution.locationId;
     const syntheticMode = parseSyntheticMode(body.syntheticMode);
     const debugMode = body.debug === true || String(body.debug || '').toLowerCase() === 'true';
+    const probeCancelRebook = parseBooleanFlag(body.probeCancelRebook);
     const targetDurationMinutes = Number.isFinite(Number(body.targetDurationMinutes))
       ? Number(body.targetDurationMinutes)
       : null;
@@ -184,6 +202,7 @@ export async function POST(request) {
       now: nowIso,
       windowHours,
       debugMode,
+      probeCancelRebook,
       syntheticMode,
       syntheticProfile: body.syntheticProfile || null,
       syntheticAppointments: body.syntheticAppointments || null,
@@ -283,6 +302,10 @@ export async function POST(request) {
       );
     }
 
+    const cancelRebookProbe = probeCancelRebook
+      ? await probeCancelRebookCapabilities()
+      : null;
+
     if (syntheticMode === 'eligibility') {
       if (!body.syntheticProfile || typeof body.syntheticProfile !== 'object' || !Array.isArray(body.syntheticAppointments)) {
         const payload = {
@@ -334,9 +357,11 @@ export async function POST(request) {
           now: nowIso || null,
           windowHours: windowHours || null,
           debug: debugMode,
+          probeCancelRebook,
           readOnly: true,
         },
         opportunity,
+        ...(probeCancelRebook ? { cancelRebookProbe } : {}),
       };
       if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 200, payload);
       return respond(payload, 200, remaining);
@@ -364,6 +389,7 @@ export async function POST(request) {
           syntheticMode,
           synthetic: true,
           debug: debugMode,
+          probeCancelRebook,
           readOnly: true,
         },
         syntheticLookup: {
@@ -381,6 +407,7 @@ export async function POST(request) {
               }
             : null,
         },
+        ...(probeCancelRebook ? { cancelRebookProbe } : {}),
       };
       if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 200, payload);
       return respond(payload, 200, remaining);
@@ -404,7 +431,23 @@ export async function POST(request) {
     }
 
     if (!profile) {
-      const payload = { ok: false, reason: 'member_not_found', requestId };
+      const payload = {
+        ok: false,
+        reason: 'member_not_found',
+        requestId,
+        ...(probeCancelRebook
+          ? {
+              qa: {
+                requestId,
+                idempotencyKey: idempotencyKey || null,
+                probeCancelRebook,
+                debug: debugMode,
+                readOnly: true,
+              },
+              cancelRebookProbe,
+            }
+          : {}),
+      };
       if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 404, payload);
       return respond(payload, 404, remaining);
     }
@@ -452,9 +495,11 @@ export async function POST(request) {
         now: nowIso || null,
         windowHours: windowHours || null,
         debug: debugMode,
+        probeCancelRebook,
         readOnly: true,
       },
       opportunity: responseOpportunity,
+      ...(probeCancelRebook ? { cancelRebookProbe } : {}),
     };
     if (idempotencyKey) writeIdempotencyEntry(idempotencyKey, idempotencyFingerprint, 200, payload);
     return respond(payload, 200, remaining);

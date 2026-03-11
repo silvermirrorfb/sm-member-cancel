@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockEvaluateUpgradeEligibilityFromAppointments = vi.fn();
+const mockProbeCancelRebookCapabilities = vi.fn();
 const mockResolveNameScanFallbackCandidate = vi.fn();
 const mockBuildProfile = vi.fn();
 const mockResolveBoulevardLocationInput = vi.fn();
@@ -11,6 +12,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
   evaluateUpgradeEligibilityFromAppointments: (...args) => mockEvaluateUpgradeEligibilityFromAppointments(...args),
+  probeCancelRebookCapabilities: (...args) => mockProbeCancelRebookCapabilities(...args),
   resolveNameScanFallbackCandidate: (...args) => mockResolveNameScanFallbackCandidate(...args),
   buildProfile: (...args) => mockBuildProfile(...args),
   resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
@@ -32,6 +34,14 @@ describe('QA upgrade-check route', () => {
     mockBuildProfile.mockImplementation(input => input);
     mockResolveNameScanFallbackCandidate.mockReturnValue({ candidate: null, strategy: null, reason: 'no_match' });
     mockEvaluateUpgradeEligibilityFromAppointments.mockReturnValue({ eligible: false, reason: 'synthetic_default' });
+    mockProbeCancelRebookCapabilities.mockResolvedValue({
+      ok: true,
+      canAttemptCancelRebook: false,
+      hasCancelMutation: false,
+      hasCreateMutation: false,
+      hasServiceMutation: false,
+      fields: {},
+    });
     mockResolveBoulevardLocationInput.mockImplementation(value => {
       const raw = String(value || '').trim();
       if (!raw) return { locationId: '', locationName: null, official: false };
@@ -398,5 +408,58 @@ describe('QA upgrade-check route', () => {
     expect(body.syntheticLookup.strategy).toBe('name_scan_exact');
     expect(mockResolveNameScanFallbackCandidate).toHaveBeenCalledTimes(1);
     expect(mockLookupMember).not.toHaveBeenCalled();
+  });
+
+  it('includes cancel/rebook probe when probeCancelRebook=true', async () => {
+    process.env.NODE_ENV = 'development';
+    mockLookupMember.mockResolvedValue({
+      name: 'Jane Smith',
+      firstName: 'Jane',
+      email: 'jane@example.com',
+      phone: '15555550123',
+      clientId: 'client-1',
+      tier: '30',
+      accountStatus: 'active',
+      location: 'Flatiron',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: false,
+      reason: 'no_upcoming_appointment_in_window',
+    });
+    mockProbeCancelRebookCapabilities.mockResolvedValue({
+      ok: true,
+      canAttemptCancelRebook: true,
+      hasCancelMutation: true,
+      hasCreateMutation: true,
+      hasServiceMutation: false,
+      fields: {
+        appointmentCancel: { exists: true, args: [{ name: 'id', required: true }] },
+        bookingCreate: { exists: true, args: [{ name: 'input', required: true }] },
+      },
+    });
+
+    const req = new Request('http://localhost/api/qa/upgrade-check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        firstName: 'Jane',
+        lastName: 'Smith',
+        email: 'jane@example.com',
+        probeCancelRebook: true,
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.qa.probeCancelRebook).toBe(true);
+    expect(body.cancelRebookProbe).toEqual(expect.objectContaining({
+      ok: true,
+      canAttemptCancelRebook: true,
+      hasCancelMutation: true,
+      hasCreateMutation: true,
+    }));
+    expect(mockProbeCancelRebookCapabilities).toHaveBeenCalledTimes(1);
   });
 });
