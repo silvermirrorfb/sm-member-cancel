@@ -27,6 +27,7 @@ const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const MANUAL_UPGRADE_REASONS = new Set(['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed']);
+const YES_NO_PENDING_MANUAL_REPLY = 'Thanks for replying YES. We received your request and our team will confirm it before your appointment.';
 const ALLOWED_ADDON_NAME_SET = new Set([
   'antioxidant peel',
   'neck firming',
@@ -399,9 +400,19 @@ export async function POST(request) {
 
         const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
         if (!opportunity?.eligible) {
-          const noSlotTwiml = buildTwimlMessage('Thanks for replying. I checked and there is no upgrade slot available right now.');
-          if (messageSid) storeReplyForMessageSid(messageSid, noSlotTwiml);
-          return new NextResponse(noSlotTwiml, {
+          // If YES arrives without recoverable pending context, fail safe to approved manual confirmation copy.
+          const incident = buildUpgradeSupportIncident({
+            sessionId,
+            from,
+            incomingText: intentText,
+            profile,
+            opportunity,
+            upgradeResult: { success: false, reason: opportunity?.reason || 'no_opportunity_after_yes' },
+          });
+          queueSupportIncident(incident);
+          const fallbackTwiml = buildTwimlMessage(YES_NO_PENDING_MANUAL_REPLY);
+          if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
+          return new NextResponse(fallbackTwiml, {
             status: 200,
             headers: { 'Content-Type': 'text/xml; charset=utf-8' },
           });

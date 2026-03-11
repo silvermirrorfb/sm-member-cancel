@@ -234,6 +234,43 @@ describe('twilio webhook route', () => {
     expect(session.lastUpgradeOfferAppointmentId).toBe('appt-pending-1');
   });
 
+  it('returns approved manual confirmation copy when YES has no eligible opportunity', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      fullName: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Upper West Side',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: false,
+      reason: 'no_upcoming_appointment_in_window',
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-no-slot',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('our team will confirm');
+    expect(text).not.toContain('no upgrade slot available');
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+  });
+
   it('returns human-finalization copy when upgrade mutation is disabled', async () => {
     process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
     const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
