@@ -2164,6 +2164,48 @@ async function tryApplyAppointmentUpgradeMutation(apiUrl, headers, appointmentId
   return { applied: false, reason: 'upgrade_mutation_failed' };
 }
 
+async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
+  const id = String(appointmentId || '').trim();
+  if (!id) return null;
+  const query = `
+    query FetchAppointmentContext($id: ID!) {
+      appointment(id: $id) {
+        id
+        clientId
+        locationId
+        startAt
+        endAt
+        appointmentServices {
+          id
+          serviceId
+          staffId
+        }
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(
+    apiUrl,
+    headers,
+    query,
+    { id },
+    { silentErrors: true, returnErrors: true },
+  );
+  if (!data || data.__error) return null;
+  const appointment = data?.data?.appointment || null;
+  if (!appointment?.id) return null;
+  const services = Array.isArray(appointment.appointmentServices) ? appointment.appointmentServices : [];
+  const primaryService = services.find(service => String(service?.staffId || '').trim()) || services[0] || null;
+  return {
+    appointmentId: String(appointment.id || '').trim() || null,
+    clientId: String(appointment.clientId || '').trim() || null,
+    locationId: String(appointment.locationId || '').trim() || null,
+    startOn: String(appointment.startAt || '').trim() || null,
+    endOn: String(appointment.endAt || '').trim() || null,
+    providerId: String(primaryService?.staffId || '').trim() || null,
+    serviceId: String(primaryService?.serviceId || '').trim() || null,
+  };
+}
+
 function toBoulevardNaiveDateTime(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -2572,7 +2614,21 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
 
   const applied = await tryApplyAppointmentUpgradeMutation(auth.apiUrl, auth.headers, fresh.appointmentId, serviceId);
   if (!applied.applied && ENABLE_CANCEL_REBOOK_FALLBACK) {
-    const cancelRebookApplied = await tryApplyUpgradeViaCancelRebook(auth.apiUrl, auth.headers, fresh, serviceId);
+    const appointmentContext = await fetchAppointmentContextById(auth.apiUrl, auth.headers, fresh.appointmentId);
+    const fallbackOpportunity = {
+      ...fresh,
+      clientId: fresh.clientId || appointmentContext?.clientId || null,
+      locationId: fresh.locationId || appointmentContext?.locationId || null,
+      providerId: fresh.providerId || appointmentContext?.providerId || null,
+      startOn: fresh.startOn || appointmentContext?.startOn || null,
+      endOn: fresh.endOn || appointmentContext?.endOn || null,
+    };
+    const cancelRebookApplied = await tryApplyUpgradeViaCancelRebook(
+      auth.apiUrl,
+      auth.headers,
+      fallbackOpportunity,
+      serviceId,
+    );
     if (cancelRebookApplied.applied) {
       return {
         success: true,
