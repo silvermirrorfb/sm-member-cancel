@@ -364,6 +364,39 @@ export async function POST(request) {
           });
         }
 
+        // Deterministic YES handling: if we have a live pending offer, reverify against
+        // that exact appointment/target instead of doing a fresh generic opportunity pick.
+        if (isAffirmative(intentText) && hasPendingOffer) {
+          const reverifyOffer = {
+            appointmentId: pendingOffer.appointmentId || null,
+            targetDurationMinutes: pendingOffer.targetDurationMinutes || null,
+          };
+          const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, reverifyOffer);
+          if (!upgradeResult?.success && isManualUpgradeFallbackReason(upgradeResult?.reason)) {
+            const incident = buildUpgradeSupportIncident({
+              sessionId,
+              from,
+              incomingText: intentText,
+              profile,
+              pendingOffer,
+              opportunity: upgradeResult?.opportunity || null,
+              upgradeResult,
+            });
+            queueSupportIncident(incident);
+          }
+          if (activeSession) {
+            activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
+            activeSession.pendingUpgradeOffer = null;
+          }
+          const upgradeText = buildUpgradeApplyReply(upgradeResult, upgradeResult?.opportunity || null, pendingOffer);
+          const upgradeTwiml = buildTwimlMessage(upgradeText);
+          if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
+          return new NextResponse(upgradeTwiml, {
+            status: 200,
+            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          });
+        }
+
         const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
         if (!opportunity?.eligible) {
           const noSlotTwiml = buildTwimlMessage('Thanks for replying. I checked and there is no upgrade slot available right now.');
