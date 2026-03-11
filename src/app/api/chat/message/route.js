@@ -30,7 +30,6 @@ const MAX_RECOVERY_TOTAL_CHARS = 30000;
 const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
 const HELLO_EMAIL = 'hello@silvermirror.com';
 const SUPPORT_PHONE = '(888) 677-0055';
-const SMS_REBOOK_URL = String(process.env.SMS_REBOOK_URL || 'https://booking.silvermirror.com/booking/location').trim();
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
 const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
 const PAUSE_CREDIT_KEYWORDS = /\b(credit|credits)\b/i;
@@ -214,10 +213,10 @@ function buildUpgradeSuccessMessage(result, pendingOffer = null) {
 
 function buildUpgradeUnavailableMessage(result = null, pendingOffer = null) {
     const reason = String(result?.reason || '').toLowerCase();
-    if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
-      if (reason === 'upgrade_mutation_failed') {
-        return `I couldn't complete that change instantly. Please use ${SMS_REBOOK_URL} and we'll alert the front desk to assist.`;
-      }
+    if (
+      ['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)
+      || reason.startsWith('cancel_rebook_')
+    ) {
       return 'Thanks for replying YES. We received your request and our team will confirm before your appointment.';
     }
     return 'Thanks for the quick reply. I re-checked availability and that upgrade slot is no longer open right now.';

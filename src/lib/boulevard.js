@@ -21,6 +21,7 @@ const PREP_BUFFER_30MIN = Number(process.env.PREP_BUFFER_30MIN || 15);
 const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
 const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
 const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
+const ENABLE_CANCEL_REBOOK_FALLBACK = process.env.BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK !== 'false';
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OFFICIAL_LOCATION_REGISTRY = Object.freeze([
   { slug: 'brickell', name: 'Brickell', id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65' },
@@ -2163,6 +2164,359 @@ async function tryApplyAppointmentUpgradeMutation(apiUrl, headers, appointmentId
   return { applied: false, reason: 'upgrade_mutation_failed' };
 }
 
+function toBoulevardNaiveDateTime(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const direct = raw.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?::(\d{2}))?/);
+  if (direct) {
+    const seconds = direct[2] || '00';
+    return `${direct[1]}:${seconds}`;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const yyyy = parsed.getUTCFullYear();
+  const mm = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(parsed.getUTCDate()).padStart(2, '0');
+  const hh = String(parsed.getUTCHours()).padStart(2, '0');
+  const mi = String(parsed.getUTCMinutes()).padStart(2, '0');
+  const ss = String(parsed.getUTCSeconds()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
+}
+
+function toBookingWarningList(rawWarnings) {
+  if (!Array.isArray(rawWarnings)) return [];
+  return rawWarnings.map(warning => ({
+    code: String(warning?.code || '').trim() || null,
+    message: String(warning?.message || '').trim() || null,
+    staffId: String(warning?.staffId || '').trim() || null,
+    serviceId: String(warning?.serviceId || '').trim() || null,
+  }));
+}
+
+function hasBlockingBookingWarnings(warnings = []) {
+  if (!Array.isArray(warnings) || warnings.length === 0) return false;
+  const blockingCodes = new Set([
+    'RESOURCE_DOUBLE_BOOKED',
+    'STAFF_DOUBLE_BOOKED',
+    'STAFF_DOES_NOT_PERFORM_SERVICE',
+  ]);
+  return warnings.some(warning => blockingCodes.has(String(warning?.code || '').trim().toUpperCase()));
+}
+
+async function runMutationRoot(apiUrl, headers, query, variables, root) {
+  const data = await fetchBoulevardGraphQL(
+    apiUrl,
+    headers,
+    query,
+    variables,
+    { silentErrors: true, returnErrors: true },
+  );
+  if (data?.__error) return { ok: false, error: data.__error, payload: null };
+  const payload = data?.data?.[root] || null;
+  if (!payload) return { ok: false, error: { stage: 'empty_payload' }, payload: null };
+  return { ok: true, payload, error: null };
+}
+
+async function tryApplyUpgradeViaCancelRebook(apiUrl, headers, opportunity, serviceId) {
+  const appointmentId = String(opportunity?.appointmentId || '').trim();
+  const clientId = String(opportunity?.clientId || '').trim();
+  const locationId = normalizeBoulevardLocationId(opportunity?.locationId || '');
+  const providerId = String(opportunity?.providerId || '').trim();
+  const startTime = toBoulevardNaiveDateTime(opportunity?.startOn);
+
+  const missing = [];
+  if (!appointmentId) missing.push('appointmentId');
+  if (!clientId) missing.push('clientId');
+  if (!locationId) missing.push('locationId');
+  if (!providerId) missing.push('providerId');
+  if (!startTime) missing.push('startTime');
+  if (missing.length > 0) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_missing_fields',
+      missing,
+    };
+  }
+
+  const cancelQuery = `
+    mutation CancelAppointmentForUpgrade($input: CancelAppointmentInput!) {
+      cancelAppointment(input: $input) {
+        appointment {
+          id
+          cancelled
+          state
+        }
+      }
+    }
+  `;
+  const cancelAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    cancelQuery,
+    {
+      input: {
+        id: appointmentId,
+        reason: 'STAFF_CANCEL',
+        notifyClient: false,
+        notes: 'Automated upgrade flow: cancel + rebook to longer duration.',
+      },
+    },
+    'cancelAppointment',
+  );
+  const canceledAppointmentId = cancelAttempt.payload?.appointment?.id
+    ? String(cancelAttempt.payload.appointment.id)
+    : '';
+  if (!cancelAttempt.ok || !canceledAppointmentId) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_cancel_failed',
+      error: cancelAttempt.error || null,
+    };
+  }
+
+  const bookingCreateQuery = `
+    mutation BookingCreateForUpgrade($input: BookingCreateInput!) {
+      bookingCreate(input: $input) {
+        booking {
+          id
+          bookingClients {
+            id
+            clientId
+          }
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const bookingCreateAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingCreateQuery,
+    {
+      input: {
+        clientId,
+        locationId,
+        startTime,
+      },
+    },
+    'bookingCreate',
+  );
+  const bookingId = String(bookingCreateAttempt.payload?.booking?.id || '').trim();
+  const createWarnings = toBookingWarningList(bookingCreateAttempt.payload?.bookingWarnings);
+  if (!bookingCreateAttempt.ok || !bookingId) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_booking_create_failed',
+      error: bookingCreateAttempt.error || null,
+      warnings: createWarnings,
+    };
+  }
+  if (hasBlockingBookingWarnings(createWarnings)) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_booking_create_warning_block',
+      warnings: createWarnings,
+    };
+  }
+
+  let bookingClientId = String(
+    (bookingCreateAttempt.payload?.booking?.bookingClients || [])
+      .find(client => String(client?.clientId || '') === clientId)?.id ||
+    bookingCreateAttempt.payload?.booking?.bookingClients?.[0]?.id ||
+    '',
+  ).trim();
+  if (!bookingClientId) {
+    const bookingSetClientQuery = `
+      mutation BookingSetClientForUpgrade($input: BookingSetClientInput!) {
+        bookingSetClient(input: $input) {
+          booking {
+            id
+            bookingClients {
+              id
+              clientId
+            }
+          }
+          bookingWarnings {
+            code
+            message
+            staffId
+            serviceId
+          }
+        }
+      }
+    `;
+    const bookingSetClientAttempt = await runMutationRoot(
+      apiUrl,
+      headers,
+      bookingSetClientQuery,
+      {
+        input: {
+          bookingId,
+          clientId,
+        },
+      },
+      'bookingSetClient',
+    );
+    const setClientWarnings = toBookingWarningList(bookingSetClientAttempt.payload?.bookingWarnings);
+    if (!bookingSetClientAttempt.ok) {
+      return {
+        applied: false,
+        reason: 'cancel_rebook_set_client_failed',
+        error: bookingSetClientAttempt.error || null,
+        warnings: setClientWarnings,
+      };
+    }
+    if (hasBlockingBookingWarnings(setClientWarnings)) {
+      return {
+        applied: false,
+        reason: 'cancel_rebook_set_client_warning_block',
+        warnings: setClientWarnings,
+      };
+    }
+    bookingClientId = String(
+      (bookingSetClientAttempt.payload?.booking?.bookingClients || [])
+        .find(client => String(client?.clientId || '') === clientId)?.id ||
+      bookingSetClientAttempt.payload?.booking?.bookingClients?.[0]?.id ||
+      '',
+    ).trim();
+  }
+
+  if (!bookingClientId) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_missing_booking_client',
+      bookingId,
+    };
+  }
+
+  const bookingAddServiceQuery = `
+    mutation BookingAddServiceForUpgrade($input: BookingAddServiceInput!) {
+      bookingAddService(input: $input) {
+        booking {
+          id
+        }
+        bookingService {
+          id
+          serviceId
+          staffId
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const bookingAddServiceAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingAddServiceQuery,
+    {
+      input: {
+        bookingId,
+        bookingClientId,
+        serviceId,
+        staffId: providerId,
+      },
+    },
+    'bookingAddService',
+  );
+  const addServiceWarnings = toBookingWarningList(bookingAddServiceAttempt.payload?.bookingWarnings);
+  if (!bookingAddServiceAttempt.ok) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_add_service_failed',
+      error: bookingAddServiceAttempt.error || null,
+      warnings: addServiceWarnings,
+    };
+  }
+  if (hasBlockingBookingWarnings(addServiceWarnings)) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_add_service_warning_block',
+      warnings: addServiceWarnings,
+    };
+  }
+
+  const bookingCompleteQuery = `
+    mutation BookingCompleteForUpgrade($input: BookingCompleteInput!) {
+      bookingComplete(input: $input) {
+        booking {
+          id
+        }
+        bookingAppointments {
+          appointmentId
+          clientId
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const bookingCompleteAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingCompleteQuery,
+    {
+      input: {
+        bookingId,
+        bookWithStaffId: providerId,
+        notifyClient: false,
+      },
+    },
+    'bookingComplete',
+  );
+  const completeWarnings = toBookingWarningList(bookingCompleteAttempt.payload?.bookingWarnings);
+  if (!bookingCompleteAttempt.ok) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_complete_failed',
+      error: bookingCompleteAttempt.error || null,
+      warnings: completeWarnings,
+    };
+  }
+  if (hasBlockingBookingWarnings(completeWarnings)) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_complete_warning_block',
+      warnings: completeWarnings,
+    };
+  }
+
+  const newAppointmentId = String(
+    (bookingCompleteAttempt.payload?.bookingAppointments || [])
+      .find(item => String(item?.clientId || '') === clientId)?.appointmentId ||
+    bookingCompleteAttempt.payload?.bookingAppointments?.[0]?.appointmentId ||
+    '',
+  ).trim();
+  if (!newAppointmentId) {
+    return {
+      applied: false,
+      reason: 'cancel_rebook_missing_new_appointment',
+      bookingId,
+    };
+  }
+
+  return {
+    applied: true,
+    mutationRoot: 'cancelAppointment+bookingCreate+bookingAddService+bookingComplete',
+    updatedId: newAppointmentId,
+    canceledAppointmentId,
+    bookingId,
+  };
+}
+
 async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options = {}) {
   if (!pendingOffer || !pendingOffer.appointmentId) return { success: false, reason: 'missing_pending_offer' };
 
@@ -2217,6 +2571,27 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
   }
 
   const applied = await tryApplyAppointmentUpgradeMutation(auth.apiUrl, auth.headers, fresh.appointmentId, serviceId);
+  if (!applied.applied && ENABLE_CANCEL_REBOOK_FALLBACK) {
+    const cancelRebookApplied = await tryApplyUpgradeViaCancelRebook(auth.apiUrl, auth.headers, fresh, serviceId);
+    if (cancelRebookApplied.applied) {
+      return {
+        success: true,
+        reason: 'applied_cancel_rebook',
+        reverified: true,
+        opportunity: fresh,
+        mutationRoot: cancelRebookApplied.mutationRoot,
+        updatedAppointmentId: cancelRebookApplied.updatedId,
+        canceledAppointmentId: cancelRebookApplied.canceledAppointmentId || fresh.appointmentId || null,
+        bookingId: cancelRebookApplied.bookingId || null,
+      };
+    }
+    return {
+      success: false,
+      reason: cancelRebookApplied.reason || applied.reason || 'upgrade_mutation_failed',
+      reverified: true,
+      opportunity: fresh,
+    };
+  }
   if (!applied.applied) {
     return {
       success: false,

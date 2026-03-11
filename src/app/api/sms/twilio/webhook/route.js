@@ -24,7 +24,6 @@ import { POST as postChatMessage } from '../../../chat/message/route';
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
 const SMS_WEB_HANDOFF_LIMIT = Math.max(Number(process.env.SMS_WEB_HANDOFF_MESSAGE_LIMIT || 10), 1);
 const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member-cancel.vercel.app/widget').trim();
-const SMS_REBOOK_URL = String(process.env.SMS_REBOOK_URL || 'https://booking.silvermirror.com/booking/location').trim();
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const MANUAL_UPGRADE_REASONS = new Set(['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed']);
@@ -49,6 +48,11 @@ function isNegative(text) {
 
 function isUpgradeMutationEnabled() {
   return process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
+}
+
+function isManualUpgradeFallbackReason(reason) {
+  const normalized = String(reason || '').toLowerCase();
+  return MANUAL_UPGRADE_REASONS.has(normalized) || normalized.startsWith('cancel_rebook_');
 }
 
 function isPendingOfferExpired(offer) {
@@ -117,16 +121,14 @@ function buildPendingOfferFinalizeReply(offer) {
   return 'Thanks for replying YES. We received your upgrade request and our team will confirm it before your appointment.';
 }
 
-function buildUpgradeApplyReply(upgradeResult, opportunity) {
+function buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer = null) {
   if (upgradeResult?.success) {
     return "You're all set. See you soon.";
   }
   const reason = String(upgradeResult?.reason || '').toLowerCase();
-  if (['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)) {
-    if (reason === 'upgrade_mutation_failed') {
-      return `I couldn't complete that change instantly. Please use ${SMS_REBOOK_URL} and we'll alert the front desk to assist.`;
-    }
-    return buildPendingOfferFinalizeReply(opportunity);
+  if (isManualUpgradeFallbackReason(reason)) {
+    // Keep SMS replies on approved confirmation copy when mutation cannot be applied.
+    return buildPendingOfferFinalizeReply(pendingOffer || opportunity);
   }
   return 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
 }
@@ -376,7 +378,7 @@ export async function POST(request) {
           appointmentId: opportunity.appointmentId || null,
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
         });
-        if (!upgradeResult?.success && MANUAL_UPGRADE_REASONS.has(String(upgradeResult?.reason || '').toLowerCase())) {
+        if (!upgradeResult?.success && isManualUpgradeFallbackReason(upgradeResult?.reason)) {
           const incident = buildUpgradeSupportIncident({
             sessionId,
             from,
@@ -387,7 +389,11 @@ export async function POST(request) {
           });
           queueSupportIncident(incident);
         }
-        const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity);
+        if (activeSession) {
+          activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId || opportunity?.appointmentId || null;
+          activeSession.pendingUpgradeOffer = null;
+        }
+        const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer);
         const upgradeTwiml = buildTwimlMessage(upgradeText);
         if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
         return new NextResponse(upgradeTwiml, {

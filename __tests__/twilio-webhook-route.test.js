@@ -289,8 +289,20 @@ describe('twilio webhook route', () => {
     expect(text).not.toContain('Hydradermabrasion');
   });
 
-  it('logs support incident when mutation attempt fails and team follow-up is required', async () => {
-    const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
+  it('logs support incident and returns approved manual-finalization copy when mutation attempt fails', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        currentDurationMinutes: 30,
+        targetDurationMinutes: 50,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
     mockGetSessionIdForPhone.mockReturnValue('sess-1');
     mockGetSession.mockReturnValue(session);
     mockLookupMember.mockResolvedValue({
@@ -324,7 +336,10 @@ describe('twilio webhook route', () => {
     const text = await res.text();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('Please use');
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(text).not.toContain('Please use');
+    expect(session.pendingUpgradeOffer).toBeNull();
+    expect(session.lastUpgradeOfferAppointmentId).toBe('appt-1');
     expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
     expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
       issue_type: 'sms_upgrade_manual_followup',
