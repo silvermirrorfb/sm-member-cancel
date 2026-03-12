@@ -152,23 +152,6 @@ function isPendingOfferExpired(offer) {
   return !Number.isFinite(expires) || Date.now() > expires;
 }
 
-function pickIndefiniteArticle(phrase) {
-  const token = String(phrase || '')
-    .trim()
-    .toLowerCase()
-    .split(/[\s-]+/)[0];
-  if (!token) return 'a';
-  if (/^(honest|honor|hour|heir)/.test(token)) return 'an';
-  if (/^(one|uni|use|euro|user|u[bcfhjkqrstnlg])/i.test(token)) return 'a';
-  return /^[aeiou]/.test(token) ? 'an' : 'a';
-}
-
-function withIndefiniteArticle(phrase) {
-  const value = asText(phrase);
-  if (!value) return 'an add-on';
-  return `${pickIndefiniteArticle(value)} ${value}`;
-}
-
 function formatTimeForGuest(iso, timeZone = 'America/New_York') {
   if (!iso) return 'your upcoming appointment';
   const d = new Date(iso);
@@ -194,9 +177,9 @@ function buildDurationOfferMessage(opportunity, options = {}) {
   );
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
   if (reminder) {
-    return `${greeting} reminder: space is still open to extend your facial today to a 50-Min Esthetician's Choice Facial for $${delta} more. Reply YES in ${responseWindowMinutes} minutes.`;
+    return `${greeting} reminder: space is still open to extend your facial today to 50-Min Esthetician's Choice (+$${delta}; members get 20% off). Reply YES in ${responseWindowMinutes} min.`;
   }
-  return `${greeting} we have space to extend your facial today. Upgrade to a 50-Min Esthetician's Choice Facial for $${delta} more. Reply YES in ${responseWindowMinutes} minutes.`;
+  return `${greeting} we have space to extend your facial today. Upgrade to 50-Min Esthetician's Choice (+$${delta}; members get 20% off). Reply YES in ${responseWindowMinutes} min.`;
 }
 
 function buildAddonOfferMessage(offer, options = {}) {
@@ -209,11 +192,11 @@ function buildAddonOfferMessage(offer, options = {}) {
     1,
     Number(options.responseWindowMinutes || (reminder ? REMINDER_YES_WINDOW_MINUTES : OFFER_WINDOW_MINUTES)) || OFFER_WINDOW_MINUTES,
   );
-  const addonWithArticle = withIndefiniteArticle(offer.addOnName);
+  const addonName = asText(offer.addOnName) || 'add-on';
   if (reminder) {
-    return `${greeting} reminder: want to add ${addonWithArticle} today for $${price}? Members get 20% off. Reply YES in ${responseWindowMinutes} minutes.`;
+    return `${greeting} reminder: want to add ${addonName} today for $${price}? Members get 20% off. Reply YES in ${responseWindowMinutes} min.`;
   }
-  return `${greeting} want to add ${addonWithArticle} today for $${price}? Members get 20% off. Reply YES in ${responseWindowMinutes} minutes.`;
+  return `${greeting} want to add ${addonName} today for $${price}? Members get 20% off. Reply YES in ${responseWindowMinutes} min.`;
 }
 
 function buildOutboundOfferMessage(offer, options = {}) {
