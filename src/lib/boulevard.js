@@ -21,7 +21,7 @@ const PREP_BUFFER_30MIN = Number(process.env.PREP_BUFFER_30MIN || 15);
 const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
 const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
 const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
-const ENABLE_CANCEL_REBOOK_FALLBACK = process.env.BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK !== 'false';
+const ENABLE_CANCEL_REBOOK_FALLBACK = process.env.BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK === 'true';
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const OFFICIAL_LOCATION_REGISTRY = Object.freeze([
   { slug: 'brickell', name: 'Brickell', id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65' },
