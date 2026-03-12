@@ -26,7 +26,6 @@ const SMS_WEB_HANDOFF_LIMIT = Math.max(Number(process.env.SMS_WEB_HANDOFF_MESSAG
 const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member-cancel.vercel.app/widget').trim();
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
-const MANUAL_UPGRADE_REASONS = new Set(['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed']);
 const YES_NO_PENDING_MANUAL_REPLY = 'Thanks for replying YES. We received your request and our team will confirm it before your appointment.';
 const ALLOWED_ADDON_NAME_SET = new Set([
   'antioxidant peel',
@@ -49,11 +48,6 @@ function isNegative(text) {
 
 function isUpgradeMutationEnabled() {
   return process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
-}
-
-function isManualUpgradeFallbackReason(reason) {
-  const normalized = String(reason || '').toLowerCase();
-  return MANUAL_UPGRADE_REASONS.has(normalized) || normalized.startsWith('cancel_rebook_');
 }
 
 function isPendingOfferExpired(offer) {
@@ -126,12 +120,8 @@ function buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer = null)
   if (upgradeResult?.success) {
     return "You're all set. See you soon.";
   }
-  const reason = String(upgradeResult?.reason || '').toLowerCase();
-  if (isManualUpgradeFallbackReason(reason)) {
-    // Keep SMS replies on approved confirmation copy when mutation cannot be applied.
-    return buildPendingOfferFinalizeReply(pendingOffer || opportunity);
-  }
-  return 'Thanks for the quick reply. I re-checked and the upgrade slot is no longer available.';
+  // Keep SMS replies on approved confirmation copy whenever YES cannot be finalized instantly.
+  return buildPendingOfferFinalizeReply(pendingOffer || opportunity);
 }
 
 function queueSupportIncident(incident) {
@@ -373,7 +363,7 @@ export async function POST(request) {
             targetDurationMinutes: pendingOffer.targetDurationMinutes || null,
           };
           const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, reverifyOffer);
-          if (!upgradeResult?.success && isManualUpgradeFallbackReason(upgradeResult?.reason)) {
+          if (!upgradeResult?.success) {
             const incident = buildUpgradeSupportIncident({
               sessionId,
               from,
@@ -422,7 +412,7 @@ export async function POST(request) {
           appointmentId: opportunity.appointmentId || null,
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
         });
-        if (!upgradeResult?.success && isManualUpgradeFallbackReason(upgradeResult?.reason)) {
+        if (!upgradeResult?.success) {
           const incident = buildUpgradeSupportIncident({
             sessionId,
             from,

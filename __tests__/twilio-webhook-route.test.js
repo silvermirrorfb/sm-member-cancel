@@ -448,4 +448,64 @@ describe('twilio webhook route', () => {
       location: 'Penn Quarter',
     });
   });
+
+  it('returns approved manual-finalization copy when reverify says slot is no longer available', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-2',
+        currentDurationMinutes: 30,
+        targetDurationMinutes: 50,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      fullName: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Penn Quarter',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-2',
+      currentDurationMinutes: 30,
+      targetDurationMinutes: 50,
+      pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: false,
+      reason: 'no_longer_available',
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-no-longer',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(text).not.toContain('no longer available');
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'no_longer_available',
+      name: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Penn Quarter',
+    });
+  });
 });

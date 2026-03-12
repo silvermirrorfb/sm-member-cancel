@@ -212,14 +212,7 @@ function buildUpgradeSuccessMessage(result, pendingOffer = null) {
 }
 
 function buildUpgradeUnavailableMessage(result = null, pendingOffer = null) {
-    const reason = String(result?.reason || '').toLowerCase();
-    if (
-      ['upgrade_mutation_disabled', 'service_id_not_configured', 'upgrade_mutation_failed'].includes(reason)
-      || reason.startsWith('cancel_rebook_')
-    ) {
-      return 'Thanks for replying YES. We received your request and our team will confirm before your appointment.';
-    }
-    return 'Thanks for the quick reply. I re-checked availability and that upgrade slot is no longer open right now.';
+    return 'Thanks for replying YES. We received your request and our team will confirm before your appointment.';
 }
 
 function isPendingOfferExpired(offer) {
