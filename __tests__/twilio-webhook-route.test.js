@@ -173,6 +173,53 @@ describe('twilio webhook route', () => {
     expect(mockLogSupportIncident).not.toHaveBeenCalled();
   });
 
+  it('logs support follow-up when apply succeeds but notes sync fails', async () => {
+    const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      fullName: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Penn Quarter',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      currentDurationMinutes: 30,
+      targetDurationMinutes: 50,
+      pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: true,
+      reason: 'applied_cancel_rebook_notes_sync_failed',
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-notes-sync',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain("You're all set. See you soon.");
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'applied_cancel_rebook_notes_sync_failed',
+      name: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Penn Quarter',
+    });
+  });
+
   it('uses pending-offer appointment for YES instead of fresh generic opportunity evaluation', async () => {
     const session = {
       id: 'sess-1',

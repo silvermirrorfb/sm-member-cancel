@@ -1338,6 +1338,24 @@ function readNodeFieldAsString(node, scalarField, objectField) {
   return '';
 }
 
+function isScalarOrEnumGraphqlKind(kind) {
+  const normalized = String(kind || '').trim().toUpperCase();
+  return normalized === 'SCALAR' || normalized === 'ENUM';
+}
+
+function readFirstPopulatedStringField(node, fieldNames = []) {
+  if (!node || typeof node !== 'object') return '';
+  for (const fieldName of fieldNames) {
+    const key = String(fieldName || '').trim();
+    if (!key) continue;
+    const raw = node?.[key];
+    if (raw === null || raw === undefined) continue;
+    const text = String(raw).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
 async function getSchemaQueryTypeName(apiUrl, headers) {
   const query = `
     query IntrospectSchemaQueryType {
@@ -2167,6 +2185,13 @@ async function tryApplyAppointmentUpgradeMutation(apiUrl, headers, appointmentId
 async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
   const id = String(appointmentId || '').trim();
   if (!id) return null;
+  const appointmentFieldDetailMap = await getTypeFieldDetailMap(apiUrl, headers, 'Appointment');
+  const noteFieldCandidates = ['notes', 'note', 'internalNotes', 'internalNote']
+    .filter(fieldName => {
+      const detail = appointmentFieldDetailMap?.get(fieldName) || null;
+      return detail && isScalarOrEnumGraphqlKind(detail.kind);
+    });
+  const noteSelection = noteFieldCandidates.join('\n        ');
   const query = `
     query FetchAppointmentContext($id: ID!) {
       appointment(id: $id) {
@@ -2175,6 +2200,7 @@ async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
         locationId
         startAt
         endAt
+        ${noteSelection}
         appointmentServices {
           id
           serviceId
@@ -2201,6 +2227,7 @@ async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
     locationId: String(appointment.locationId || '').trim() || null,
     startOn: String(appointment.startAt || '').trim() || null,
     endOn: String(appointment.endAt || '').trim() || null,
+    notes: readFirstPopulatedStringField(appointment, noteFieldCandidates) || null,
     providerId: String(primaryService?.staffId || '').trim() || null,
     serviceId: String(primaryService?.serviceId || '').trim() || null,
   };
@@ -2259,12 +2286,91 @@ async function runMutationRoot(apiUrl, headers, query, variables, root) {
   return { ok: true, payload, error: null };
 }
 
+async function trySyncAppointmentNotes(apiUrl, headers, appointmentId, notes) {
+  const targetAppointmentId = String(appointmentId || '').trim();
+  const noteText = String(notes || '').trim();
+  if (!targetAppointmentId) {
+    return {
+      applied: false,
+      reason: 'notes_sync_missing_appointment_id',
+      skipped: false,
+    };
+  }
+  if (!noteText) {
+    return {
+      applied: true,
+      reason: 'notes_sync_not_required',
+      skipped: true,
+    };
+  }
+
+  const mutationCandidates = [
+    {
+      root: 'updateAppointment',
+      query: `
+        mutation SyncAppointmentNotes($appointmentId: ID!, $notes: String!) {
+          updateAppointment(input: { id: $appointmentId, notes: $notes }) {
+            appointment {
+              id
+            }
+          }
+        }
+      `,
+    },
+    {
+      root: 'appointmentUpdate',
+      query: `
+        mutation SyncAppointmentNotesAlt($appointmentId: ID!, $notes: String!) {
+          appointmentUpdate(input: { id: $appointmentId, notes: $notes }) {
+            appointment {
+              id
+            }
+          }
+        }
+      `,
+    },
+  ];
+
+  let lastError = null;
+  for (const candidate of mutationCandidates) {
+    const data = await fetchBoulevardGraphQL(
+      apiUrl,
+      headers,
+      candidate.query,
+      { appointmentId: targetAppointmentId, notes: noteText },
+      { silentErrors: true, returnErrors: true },
+    );
+    if (!data || data.__error) {
+      lastError = data?.__error || { stage: 'notes_sync_failed' };
+      continue;
+    }
+    const node = data?.data?.[candidate.root] || null;
+    const updatedId = String(node?.appointment?.id || node?.id || '').trim();
+    if (updatedId) {
+      return {
+        applied: true,
+        reason: 'notes_sync_applied',
+        skipped: false,
+        mutationRoot: candidate.root,
+      };
+    }
+  }
+
+  return {
+    applied: false,
+    reason: 'notes_sync_failed',
+    skipped: false,
+    error: lastError,
+  };
+}
+
 async function tryApplyUpgradeViaCancelRebook(apiUrl, headers, opportunity, serviceId) {
   const appointmentId = String(opportunity?.appointmentId || '').trim();
   const clientId = String(opportunity?.clientId || '').trim();
   const locationId = normalizeBoulevardLocationId(opportunity?.locationId || '');
   const providerId = String(opportunity?.providerId || '').trim();
   const startTime = toBoulevardNaiveDateTime(opportunity?.startOn);
+  const sourceNotes = String(opportunity?.notes || '').trim();
 
   const missing = [];
   if (!appointmentId) missing.push('appointmentId');
@@ -2300,7 +2406,7 @@ async function tryApplyUpgradeViaCancelRebook(apiUrl, headers, opportunity, serv
         id: appointmentId,
         reason: 'STAFF_CANCEL',
         notifyClient: false,
-        notes: 'Automated upgrade flow: cancel + rebook to longer duration.',
+        notes: sourceNotes || 'Automated upgrade flow: cancel + rebook to longer duration.',
       },
     },
     'cancelAppointment',
@@ -2550,12 +2656,15 @@ async function tryApplyUpgradeViaCancelRebook(apiUrl, headers, opportunity, serv
     };
   }
 
+  const notesSync = await trySyncAppointmentNotes(apiUrl, headers, newAppointmentId, sourceNotes);
+
   return {
     applied: true,
     mutationRoot: 'cancelAppointment+bookingCreate+bookingAddService+bookingComplete',
     updatedId: newAppointmentId,
     canceledAppointmentId,
     bookingId,
+    notesSync,
   };
 }
 
@@ -2622,6 +2731,7 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
       providerId: fresh.providerId || appointmentContext?.providerId || null,
       startOn: fresh.startOn || appointmentContext?.startOn || null,
       endOn: fresh.endOn || appointmentContext?.endOn || null,
+      notes: appointmentContext?.notes || null,
     };
     const cancelRebookApplied = await tryApplyUpgradeViaCancelRebook(
       auth.apiUrl,
@@ -2630,15 +2740,21 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
       serviceId,
     );
     if (cancelRebookApplied.applied) {
+      const notesSyncFailed = Boolean(
+        cancelRebookApplied?.notesSync &&
+        cancelRebookApplied.notesSync.skipped !== true &&
+        cancelRebookApplied.notesSync.applied !== true,
+      );
       return {
         success: true,
-        reason: 'applied_cancel_rebook',
+        reason: notesSyncFailed ? 'applied_cancel_rebook_notes_sync_failed' : 'applied_cancel_rebook',
         reverified: true,
         opportunity: fresh,
         mutationRoot: cancelRebookApplied.mutationRoot,
         updatedAppointmentId: cancelRebookApplied.updatedId,
         canceledAppointmentId: cancelRebookApplied.canceledAppointmentId || fresh.appointmentId || null,
         bookingId: cancelRebookApplied.bookingId || null,
+        notesSync: cancelRebookApplied.notesSync || null,
       };
     }
     return {

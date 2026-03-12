@@ -124,6 +124,13 @@ function buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer = null)
   return buildPendingOfferFinalizeReply(pendingOffer || opportunity);
 }
 
+function shouldQueueUpgradeFollowupIncident(upgradeResult) {
+  if (!upgradeResult) return false;
+  if (upgradeResult.success !== true) return true;
+  const reason = String(upgradeResult.reason || '').toLowerCase();
+  return reason.includes('notes_sync_failed');
+}
+
 function queueSupportIncident(incident) {
   logSupportIncident(incident).catch(err => {
     console.error('SMS support incident logging failed:', err);
@@ -363,7 +370,7 @@ export async function POST(request) {
             targetDurationMinutes: pendingOffer.targetDurationMinutes || null,
           };
           const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, reverifyOffer);
-          if (!upgradeResult?.success) {
+          if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
             const incident = buildUpgradeSupportIncident({
               sessionId,
               from,
@@ -412,7 +419,7 @@ export async function POST(request) {
           appointmentId: opportunity.appointmentId || null,
           targetDurationMinutes: opportunity.targetDurationMinutes || null,
         });
-        if (!upgradeResult?.success) {
+        if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
           const incident = buildUpgradeSupportIncident({
             sessionId,
             from,
