@@ -1137,6 +1137,15 @@ function extractProviderIdHeuristic(node) {
       const keyLower = String(key || '').toLowerCase();
       const nextProviderContext = providerContext || /(provider|staff|employee|resource)/i.test(keyLower);
 
+      if (
+        (nextProviderContext || /(provider|staff|employee|resource)/i.test(keyLower)) &&
+        /(providerid|staffid|employeeid|serviceproviderid|resourceid)$/.test(keyLower) &&
+        (typeof child === 'string' || typeof child === 'number')
+      ) {
+        const raw = String(child).trim();
+        if (raw) return raw;
+      }
+
       if (nextProviderContext && keyLower === 'id' && (typeof child === 'string' || typeof child === 'number')) {
         const raw = String(child).trim();
         if (raw) return raw;
@@ -2002,28 +2011,24 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
 
   const hasProviderIdentity = Boolean(String(current.providerId || '').trim());
   const currentLocationCanonicalId = canonicalizeBoulevardLocationId(current.locationId || '') || null;
-  const providerCommitments = appointments
-    .filter(appt => appt.id !== current.id)
-    .filter(appt => !isCanceledAppointment(appt))
-    .filter(appt => {
-      const startMs = new Date(appt.startOn).getTime();
-      return Number.isFinite(startMs) && startMs > new Date(current.startOn).getTime();
-    })
-    .filter(appt => {
-      if (hasProviderIdentity) return appt.providerId === current.providerId;
-      if (currentLocationCanonicalId && appt.locationId) {
-        return canonicalizeBoulevardLocationId(appt.locationId) === currentLocationCanonicalId;
-      }
-      return true;
-    })
-    .sort((a, b) => new Date(a.startOn).getTime() - new Date(b.startOn).getTime());
-
-  const nextCommitment = providerCommitments[0] || null;
-  const nextStartMs = nextCommitment ? new Date(nextCommitment.startOn).getTime() : null;
-  const hasFiniteGap = Number.isFinite(nextStartMs);
-  const availableGapMinutes = hasFiniteGap
-    ? Math.floor((nextStartMs - currentEndMs) / 60000)
-    : Number.POSITIVE_INFINITY;
+  const providerIdentityMode = hasProviderIdentity ? 'exact_provider' : 'fallback_no_provider_id';
+  const providerCommitmentsForMetadata = hasProviderIdentity
+    ? appointments
+      .filter(appt => appt.id !== current.id)
+      .filter(appt => !isCanceledAppointment(appt))
+      .filter(appt => {
+        const startMs = new Date(appt.startOn).getTime();
+        return Number.isFinite(startMs) && startMs > new Date(current.startOn).getTime();
+      })
+      .filter(appt => appt.providerId === current.providerId)
+      .sort((a, b) => new Date(a.startOn).getTime() - new Date(b.startOn).getTime())
+    : [];
+  const nextCommitmentForMetadata = hasProviderIdentity ? (providerCommitmentsForMetadata[0] || null) : null;
+  const nextStartMsForMetadata = nextCommitmentForMetadata ? new Date(nextCommitmentForMetadata.startOn).getTime() : null;
+  const hasFiniteGapForMetadata = hasProviderIdentity ? Number.isFinite(nextStartMsForMetadata) : null;
+  const availableGapMinutesForMetadata = hasProviderIdentity
+    ? (hasFiniteGapForMetadata ? Math.floor((nextStartMsForMetadata - currentEndMs) / 60000) : Number.POSITIVE_INFINITY)
+    : null;
 
   const targetDurationMinutes = isFiniteNumber(options.targetDurationMinutes)
     ? options.targetDurationMinutes
@@ -2036,19 +2041,19 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
       appointmentId: current.id,
       clientId: current.clientId,
       providerId: current.providerId || null,
-      providerIdentityMode: hasProviderIdentity ? 'exact_provider' : 'fallback_no_provider_id',
+      providerIdentityMode,
       locationId: current.locationId || null,
       locationCanonicalId: currentLocationCanonicalId,
       startOn: current.startOn,
       endOn: current.endOn,
-      nextCommitmentStartOn: nextCommitment?.startOn || null,
+      nextCommitmentStartOn: nextCommitmentForMetadata?.startOn || null,
       currentDurationMinutes,
       targetDurationMinutes: null,
       requiredExtraMinutes: null,
       requiredGapMinutes: null,
       prepBufferMinutes: 0,
-      availableGapMinutes: Number.isFinite(availableGapMinutes) ? availableGapMinutes : null,
-      gapUnlimited: !hasFiniteGap,
+      availableGapMinutes: Number.isFinite(availableGapMinutesForMetadata) ? availableGapMinutesForMetadata : null,
+      gapUnlimited: hasFiniteGapForMetadata === null ? null : !hasFiniteGapForMetadata,
       hasAddonOnBooking,
       isMember,
       pricing: null,
@@ -2067,6 +2072,40 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   const prepBufferMinutes = 0;
   const pricing = computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember);
   if (!pricing) return { eligible: false, reason: 'pricing_unavailable' };
+  if (!hasProviderIdentity) {
+    return {
+      eligible: false,
+      reason: 'provider_identity_unavailable',
+      appointmentId: current.id,
+      clientId: current.clientId,
+      providerId: null,
+      providerIdentityMode,
+      locationId: current.locationId || null,
+      locationCanonicalId: currentLocationCanonicalId,
+      startOn: current.startOn,
+      endOn: current.endOn,
+      nextCommitmentStartOn: null,
+      currentDurationMinutes,
+      targetDurationMinutes,
+      requiredExtraMinutes,
+      requiredGapMinutes: requiredExtraMinutes,
+      prepBufferMinutes,
+      availableGapMinutes: null,
+      gapUnlimited: null,
+      hasAddonOnBooking,
+      isMember,
+      pricing,
+    };
+  }
+
+  const providerCommitments = providerCommitmentsForMetadata;
+
+  const nextCommitment = providerCommitments[0] || null;
+  const nextStartMs = nextCommitment ? new Date(nextCommitment.startOn).getTime() : null;
+  const hasFiniteGap = Number.isFinite(nextStartMs);
+  const availableGapMinutes = hasFiniteGap
+    ? Math.floor((nextStartMs - currentEndMs) / 60000)
+    : Number.POSITIVE_INFINITY;
 
   return {
     eligible: availableGapMinutes >= requiredExtraMinutes,
@@ -2074,7 +2113,7 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     appointmentId: current.id,
     clientId: current.clientId,
     providerId: current.providerId || null,
-    providerIdentityMode: hasProviderIdentity ? 'exact_provider' : 'fallback_no_provider_id',
+    providerIdentityMode,
     locationId: current.locationId || null,
     locationCanonicalId: currentLocationCanonicalId,
     startOn: current.startOn,

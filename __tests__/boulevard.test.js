@@ -646,7 +646,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.nextCommitmentStartOn).toBe('2026-03-08T11:05:00.000Z');
   });
 
-  it('falls back to conservative location-based gap when provider id is unavailable', () => {
+  it('fails safe when provider id is unavailable', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -673,9 +673,10 @@ describe('upgrade eligibility engine', () => {
       windowHours: 6,
     });
 
-    expect(result.eligible).toBe(true);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('provider_identity_unavailable');
     expect(result.providerIdentityMode).toBe('fallback_no_provider_id');
-    expect(result.availableGapMinutes).toBe(35);
+    expect(result.availableGapMinutes).toBeNull();
   });
 
   it('fails safe when multiple upcoming appointments exist without explicit appointmentId', () => {
@@ -746,7 +747,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.availableGapMinutes).toBe(35);
   });
 
-  it('does not alias Brickell and Upper West Side by default when provider identity is unavailable', () => {
+  it('fails safe when provider identity is unavailable even if other-location bookings exist', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -773,10 +774,11 @@ describe('upgrade eligibility engine', () => {
       windowHours: 6,
     });
 
-    expect(result.eligible).toBe(true);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('provider_identity_unavailable');
     expect(result.locationCanonicalId).toBe('urn:blvd:Location:6eab61bf-d215-4f4f-a464-6211fa802beb');
     expect(result.nextCommitmentStartOn).toBeNull();
-    expect(result.gapUnlimited).toBe(true);
+    expect(result.gapUnlimited).toBeNull();
   });
 });
 

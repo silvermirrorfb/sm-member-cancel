@@ -174,6 +174,8 @@ describe('sms automation route', () => {
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].matchedContact).toContain('917');
+    expect(body.results[0].message).toContain('for only $50 more');
+    expect(body.results[0].message).toContain('Reply YES in the next 15 minutes');
     expect(mockLookupMember).toHaveBeenCalledTimes(2);
   });
 
@@ -611,6 +613,6 @@ describe('sms automation route', () => {
 
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('dry_run');
-    expect(body.results[0].message).toContain('add Lip Plump and Scrub');
+    expect(body.results[0].message).toContain('add a Lip Plump and Scrub');
   });
 });
