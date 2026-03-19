@@ -31,6 +31,7 @@ WordPress Page (silvermirror.com/cancel-membership)
 - **Boulevard Enterprise API** — Member authentication & profile data
 - **Nodemailer** — Email delivery to membership team
 - **Google Sheets API** — Cancellation tracking
+- **Upstash Redis** — Shared rate limiting across serverless instances
 - **Vercel** — Hosting & deployment
 
 ## Setup
@@ -146,6 +147,7 @@ Update the MEMBERSHIP TIERS AND PRICING section.
 
 - [ ] Set ANTHROPIC_API_KEY in Vercel
 - [ ] Wire up Boulevard API and test member lookup
+- [ ] Configure Upstash Redis for shared rate limiting on production routes
 - [ ] Configure SMTP for email delivery
 - [ ] Set up Google Sheet and service account
 - [ ] Update ALLOWED_ORIGIN to silvermirror.com

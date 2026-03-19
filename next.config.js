@@ -1,4 +1,27 @@
 /** @type {import('next').NextConfig} */
+const accessControlAllowHeaders = [
+  'Content-Type',
+  'Authorization',
+  'X-QA-Token',
+  'X-QA-Synthetic-Token',
+  'X-Idempotency-Key',
+  'X-Request-Id',
+].join(', ');
+
+const accessControlExposeHeaders = [
+  'X-RateLimit-Limit',
+  'X-RateLimit-Remaining',
+  'X-RateLimit-Reset',
+  'X-RateLimit-Backend',
+  'X-RateLimit-Mode',
+  'X-RateLimit-Degraded',
+  'X-RateLimit-Would-Limit',
+  'Retry-After',
+  'X-Request-Id',
+  'X-Idempotency-Key',
+  'X-Idempotency-Replayed',
+].join(', ');
+
 const nextConfig = {
   async headers() {
     return [
@@ -15,7 +38,8 @@ const nextConfig = {
         headers: [
           { key: 'Access-Control-Allow-Origin', value: process.env.ALLOWED_ORIGIN || 'https://silvermirror.com' },
           { key: 'Access-Control-Allow-Methods', value: 'POST, OPTIONS' },
-          { key: 'Access-Control-Allow-Headers', value: 'Content-Type, Authorization' },
+          { key: 'Access-Control-Allow-Headers', value: accessControlAllowHeaders },
+          { key: 'Access-Control-Expose-Headers', value: accessControlExposeHeaders },
         ],
       },
     ];

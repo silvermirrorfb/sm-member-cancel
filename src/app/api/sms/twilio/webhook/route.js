@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createSession, getSession } from '../../../../../lib/sessions';
-import { checkRateLimit, getClientIP } from '../../../../../lib/rate-limit';
+import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../../lib/rate-limit';
 import {
   bindPhoneToSession,
   getSessionIdForPhone,
@@ -217,13 +217,13 @@ async function runChatMessageForSms(sessionId, body, from) {
 export async function POST(request) {
   try {
     const ip = getClientIP(request);
-    const { allowed, retryAfterMs } = checkRateLimit(ip, 'twilio-webhook', 120, 10 * 60 * 1000);
-    if (!allowed) {
+    const rateLimit = await checkRateLimit(ip, 'twilio-webhook', 120, 10 * 60 * 1000);
+    if (!rateLimit.allowed) {
       return new NextResponse(buildTwimlMessage('Please try again in a moment.'), {
         status: 429,
         headers: {
           'Content-Type': 'text/xml; charset=utf-8',
-          'Retry-After': String(Math.ceil(retryAfterMs / 1000)),
+          ...buildRateLimitHeaders(rateLimit),
         },
       });
     }

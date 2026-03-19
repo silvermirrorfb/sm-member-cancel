@@ -838,6 +838,35 @@ async function findClientsByPhoneScan(apiUrl, headers, cleanPhone) {
 
   return found;
 }
+
+function maskEmailForLogs(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '<empty>';
+  const atIndex = raw.indexOf('@');
+  if (atIndex <= 0 || atIndex === raw.length - 1) return '<invalid-email>';
+  const local = raw.slice(0, atIndex);
+  const domain = raw.slice(atIndex + 1);
+  return `${local.charAt(0)}***@${domain}`;
+}
+
+function maskPhoneForLogs(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return '<empty>';
+  return `***${digits.slice(-4)}`;
+}
+
+function maskNameForLogs(value) {
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '<empty>';
+  return parts.map(part => `${part.charAt(0)}***`).join(' ');
+}
+
+function describeLookupContactForLogs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '<empty>';
+  return raw.includes('@') ? maskEmailForLogs(raw) : maskPhoneForLogs(raw);
+}
+
 async function findMembershipForClient(apiUrl, headers, clientId) {
   if (!clientId) return null;
 
@@ -2872,7 +2901,7 @@ async function lookupMember(name, emailOrPhone, options = {}) {
           }
         }
       `;
-      console.log(`Boulevard lookup: email = ${normalizedEmail} at ${apiUrl}`);
+      console.log(`Boulevard lookup: email=${maskEmailForLogs(normalizedEmail)} strategy=email_exact`);
       const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { emails: [normalizedEmail] });
       if (!data) return null;
       clients = data?.data?.clients?.edges || [];
@@ -2884,7 +2913,7 @@ async function lookupMember(name, emailOrPhone, options = {}) {
           clients = [fallback.candidate];
           lookupStrategy = fallback.strategy;
         } else if (fallback?.reason?.startsWith('ambiguous')) {
-          console.log(`Boulevard lookup: ${fallback.reason} fallback matches for "${name}"`);
+          console.log(`Boulevard lookup: ${fallback.reason} fallback matches for requested name ${maskNameForLogs(name)}`);
         }
       }
     } else {
@@ -2893,7 +2922,7 @@ async function lookupMember(name, emailOrPhone, options = {}) {
         console.log('Boulevard lookup: invalid phone input');
         return null;
       }
-      console.log(`Boulevard lookup: phone = ${cleanPhone} at ${apiUrl}`);
+      console.log(`Boulevard lookup: phone=${maskPhoneForLogs(cleanPhone)} strategy=phone_scan`);
       const scanned = await findClientsByPhoneScan(apiUrl, headers, cleanPhone);
       if (!scanned) return null;
       clients = scanned;
@@ -2945,9 +2974,12 @@ async function lookupMember(name, emailOrPhone, options = {}) {
         }
       }
     }
-    if (!match) { console.log(`Boulevard lookup: ${clients.length} clients found but none match "${name}"`); return null; }
+    if (!match) {
+      console.log(`Boulevard lookup: ${clients.length} clients found but none matched requested identity (${describeLookupContactForLogs(rawContact)})`);
+      return null;
+    }
     if (usedNameScanLocationFallback) lookupStrategy = 'name_scan_location_preferred';
-    console.log(`Boulevard lookup: matched ${match.node.firstName} ${match.node.lastName} via ${lookupStrategy}`);
+    console.log(`Boulevard lookup: matched ${maskNameForLogs(`${match.node.firstName} ${match.node.lastName}`)} via ${lookupStrategy}`);
     const membership = await findMembershipForClient(apiUrl, headers, match.node.id);
     const commerce = await fetchClientCommerceMetrics(apiUrl, headers, match.node);
     const preferMembershipLocation = membership && !isInactiveMembershipStatus(membership.status);

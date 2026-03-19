@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSession, addMessage, createSession } from '../../../../lib/sessions';
+import { getSession, addMessage, createSession, updateActivity } from '../../../../lib/sessions';
 import {
     getSystemPrompt,
     buildSystemPromptWithProfile,
@@ -16,7 +16,7 @@ import {
     reverifyAndApplyUpgradeForProfile,
 } from '../../../../lib/boulevard';
 import { logChatMessage, logSupportIncident } from '../../../../lib/notify';
-import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
+import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
 
 // Friendly message shown when Claude API is rate-limited
@@ -45,7 +45,9 @@ const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const UPGRADE_INTEREST_KEYWORDS = /\b(upgrade|extend|longer|50[-\s]?min|50[-\s]?minute|90[-\s]?min|90[-\s]?minute|add[-\s]?on|add on|add[-\s]?it)\b/i;
 const LOGISTICS_CONTEXT_KEYWORDS = /\b(direction|directions|address|where (is|are)|location|parking|how do i get|closest|map)\b/i;
+const IDENTITY_CONTEXT_KEYWORDS = /\b(who are you|what are you|are you (?:a )?(?:bot|robot|ai|assistant)|virtual assistant|human or ai)\b/i;
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
+const DUPLICATE_USER_TURN_WINDOW_MS = 15 * 1000;
 
 function formatMoney(value) {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -241,6 +243,58 @@ function stripEndFollowUpQuestions(text) {
       cleaned = cleaned.replace(pattern, '');
     }
     return cleaned.trim();
+}
+
+function normalizeUserTurnFingerprint(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+}
+
+function stripRepeatedAssistantIntro(text) {
+    const original = String(text || '').trim();
+    if (!original) return '';
+
+    const patterns = [
+      /^\s*(?:hi|hello|hey)(?: there)?[!,.\s]+(?:i['’]m|this is)\s+silver mirror(?:['’]s)?\s+virtual assistant\.?\s*/i,
+      /^\s*thanks for reaching out to silver mirror[.!]?\s*/i,
+      /^\s*(?:hi|hello|hey)(?: there)?[!,.\s]+welcome to silver mirror[.!]?\s*/i,
+      /^\s*i can help with facials,\s*products,\s*and memberships\.?\s*/i,
+      /^\s*i(?:'m| am)\s+here to help with questions about our facials,\s*services,\s*memberships,\s*products,\s*and skincare\.?\s*/i,
+      /^\s*(?:how|what) can i (?:help|assist)(?: you)?(?: with)? today\??\s*/i,
+    ];
+
+    let cleaned = original;
+    let changed = false;
+    let removedInPass = true;
+
+    while (removedInPass) {
+      removedInPass = false;
+      for (const pattern of patterns) {
+        const next = cleaned.replace(pattern, '').trim();
+        if (next !== cleaned) {
+          cleaned = next;
+          removedInPass = true;
+          changed = true;
+        }
+      }
+    }
+
+    return changed && cleaned ? cleaned : original;
+}
+
+function polishVisibleAssistantResponse(text, userText) {
+    const original = String(text || '').trim();
+    if (!original) return '';
+
+    let cleaned = original;
+    if (!IDENTITY_CONTEXT_KEYWORDS.test(String(userText || '').toLowerCase())) {
+      cleaned = stripRepeatedAssistantIntro(cleaned);
+    }
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+
+    return cleaned || original;
 }
 
 function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
@@ -505,12 +559,12 @@ export async function POST(request) {
     try {
           // Rate limit: max 30 messages per 10 minutes per IP
       const ip = getClientIP(request);
-          const { allowed, retryAfterMs } = checkRateLimit(ip, 'message', 30, 10 * 60 * 1000);
+          const rateLimit = await checkRateLimit(ip, 'message', 30, 10 * 60 * 1000);
 
-      if (!allowed) {
+      if (!rateLimit.allowed) {
               return NextResponse.json(
                 { error: 'Too many messages. Please wait a few minutes and try again.' },
-                { status: 429, headers: { 'Retry-After': String(Math.ceil(retryAfterMs / 1000)) } }
+                { status: 429, headers: buildRateLimitHeaders(rateLimit) }
                       );
       }
 
@@ -557,6 +611,35 @@ export async function POST(request) {
 
       // Sanitize user input \u2014 strip system tags to prevent injection
       const sanitizedMessage = stripAllSystemTags(message);
+      const userFingerprint = normalizeUserTurnFingerprint(sanitizedMessage);
+      const lastProcessedUserAtMs = session.lastProcessedUserAt
+        ? new Date(session.lastProcessedUserAt).getTime()
+        : Number.NaN;
+      const isDuplicateUserTurn =
+        Boolean(userFingerprint) &&
+        session.lastProcessedUserFingerprint === userFingerprint &&
+        Number.isFinite(lastProcessedUserAtMs) &&
+        (Date.now() - lastProcessedUserAtMs) <= DUPLICATE_USER_TURN_WINDOW_MS &&
+        typeof session.lastAssistantVisibleMessage === 'string' &&
+        session.lastAssistantVisibleMessage.trim().length > 0;
+
+      if (isDuplicateUserTurn) {
+            updateActivity(sessionId);
+            const dedupedResult = {
+                  message: session.lastAssistantVisibleMessage,
+                  sessionId,
+                  deduped: true,
+            };
+            if (session.memberProfile) {
+                  dedupedResult.memberProfile = session.memberProfile;
+            }
+            return NextResponse.json(dedupedResult, {
+                  headers: buildRateLimitHeaders(rateLimit),
+            });
+      }
+
+      session.lastProcessedUserFingerprint = userFingerprint || null;
+      session.lastProcessedUserAt = new Date();
 
       // Add user message to history
       addMessage(sessionId, 'user', sanitizedMessage);
@@ -577,6 +660,8 @@ export async function POST(request) {
             return NextResponse.json({
                 message: pauseCreditsResponse,
                 sessionId,
+            }, {
+                headers: buildRateLimitHeaders(rateLimit),
             });
       }
 
@@ -592,6 +677,8 @@ export async function POST(request) {
                 sessionId,
                 conversationEnding: true,
                 unresolvedEscalation: true,
+            }, {
+                headers: buildRateLimitHeaders(rateLimit),
             });
       }
 
@@ -626,6 +713,8 @@ export async function POST(request) {
                   sessionId,
                   supportIncident: true,
                   supportNotifications,
+            }, {
+                  headers: buildRateLimitHeaders(rateLimit),
             });
       }
 
@@ -670,6 +759,8 @@ export async function POST(request) {
                               appointmentId: upgradeResult?.opportunity?.appointmentId || null,
                               mutationRoot: upgradeResult?.mutationRoot || null,
                         },
+                  }, {
+                        headers: buildRateLimitHeaders(rateLimit),
                   });
             }
 
@@ -691,6 +782,8 @@ export async function POST(request) {
                         sessionId,
                         upgradeHandled: true,
                         upgradeResult: { success: false, reason: 'declined' },
+                  }, {
+                        headers: buildRateLimitHeaders(rateLimit),
                   });
             }
       }
@@ -728,6 +821,8 @@ export async function POST(request) {
                                           availableGapMinutes: opportunity.availableGapMinutes,
                                           gapUnlimited: opportunity.gapUnlimited === true,
                                     },
+                              }, {
+                                    headers: buildRateLimitHeaders(rateLimit),
                               });
                         }
                   }
@@ -747,6 +842,8 @@ export async function POST(request) {
                         message: RATE_LIMIT_USER_MESSAGE,
                         sessionId,
                         rateLimited: true,
+              }, {
+                        headers: buildRateLimitHeaders(rateLimit),
               });
       }
 
@@ -836,6 +933,8 @@ export async function POST(request) {
                             sessionId,
                             memberIdentified: true,
                             memberProfile: profile,
+                }, {
+                            headers: buildRateLimitHeaders(rateLimit),
                 });
 
             } else {
@@ -854,6 +953,8 @@ export async function POST(request) {
                             message: failureMessage,
                             sessionId,
                             memberIdentified: false,
+                }, {
+                            headers: buildRateLimitHeaders(rateLimit),
                 });
             }
       }
@@ -861,12 +962,14 @@ export async function POST(request) {
       // \u2500\u2500 Normal response (no lookup) \u2500\u2500
       // Only accept session_summary in membership mode to prevent stray tags
       const summary = session.mode === 'membership' ? parseSessionSummary(response) : null;
-      let visibleResponse = stripAllSystemTags(response);
+      let visibleResponse = polishVisibleAssistantResponse(stripAllSystemTags(response), sanitizedMessage);
       if (summary) {
             visibleResponse = stripEndFollowUpQuestions(visibleResponse);
             if (!visibleResponse) {
                   visibleResponse = 'Thanks again. We have documented this conversation and our team will follow up.';
             }
+      } else if (!visibleResponse) {
+            visibleResponse = 'Could you tell me a little more so I can help?';
       }
 
       // Proactive upgrade suggestion on logistics questions (e.g., directions) for identified members.
@@ -914,7 +1017,9 @@ export async function POST(request) {
               session.outcome = summary.outcome;
       }
 
-      return NextResponse.json(result);
+      return NextResponse.json(result, {
+              headers: buildRateLimitHeaders(rateLimit),
+      });
 
     } catch (err) {
           console.error('Chat message error:', err);

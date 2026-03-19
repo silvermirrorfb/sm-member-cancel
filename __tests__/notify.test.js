@@ -40,8 +40,14 @@ describe('P2-2: SMTP missing does not log PII', () => {
 
     // Ensure no PII was logged
     const allLogCalls = consoleLogSpy.mock.calls.map(c => c.join(' ')).join(' ');
+    const allWarnCalls = consoleWarnSpy.mock.calls.map(c => c.join(' ')).join(' ');
     expect(allLogCalls).not.toContain('sophia@secret.com');
     expect(allLogCalls).not.toContain('I want to cancel');
     expect(allLogCalls).not.toContain('470-428-5700');
+    expect(allWarnCalls).not.toContain('Sophia Dowd');
+    expect(allWarnCalls).not.toContain('sophia@secret.com');
+    expect(allWarnCalls).not.toContain('470-428-5700');
+    expect(allWarnCalls).not.toContain('I want to cancel');
+    expect(allWarnCalls).toContain('SMTP not configured');
   });
 });

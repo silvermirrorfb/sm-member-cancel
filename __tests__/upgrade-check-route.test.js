@@ -19,8 +19,13 @@ vi.mock('../src/lib/boulevard.js', () => ({
 }));
 
 vi.mock('../src/lib/rate-limit.js', () => ({
-  checkRateLimit: () => ({ allowed: true, remaining: 39, retryAfterMs: 0 }),
+  checkRateLimit: () => ({ allowed: true, remaining: 39, retryAfterMs: 0, limit: 40, backend: 'memory', shadowMode: false, degraded: false, resetAt: 0 }),
   getClientIP: () => '127.0.0.1',
+  buildRateLimitHeaders: (result) => ({
+    'X-RateLimit-Limit': String(result?.limit || 0),
+    'X-RateLimit-Remaining': String(result?.remaining || 0),
+  }),
+  getRateLimitPolicy: () => ({ maxRequests: 40, shadowMode: false }),
 }));
 
 import { POST } from '../src/app/api/qa/upgrade-check/route.js';

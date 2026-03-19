@@ -4,6 +4,10 @@ import path from 'path';
 import { WALKIN_PRICES, CURRENT_RATES } from './boulevard.js';
 
 const SYSTEM_PROMPT_PATH = path.join(process.cwd(), 'src', 'lib', 'system-prompt.txt');
+const MEMBER_LOOKUP_TAG_RE = /<member_lookup>\s*([\s\S]*?)\s*<\/member_lookup>/;
+const MEMBER_LOOKUP_TAG_RE_GLOBAL = /<member_lookup>[\s\S]*?<\/member_lookup>/g;
+const SESSION_SUMMARY_TAG_RE = /<session_summary>\s*([\s\S]*?)\s*<\/session_summary>/;
+const SESSION_SUMMARY_TAG_RE_GLOBAL = /<session_summary>[\s\S]*?<\/session_summary>/g;
 
 let cachedSystemPrompt = null;
 
@@ -82,7 +86,7 @@ async function sendMessage(systemPrompt, messages) {
  * Returns parsed lookup data or null.
  */
 function parseMemberLookup(text) {
-  const match = text.match(/<member_lookup>\s*([\s\S]*?)\s*<\/member_lookup>/);
+  const match = String(text || '').match(MEMBER_LOOKUP_TAG_RE);
   if (!match) return null;
 
   try {
@@ -98,7 +102,7 @@ function parseMemberLookup(text) {
  * only sees the conversational message.
  */
 function stripMemberLookup(text) {
-  return text.replace(/<member_lookup>[\s\S]*?<\/member_lookup>/, '').trim();
+  return String(text || '').replace(MEMBER_LOOKUP_TAG_RE_GLOBAL, '').trim();
 }
 
 /**
@@ -106,7 +110,7 @@ function stripMemberLookup(text) {
  * Validates required fields to prevent stray/injected tags from ending conversations.
  */
 function parseSessionSummary(text) {
-  const match = text.match(/<session_summary>\s*([\s\S]*?)\s*<\/session_summary>/);
+  const match = String(text || '').match(SESSION_SUMMARY_TAG_RE);
   if (!match) return null;
 
   try {
@@ -127,7 +131,7 @@ function parseSessionSummary(text) {
  * Strip session summary tags from response.
  */
 function stripSummaryFromResponse(text) {
-  return text.replace(/<session_summary>[\s\S]*?<\/session_summary>/, '').trim();
+  return String(text || '').replace(SESSION_SUMMARY_TAG_RE_GLOBAL, '').trim();
 }
 
 /**

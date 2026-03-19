@@ -94,7 +94,8 @@ function computeTwilioSignature(url, params, authToken) {
 
 function isValidTwilioSignature({ url, params, authToken, providedSignature }) {
   const token = String(authToken || '').trim();
-  if (!token) return true;
+  // Fail closed so production never silently skips verification when auth is absent.
+  if (!token) return false;
   const provided = String(providedSignature || '').trim();
   if (!provided) return false;
   const expected = computeTwilioSignature(url, params, token);

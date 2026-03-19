@@ -13,6 +13,10 @@ function createSession(memberId, memberProfile, existingId) {
     memberId,
     memberProfile,
     messages: [], // Claude conversation history
+    lastProcessedUserFingerprint: null,
+    lastProcessedUserAt: null,
+    lastAssistantVisibleMessage: null,
+    lastAssistantAt: null,
     outcome: null,
     summary: null,
     createdAt: new Date(),
@@ -48,6 +52,10 @@ function addMessage(sessionId, role, content) {
   if (!session) return null;
   session.messages.push({ role, content });
   session.lastActivity = new Date();
+  if (role === 'assistant' || role === 'bot') {
+    session.lastAssistantVisibleMessage = content;
+    session.lastAssistantAt = new Date();
+  }
   return session;
 }
 

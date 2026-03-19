@@ -69,4 +69,13 @@ describe('twilio helpers', () => {
       providedSignature: 'bad',
     })).toBe(false);
   });
+
+  it('fails closed when the auth token is missing', () => {
+    expect(isValidTwilioSignature({
+      url: 'https://example.com/api/sms/twilio/webhook',
+      params: { From: '+15555551234', Body: 'Hi' },
+      authToken: '',
+      providedSignature: 'anything',
+    })).toBe(false);
+  });
 });

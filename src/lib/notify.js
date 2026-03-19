@@ -109,7 +109,8 @@ async function sendSummaryEmail(summary, transcript) {
   const to = recipients.length > 0 ? recipients.join(', ') : primaryTo;
 
   if (!host || !user || !pass) {
-    console.warn('SMTP not configured \u2014 email not sent for session:', summary.client_name, '| outcome:', summary.outcome);
+    const outcome = String(summary?.outcome || '').trim() || 'unknown';
+    console.warn('SMTP not configured \u2014 summary email skipped | outcome:', outcome);
     return { sent: false, reason: 'SMTP not configured' };
   }
 

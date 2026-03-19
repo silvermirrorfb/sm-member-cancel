@@ -289,6 +289,143 @@ describe('lookupMember fallback matching', () => {
   });
 });
 
+describe('lookupMember log redaction', () => {
+  const originalEnv = process.env;
+  const originalFetch = global.fetch;
+  let consoleLogSpy;
+
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      BOULEVARD_API_KEY: 'key',
+      BOULEVARD_API_SECRET: Buffer.from('secret').toString('base64'),
+      BOULEVARD_BUSINESS_ID: 'biz-id',
+      BOULEVARD_API_URL: 'https://dashboard.boulevard.io/api/2020-01/admin',
+    };
+    __resetBoulevardCachesForTests();
+    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    global.fetch = originalFetch;
+    consoleLogSpy.mockRestore();
+    vi.restoreAllMocks();
+  });
+
+  it('redacts raw email addresses and names in lookup logs', async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes('FindClientByEmail')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              clients: {
+                edges: [{
+                  node: {
+                    id: 'client-1',
+                    firstName: 'Sophia',
+                    lastName: 'Dowd',
+                    email: 'sophia.secret@test.com',
+                    mobilePhone: '+14704285700',
+                    createdAt: '2024-01-01T00:00:00.000Z',
+                    appointmentCount: 3,
+                    active: true,
+                    primaryLocation: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Brickell' },
+                  },
+                }],
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('FindMembershipForClient')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              memberships: {
+                edges: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('IntrospectType')) {
+        return { ok: true, json: async () => ({ data: { __type: null } }) };
+      }
+      return { ok: true, json: async () => ({ data: {} }) };
+    });
+
+    const result = await lookupMember('Sophia Dowd', 'sophia.secret@test.com');
+    expect(result?.clientId).toBe('client-1');
+
+    const logOutput = consoleLogSpy.mock.calls.map(args => args.join(' ')).join(' ');
+    expect(logOutput).toContain('s***@test.com');
+    expect(logOutput).not.toContain('sophia.secret@test.com');
+    expect(logOutput).not.toContain('Sophia Dowd');
+  });
+
+  it('redacts raw phone numbers and names in lookup logs', async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.query.includes('FindClientsByPhoneScan')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              clients: {
+                edges: [{
+                  node: {
+                    id: 'client-1',
+                    firstName: 'Sophia',
+                    lastName: 'Dowd',
+                    email: 'sophia.secret@test.com',
+                    mobilePhone: '+14704285700',
+                    createdAt: '2024-01-01T00:00:00.000Z',
+                    appointmentCount: 3,
+                    active: true,
+                    primaryLocation: { id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65', name: 'Brickell' },
+                  },
+                }],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('FindMembershipForClient')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              memberships: {
+                edges: [],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          }),
+        };
+      }
+      if (body.query.includes('IntrospectType')) {
+        return { ok: true, json: async () => ({ data: { __type: null } }) };
+      }
+      return { ok: true, json: async () => ({ data: {} }) };
+    });
+
+    const result = await lookupMember('Sophia Dowd', '470-428-5700');
+    expect(result?.clientId).toBe('client-1');
+
+    const logOutput = consoleLogSpy.mock.calls.map(args => args.join(' ')).join(' ');
+    expect(logOutput).toContain('***5700');
+    expect(logOutput).not.toContain('470-428-5700');
+    expect(logOutput).not.toContain('14704285700');
+    expect(logOutput).not.toContain('Sophia Dowd');
+  });
+});
+
 describe('constants', () => {
   it('WALKIN_PRICES has expected tiers', () => {
     expect(WALKIN_PRICES['30']).toBe(119);

@@ -12,6 +12,8 @@ describe('sessions', () => {
     expect(session.id).toBeTruthy();
     expect(session.status).toBe('active');
     expect(session.messages).toEqual([]);
+    expect(session.lastProcessedUserFingerprint).toBeNull();
+    expect(session.lastAssistantVisibleMessage).toBeNull();
   });
 
   it('creates a session with a provided ID (recovery)', () => {
@@ -38,6 +40,8 @@ describe('sessions', () => {
     expect(session.messages).toHaveLength(2);
     expect(session.messages[0].role).toBe('user');
     expect(session.messages[1].role).toBe('assistant');
+    expect(session.lastAssistantVisibleMessage).toBe('Hi there!');
+    expect(session.lastAssistantAt).toBeTruthy();
   });
 
   it('completes a session with outcome', () => {

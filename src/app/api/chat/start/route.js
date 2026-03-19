@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createSession } from '../../../../lib/sessions';
 import { logChatMessage } from '../../../../lib/notify';
-import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
+import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 
 const OPENING_MESSAGE = `Hi, I'm Silver Mirror's virtual assistant. I can help with facials, products, and memberships.\nHow can I help today?`;
 
@@ -9,14 +9,14 @@ export async function POST(request) {
   try {
     // Rate limit: max 10 new sessions per 10 minutes per IP
     const ip = getClientIP(request);
-    const { allowed, retryAfterMs } = checkRateLimit(ip, 'start', 10, 10 * 60 * 1000);
+    const rateLimit = await checkRateLimit(ip, 'start', 10, 10 * 60 * 1000);
 
-    if (!allowed) {
+    if (!rateLimit.allowed) {
       return NextResponse.json(
         { error: 'Too many requests. Please wait a few minutes and try again.' },
         {
           status: 429,
-          headers: { 'Retry-After': String(Math.ceil(retryAfterMs / 1000)) },
+          headers: buildRateLimitHeaders(rateLimit),
         }
       );
     }
@@ -33,6 +33,8 @@ export async function POST(request) {
     return NextResponse.json({
       sessionId: session.id,
       message: OPENING_MESSAGE,
+    }, {
+      headers: buildRateLimitHeaders(rateLimit),
     });
   } catch (err) {
     console.error('Chat start error:', err);

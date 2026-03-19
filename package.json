@@ -16,14 +16,16 @@
   "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.37.0",
     "googleapis": "^171.4.0",
     "next": "^16.1.6",
     "nodemailer": "^8.0.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "uuid": "^13.0.0"
-  }
-,
+  },
   "devDependencies": {
     "vitest": "^4.0.18"
-  }}
+  }
+}

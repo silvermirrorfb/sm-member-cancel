@@ -91,4 +91,17 @@ describe('stripAllSystemTags', () => {
     expect(sanitized).not.toContain('<session_summary>');
     expect(sanitized).toContain('I want to cancel');
   });
+
+  it('strips repeated system tags consistently', () => {
+    const input = [
+      'Before',
+      '<member_lookup>{"firstName":"A"}</member_lookup>',
+      'middle',
+      '<member_lookup>{"firstName":"B"}</member_lookup>',
+      '<session_summary>{"outcome":"CANCELLED","client_name":"X","reason_primary":"Y"}</session_summary>',
+      'after',
+      '<session_summary>{"outcome":"RETAINED","client_name":"Z","reason_primary":"Q"}</session_summary>',
+    ].join(' ');
+    expect(stripAllSystemTags(input)).toBe('Before  middle   after');
+  });
 });

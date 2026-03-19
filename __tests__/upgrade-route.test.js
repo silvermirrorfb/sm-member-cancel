@@ -7,10 +7,21 @@ const mockSendMessage = vi.fn();
 
 vi.mock('../src/lib/sessions.js', () => ({
   getSession: (id) => sessionStore.get(id) || null,
+  updateActivity: (id) => {
+    const session = sessionStore.get(id);
+    if (session) {
+      session.lastActivity = new Date();
+    }
+    return session || null;
+  },
   addMessage: (id, role, content) => {
     const session = sessionStore.get(id);
     if (!session) return null;
     session.messages.push({ role, content });
+    if (role === 'assistant' || role === 'bot') {
+      session.lastAssistantVisibleMessage = content;
+      session.lastAssistantAt = new Date();
+    }
     return session;
   },
   createSession: () => null,
@@ -39,8 +50,9 @@ vi.mock('../src/lib/notify.js', () => ({
 }));
 
 vi.mock('../src/lib/rate-limit.js', () => ({
-  checkRateLimit: () => ({ allowed: true, retryAfterMs: 0 }),
+  checkRateLimit: () => ({ allowed: true, retryAfterMs: 0, limit: 30, remaining: 29, backend: 'memory' }),
   getClientIP: () => '127.0.0.1',
+  buildRateLimitHeaders: () => ({}),
 }));
 
 import { POST } from '../src/app/api/chat/message/route.js';
@@ -52,6 +64,10 @@ function createSession(overrides = {}) {
     memberProfile: { clientId: 'client-1', tier: '30', accountStatus: 'active' },
     mode: 'membership',
     messages: [],
+    lastProcessedUserFingerprint: null,
+    lastProcessedUserAt: null,
+    lastAssistantVisibleMessage: null,
+    lastAssistantAt: null,
     createdAt: new Date('2026-03-09T00:00:00.000Z'),
     lastActivity: new Date('2026-03-09T00:00:00.000Z'),
     status: 'active',
@@ -250,5 +266,36 @@ describe('upgrade route flows', () => {
     expect(body.message).toContain('862 Lexington Ave');
     expect(body.message).toContain('Reply YES in');
     expect(session.pendingUpgradeOffer?.appointmentId).toBe('appt-1');
+  });
+
+  it('dedupes an immediate retry and reuses the last assistant reply', async () => {
+    const session = createSession();
+    sessionStore.set('sess-1', session);
+    mockSendMessage.mockResolvedValue('We are open 8am to 8pm.');
+
+    const firstRes = await POST(makeRequest('What are your hours?'));
+    const firstBody = await firstRes.json();
+    const secondRes = await POST(makeRequest('What are your hours?'));
+    const secondBody = await secondRes.json();
+
+    expect(firstBody.message).toBe('We are open 8am to 8pm.');
+    expect(secondBody.message).toBe('We are open 8am to 8pm.');
+    expect(secondBody.deduped).toBe(true);
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+    expect(session.messages.filter(msg => msg.role === 'user')).toHaveLength(1);
+    expect(session.messages.filter(msg => msg.role === 'assistant')).toHaveLength(1);
+  });
+
+  it('strips repeated virtual-assistant intros from model responses', async () => {
+    const session = createSession();
+    sessionStore.set('sess-1', session);
+    mockSendMessage.mockResolvedValue(
+      "Hi, I'm Silver Mirror's virtual assistant. I can help with facials, products, and memberships.\nHow can I help today?\n\nWe are open 8am to 8pm."
+    );
+
+    const res = await POST(makeRequest('What are your hours?'));
+    const body = await res.json();
+
+    expect(body.message).toBe('We are open 8am to 8pm.');
   });
 });

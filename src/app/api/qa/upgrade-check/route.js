@@ -9,7 +9,12 @@ import {
   buildProfile,
   resolveBoulevardLocationInput,
 } from '../../../../lib/boulevard';
-import { checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
+import {
+  buildRateLimitHeaders as buildSharedRateLimitHeaders,
+  checkRateLimit,
+  getClientIP,
+  getRateLimitPolicy,
+} from '../../../../lib/rate-limit';
 
 const QA_UPGRADE_LIMIT_MAX = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_MAX || 40), 1);
 const QA_UPGRADE_LIMIT_WINDOW_MS = Math.max(Number(process.env.QA_UPGRADE_CHECK_RATE_LIMIT_WINDOW_MS || 10 * 60 * 1000), 1000);
@@ -98,14 +103,26 @@ function writeIdempotencyEntry(key, fingerprint, status, payload) {
 
 function buildResponseHeaders({
   requestId,
+  rateLimitState,
+  defaultRateLimitState,
   remaining,
   retryAfterMs = 0,
   idempotencyKey = '',
   replayed = false,
 }) {
+  const effectiveRateLimit = rateLimitState || {
+    ...defaultRateLimitState,
+    remaining: Math.max(Number(remaining) || 0, 0),
+    retryAfterMs,
+    resetAt: Date.now() + Math.max(Number(retryAfterMs) || 0, 0),
+  };
   const headers = {
     'X-Request-Id': requestId,
-    ...buildRateLimitHeaders(remaining, retryAfterMs),
+    ...buildSharedRateLimitHeaders({
+      ...effectiveRateLimit,
+      remaining: Math.max(Number(remaining ?? effectiveRateLimit.remaining) || 0, 0),
+      retryAfterMs,
+    }),
   };
   if (idempotencyKey) {
     headers['X-Idempotency-Key'] = idempotencyKey;
@@ -155,13 +172,27 @@ export async function GET() {
 export async function POST(request) {
   const requestId = getRequestId(request);
   const idempotencyKey = getIdempotencyKey(request);
-  const defaultRemaining = QA_UPGRADE_LIMIT_MAX;
+  const qaRateLimitPolicy = getRateLimitPolicy('qa-upgrade-check', QA_UPGRADE_LIMIT_MAX, QA_UPGRADE_LIMIT_WINDOW_MS);
+  const initialRateLimitState = {
+    ...qaRateLimitPolicy,
+    limit: qaRateLimitPolicy.maxRequests,
+    remaining: qaRateLimitPolicy.maxRequests,
+    retryAfterMs: 0,
+    resetAt: Date.now(),
+    backend: 'memory',
+    shadowMode: false,
+    degraded: false,
+  };
+  const defaultRemaining = initialRateLimitState.limit;
+  let currentRateLimitState = initialRateLimitState;
 
   const respond = (payload, status, remaining = defaultRemaining, retryAfterMs = 0, replayed = false) =>
     NextResponse.json(payload, {
       status,
       headers: buildResponseHeaders({
         requestId,
+        rateLimitState: currentRateLimitState,
+        defaultRateLimitState: initialRateLimitState,
         remaining,
         retryAfterMs,
         idempotencyKey,
@@ -230,13 +261,15 @@ export async function POST(request) {
     }
 
     const ip = getClientIP(request);
-    const { allowed, remaining, retryAfterMs } = checkRateLimit(
+    const rateLimit = await checkRateLimit(
       ip,
       'qa-upgrade-check',
       QA_UPGRADE_LIMIT_MAX,
       QA_UPGRADE_LIMIT_WINDOW_MS,
     );
-    if (!allowed) {
+    currentRateLimitState = rateLimit;
+    const { remaining, retryAfterMs } = rateLimit;
+    if (!rateLimit.allowed) {
       return respond(
         { error: 'Too many requests. Please try again shortly.', requestId },
         429,

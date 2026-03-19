@@ -22,6 +22,7 @@ const originalEnv = process.env;
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
   getClientIP: (...args) => mockGetClientIP(...args),
+  buildRateLimitHeaders: vi.fn(() => ({})),
 }));
 
 vi.mock('../src/lib/sessions.js', () => ({
@@ -63,7 +64,7 @@ describe('twilio webhook route', () => {
   beforeEach(() => {
     process.env = { ...originalEnv, BOULEVARD_ENABLE_UPGRADE_MUTATION: 'true' };
     vi.clearAllMocks();
-    mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0 });
+    mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0, limit: 120, remaining: 119, backend: 'memory' });
     mockGetClientIP.mockReturnValue('127.0.0.1');
     mockGetReplyForMessageSid.mockReturnValue(null);
     mockIsValidTwilioSignature.mockReturnValue(true);
