@@ -556,10 +556,11 @@ async function safeSendMessage(systemPrompt, messages) {
 }
 
 export async function POST(request) {
+    let rateLimit = null;
     try {
           // Rate limit: max 30 messages per 10 minutes per IP
       const ip = getClientIP(request);
-          const rateLimit = await checkRateLimit(ip, 'message', 30, 10 * 60 * 1000);
+          rateLimit = await checkRateLimit(ip, 'message', 30, 10 * 60 * 1000);
 
       if (!rateLimit.allowed) {
               return NextResponse.json(
@@ -575,13 +576,13 @@ export async function POST(request) {
       if (!sessionId || !message) {
               return NextResponse.json(
                 { error: 'sessionId and message required.' },
-                { status: 400 }
+                { status: 400, headers: buildRateLimitHeaders(rateLimit) }
                       );
       }
       if (message.length > MAX_MESSAGE_CHARS) {
               return NextResponse.json(
                 { error: `Message is too long. Please keep messages under ${MAX_MESSAGE_CHARS} characters.` },
-                { status: 400 }
+                { status: 400, headers: buildRateLimitHeaders(rateLimit) }
                       );
       }
 
@@ -593,7 +594,7 @@ export async function POST(request) {
                   if (recoveredHistory.length === 0) {
                           return NextResponse.json(
                             { error: 'Session expired. Please start a new chat.' },
-                            { status: 409 }
+                            { status: 409, headers: buildRateLimitHeaders(rateLimit) }
                                       );
                   }
                   session = createSession(null, null, sessionId);
@@ -605,7 +606,7 @@ export async function POST(request) {
       if (session.status !== 'active') {
               return NextResponse.json(
                 { error: 'This conversation has already ended.' },
-                { status: 400 }
+                { status: 400, headers: buildRateLimitHeaders(rateLimit) }
                       );
       }
 
@@ -1028,13 +1029,13 @@ export async function POST(request) {
       if (err.status === 429) {
               return NextResponse.json(
                 { error: RATE_LIMIT_USER_MESSAGE },
-                { status: 429 }
+                { status: 429, headers: rateLimit ? buildRateLimitHeaders(rateLimit) : undefined }
                       );
       }
 
       return NextResponse.json(
         { error: 'Something went wrong. Please try again or call (888) 677-0055.' },
-        { status: 500 }
+        { status: 500, headers: rateLimit ? buildRateLimitHeaders(rateLimit) : undefined }
             );
     }
 }

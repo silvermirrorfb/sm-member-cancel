@@ -194,6 +194,14 @@ function resolveSessionIdForPhone(phone) {
   return created.id;
 }
 
+function buildTwimlHeaders(rateLimit, extraHeaders = {}) {
+  return {
+    'Content-Type': 'text/xml; charset=utf-8',
+    ...(rateLimit ? buildRateLimitHeaders(rateLimit) : {}),
+    ...extraHeaders,
+  };
+}
+
 async function runChatMessageForSms(sessionId, body, from) {
   const ipKey = normalizePhone(from) || `sms:${String(from || '').trim()}`;
   const internalReq = new Request('http://internal/api/chat/message', {
@@ -215,16 +223,14 @@ async function runChatMessageForSms(sessionId, body, from) {
 }
 
 export async function POST(request) {
+  let rateLimit = null;
   try {
     const ip = getClientIP(request);
-    const rateLimit = await checkRateLimit(ip, 'twilio-webhook', 120, 10 * 60 * 1000);
+    rateLimit = await checkRateLimit(ip, 'twilio-webhook', 120, 10 * 60 * 1000);
     if (!rateLimit.allowed) {
       return new NextResponse(buildTwimlMessage('Please try again in a moment.'), {
         status: 429,
-        headers: {
-          'Content-Type': 'text/xml; charset=utf-8',
-          ...buildRateLimitHeaders(rateLimit),
-        },
+        headers: buildTwimlHeaders(rateLimit),
       });
     }
 
@@ -237,7 +243,7 @@ export async function POST(request) {
     if (!from || !body) {
       return new NextResponse(buildTwimlMessage('Missing From/Body in Twilio webhook payload.'), {
         status: 400,
-        headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+        headers: buildTwimlHeaders(rateLimit),
       });
     }
 
@@ -249,7 +255,10 @@ export async function POST(request) {
       providedSignature,
     });
     if (!validSignature) {
-      return NextResponse.json({ error: 'Invalid Twilio signature.' }, { status: 403 });
+      return NextResponse.json(
+        { error: 'Invalid Twilio signature.' },
+        { status: 403, headers: buildRateLimitHeaders(rateLimit) },
+      );
     }
 
     if (messageSid) {
@@ -257,7 +266,7 @@ export async function POST(request) {
       if (replay) {
         return new NextResponse(replay, {
           status: 200,
-          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          headers: buildTwimlHeaders(rateLimit),
         });
       }
     }
@@ -273,7 +282,7 @@ export async function POST(request) {
         if (messageSid) storeReplyForMessageSid(messageSid, handoffTwiml);
         return new NextResponse(handoffTwiml, {
           status: 200,
-          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          headers: buildTwimlHeaders(rateLimit),
         });
       }
     }
@@ -293,7 +302,7 @@ export async function POST(request) {
         if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
         return new NextResponse(declineTwiml, {
           status: 200,
-          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          headers: buildTwimlHeaders(rateLimit),
         });
       }
 
@@ -320,7 +329,7 @@ export async function POST(request) {
         if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
         return new NextResponse(teamFinalizeTwiml, {
           status: 200,
-          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          headers: buildTwimlHeaders(rateLimit),
         });
       }
 
@@ -339,7 +348,7 @@ export async function POST(request) {
         if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
         return new NextResponse(fallbackTwiml, {
           status: 200,
-          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          headers: buildTwimlHeaders(rateLimit),
         });
       }
 
@@ -358,7 +367,7 @@ export async function POST(request) {
           if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
           return new NextResponse(declineTwiml, {
             status: 200,
-            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+            headers: buildTwimlHeaders(rateLimit),
           });
         }
 
@@ -391,7 +400,7 @@ export async function POST(request) {
           if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
           return new NextResponse(upgradeTwiml, {
             status: 200,
-            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+            headers: buildTwimlHeaders(rateLimit),
           });
         }
 
@@ -411,7 +420,7 @@ export async function POST(request) {
           if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
           return new NextResponse(fallbackTwiml, {
             status: 200,
-            headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+            headers: buildTwimlHeaders(rateLimit),
           });
         }
 
@@ -439,7 +448,7 @@ export async function POST(request) {
         if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
         return new NextResponse(upgradeTwiml, {
           status: 200,
-          headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+          headers: buildTwimlHeaders(rateLimit),
         });
       }
     }
@@ -451,13 +460,13 @@ export async function POST(request) {
 
     return new NextResponse(twiml, {
       status: 200,
-      headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+      headers: buildTwimlHeaders(rateLimit),
     });
   } catch (err) {
     console.error('Twilio webhook error:', err);
     return new NextResponse(buildTwimlMessage(GENERIC_FAILURE_REPLY), {
       status: 200,
-      headers: { 'Content-Type': 'text/xml; charset=utf-8' },
+      headers: buildTwimlHeaders(rateLimit),
     });
   }
 }

@@ -13,6 +13,7 @@ const mockBuildTwimlMessage = vi.fn();
 const mockIsValidTwilioSignature = vi.fn();
 const mockParseTwilioFormBody = vi.fn();
 const mockPostChatMessage = vi.fn();
+const mockBuildRateLimitHeaders = vi.fn();
 const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockReverifyAndApplyUpgradeForProfile = vi.fn();
@@ -22,7 +23,7 @@ const originalEnv = process.env;
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
   getClientIP: (...args) => mockGetClientIP(...args),
-  buildRateLimitHeaders: vi.fn(() => ({})),
+  buildRateLimitHeaders: (...args) => mockBuildRateLimitHeaders(...args),
 }));
 
 vi.mock('../src/lib/sessions.js', () => ({
@@ -65,6 +66,11 @@ describe('twilio webhook route', () => {
     process.env = { ...originalEnv, BOULEVARD_ENABLE_UPGRADE_MUTATION: 'true' };
     vi.clearAllMocks();
     mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0, limit: 120, remaining: 119, backend: 'memory' });
+    mockBuildRateLimitHeaders.mockReturnValue({
+      'X-RateLimit-Limit': '120',
+      'X-RateLimit-Remaining': '119',
+      'X-RateLimit-Backend': 'memory',
+    });
     mockGetClientIP.mockReturnValue('127.0.0.1');
     mockGetReplyForMessageSid.mockReturnValue(null);
     mockIsValidTwilioSignature.mockReturnValue(true);
@@ -110,9 +116,28 @@ describe('twilio webhook route', () => {
 
     expect(res.status).toBe(200);
     expect(text).toContain('continue in our web chat');
+    expect(res.headers.get('x-ratelimit-limit')).toBe('120');
     expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(session.smsHandoffToWeb).toBe(true);
     expect(session.smsInboundCount).toBe(10);
+  });
+
+  it('returns rate-limit headers on invalid signature responses', async () => {
+    mockIsValidTwilioSignature.mockReturnValue(false);
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-bad-sig',
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.error).toContain('Invalid Twilio signature');
+    expect(res.headers.get('x-ratelimit-limit')).toBe('120');
+    expect(res.headers.get('x-ratelimit-backend')).toBe('memory');
   });
 
   it('processes normal inbound SMS below handoff limit', async () => {

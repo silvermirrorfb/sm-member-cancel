@@ -136,3 +136,31 @@
 - Exact next actions:
   - leave `RATE_LIMIT_SHADOW_MODE=true` briefly and monitor production traffic/logs.
   - if clean, set `RATE_LIMIT_SHADOW_MODE=false` in Vercel and redeploy.
+
+## 2026-03-19 11:45 UTC
+- User provided a fresh QA tester probe summary from production after the `d187b4f` rollout.
+- Re-confirmed during this session:
+  - `main` and `origin/main` already contain the rollout commit;
+  - Vercel production deployments from the rollout window are `Ready`;
+  - authenticated `POST /api/chat/start` probes return the expected CORS exposure plus:
+    - `x-ratelimit-backend: upstash`
+    - `x-ratelimit-mode: shadow`
+    - `x-ratelimit-limit: 10`
+    - `x-ratelimit-reset`
+- Important follow-up finding:
+  - `POST /api/chat/message` and `POST /api/sms/twilio/webhook` both execute shared rate limiting before the session/signature checks, but their `409` / `403` early-return branches were not attaching rate-limit headers.
+  - That made the QA symptom real (`409` / `403` responses without `x-ratelimit-*`) even though the original explanation about execution order was incorrect.
+- Local fix completed:
+  - added consistent rate-limit headers to early-return `chat/message` responses and Twilio webhook responses;
+  - added regression tests for:
+    - expired-session `409` on chat message route
+    - invalid-signature `403` on Twilio webhook route
+- Local verification:
+  - targeted tests passing (`15/15`)
+  - `npm run build` passing
+- Detailed session record:
+  - `docs/SESSION_ACTIVITY_LOG_2026-03-19.md`
+- Exact next actions:
+  - commit + push the early-return header fix
+  - wait for Vercel production deploy
+  - re-probe `chat/message` `409` and Twilio `403` to confirm `x-ratelimit-*` is now present
