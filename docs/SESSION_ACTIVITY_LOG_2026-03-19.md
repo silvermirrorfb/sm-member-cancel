@@ -89,7 +89,42 @@ Timezone reference:
   - success
 
 ## Pending Next Action
-- Commit and push the early-return header fix so Vercel can deploy it.
-- After deploy, re-probe:
-  - `POST /api/chat/message` with expired session to confirm `409` now includes `x-ratelimit-*`
-  - `POST /api/sms/twilio/webhook` with unsigned request to confirm `403` now includes `x-ratelimit-*`
+- Completed during this session:
+  - committed early-return header fix as `84a7217` (`Preserve rate-limit headers on early returns`)
+  - pushed `main`
+  - Vercel production deployment:
+    - `https://sm-member-cancel-ov8ubmcuk-silver-mirror-projects.vercel.app`
+    - status: `Ready`
+
+## Post-Deploy Verification
+
+### `POST /api/chat/message` with expired session
+- Authenticated probe against deployment `ov8ubmcuk` returned `409`.
+- Response now includes:
+  - `x-ratelimit-backend: upstash`
+  - `x-ratelimit-mode: shadow`
+  - `x-ratelimit-limit: 30`
+  - `x-ratelimit-remaining: 29`
+  - `x-ratelimit-reset: 1773921600000`
+- Outcome:
+  - previously missing rate-limit headers are now present on the expired-session path.
+
+### `POST /api/sms/twilio/webhook` with unsigned request
+- Authenticated probe against deployment `ov8ubmcuk` returned `403 Invalid Twilio signature`.
+- Response now includes:
+  - `x-ratelimit-backend: upstash`
+  - `x-ratelimit-mode: shadow`
+  - `x-ratelimit-limit: 120`
+  - `x-ratelimit-remaining: 119`
+  - `x-ratelimit-reset: 1773921600000`
+- Outcome:
+  - previously missing rate-limit headers are now present on the unsigned-request rejection path.
+
+## Final State
+- Production rollout status:
+  - shared Upstash rate limiting is live in shadow mode
+  - browser-readable CORS exposure is live
+  - early-return `409` / `403` responses now preserve rate-limit headers
+- Remaining local-only changes outside this deploy:
+  - `src/app/widget/page.js`
+  - existing untracked local docs / artifacts

@@ -161,6 +161,13 @@
 - Detailed session record:
   - `docs/SESSION_ACTIVITY_LOG_2026-03-19.md`
 - Exact next actions:
-  - commit + push the early-return header fix
-  - wait for Vercel production deploy
-  - re-probe `chat/message` `409` and Twilio `403` to confirm `x-ratelimit-*` is now present
+  - completed in this session:
+    - committed `84a7217` (`Preserve rate-limit headers on early returns`)
+    - pushed `main`
+    - Vercel production deployment `sm-member-cancel-ov8ubmcuk-silver-mirror-projects.vercel.app` reached `Ready`
+    - re-probed `chat/message` `409` and Twilio `403`
+  - verified outcomes after deploy:
+    - expired-session `POST /api/chat/message` now includes `x-ratelimit-backend`, `x-ratelimit-mode`, `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset`
+    - unsigned `POST /api/sms/twilio/webhook` now includes the same rate-limit header family on the `403` response
+  - current recommended next action:
+    - continue observing production in shadow mode, then flip `RATE_LIMIT_SHADOW_MODE=false` when ready
