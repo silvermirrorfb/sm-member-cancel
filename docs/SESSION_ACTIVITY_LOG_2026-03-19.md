@@ -128,3 +128,12 @@ Timezone reference:
 - Remaining local-only changes outside this deploy:
   - `src/app/widget/page.js`
   - existing untracked local docs / artifacts
+
+## User Decision / Next Session Reminder
+- User chose to keep `RATE_LIMIT_SHADOW_MODE=true` for the rest of Thursday, March 19, 2026 (ET).
+- Do not flip enforcement today.
+- Next production step in the next session:
+  - review logs/headers once more for any unexpected `would-block`, degraded, or memory-fallback behavior;
+  - if clean, set `RATE_LIMIT_SHADOW_MODE=false` in Vercel;
+  - redeploy production;
+  - re-probe `POST /api/chat/start`, `POST /api/chat/message`, and `POST /api/qa/upgrade-check` after the deploy.

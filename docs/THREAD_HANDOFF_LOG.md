@@ -169,5 +169,10 @@
   - verified outcomes after deploy:
     - expired-session `POST /api/chat/message` now includes `x-ratelimit-backend`, `x-ratelimit-mode`, `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset`
     - unsigned `POST /api/sms/twilio/webhook` now includes the same rate-limit header family on the `403` response
-  - current recommended next action:
-    - continue observing production in shadow mode, then flip `RATE_LIMIT_SHADOW_MODE=false` when ready
+- current recommended next action:
+    - user decision recorded: keep `RATE_LIMIT_SHADOW_MODE=true` through Thursday, March 19, 2026 (ET)
+    - next session should:
+      - do one final review of production logs / headers
+      - set `RATE_LIMIT_SHADOW_MODE=false`
+      - redeploy
+      - re-probe chat start / message / QA routes
