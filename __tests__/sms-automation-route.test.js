@@ -5,6 +5,7 @@ const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockResolveBoulevardLocationInput = vi.fn();
 const mockCreateSession = vi.fn();
 const mockGetSession = vi.fn();
+const mockSaveSession = vi.fn();
 const mockBuildSystemPromptWithProfile = vi.fn();
 const mockFormatProfileForPrompt = vi.fn();
 const mockBindPhoneToSession = vi.fn();
@@ -29,6 +30,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
 vi.mock('../src/lib/sessions.js', () => ({
   createSession: (...args) => mockCreateSession(...args),
   getSession: (...args) => mockGetSession(...args),
+  saveSession: (...args) => mockSaveSession(...args),
 }));
 
 vi.mock('../src/lib/claude.js', () => ({
@@ -65,6 +67,7 @@ describe('sms automation route', () => {
     process.env.SMS_AUTOMATION_TOKEN = 'token';
     vi.clearAllMocks();
     mockGetSessionIdForPhone.mockReturnValue(null);
+    mockSaveSession.mockImplementation(async (session) => session);
     mockFormatProfileForPrompt.mockReturnValue('profile');
     mockBuildSystemPromptWithProfile.mockReturnValue('prompt');
     mockCreateSession.mockReturnValue({ id: 'sess-1', status: 'active' });

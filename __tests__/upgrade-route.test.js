@@ -25,6 +25,7 @@ vi.mock('../src/lib/sessions.js', () => ({
     return session;
   },
   createSession: () => null,
+  saveSession: async (session) => session,
 }));
 
 vi.mock('../src/lib/claude.js', () => ({

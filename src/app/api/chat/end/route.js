@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSession, createSession, addMessage, completeSession } from '../../../../lib/sessions';
+import { getSession, createSession, addMessage, completeSession, saveSession } from '../../../../lib/sessions';
 import { sendMessage, parseSessionSummary, stripSummaryFromResponse } from '../../../../lib/claude';
 import { processConversationEnd } from '../../../../lib/notify';
 
@@ -41,16 +41,16 @@ export async function POST(request) {
       return NextResponse.json({ error: 'sessionId required.' }, { status: 400 });
     }
 
-    let session = getSession(sessionId);
+    let session = await getSession(sessionId);
 
     const recoveredHistory = sanitizeRecoveredHistory(body.history);
 
     // P1-3: Recover session from client history on serverless rotation
     if (!session && recoveredHistory.length > 0) {
       console.warn(`End session ${sessionId} not found \u2014 recovering from client history`);
-      session = createSession(null, null, sessionId);
+      session = await createSession(null, null, sessionId);
       for (const msg of recoveredHistory) {
-        addMessage(session.id, msg.role, msg.content);
+        await addMessage(session.id, msg.role, msg.content);
       }
       // Restore member profile if provided by client
       if (body.memberProfile && typeof body.memberProfile === 'object') {
@@ -101,11 +101,12 @@ export async function POST(request) {
       session.mode = 'membership';
       if (!session.summary) session.summary = body.summary;
     }
+    await saveSession(session);
 
     // For general conversations (no member identified), just close cleanly
     // DO NOT log to the cancellations sheet \u2014 that's only for membership conversations
     if (!session.memberProfile) {
-      completeSession(sessionId, 'GENERAL', null);
+      await completeSession(sessionId, 'GENERAL', null);
 
       return NextResponse.json({
         completed: true,
@@ -187,7 +188,7 @@ export async function POST(request) {
     // Send email + log to cancellations sheet
     const notifyResult = await processConversationEnd(summary, transcript);
 
-    completeSession(sessionId, summary.outcome, summary);
+    await completeSession(sessionId, summary.outcome, summary);
 
     return NextResponse.json({
       completed: true,

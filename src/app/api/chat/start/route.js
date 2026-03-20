@@ -21,7 +21,7 @@ export async function POST(request) {
     }
 
     // Create a new session — no auth required
-    const session = createSession(null, null);
+    const session = await createSession(null, null);
     const sessionCreated = new Date(session.createdAt).toISOString();
 
     try {

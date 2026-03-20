@@ -4,6 +4,7 @@ const mockGetSession = vi.fn();
 const mockAddMessage = vi.fn();
 const mockCreateSession = vi.fn();
 const mockUpdateActivity = vi.fn();
+const mockSaveSession = vi.fn();
 const mockGetClientIP = vi.fn();
 const mockCheckRateLimit = vi.fn();
 const mockBuildRateLimitHeaders = vi.fn();
@@ -15,6 +16,7 @@ vi.mock('../src/lib/sessions.js', () => ({
   addMessage: (...args) => mockAddMessage(...args),
   createSession: (...args) => mockCreateSession(...args),
   updateActivity: (...args) => mockUpdateActivity(...args),
+  saveSession: (...args) => mockSaveSession(...args),
 }));
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -70,6 +72,7 @@ describe('chat message route rate-limit headers', () => {
       'X-RateLimit-Remaining': '29',
       'X-RateLimit-Backend': 'upstash',
     });
+    mockSaveSession.mockImplementation(async (session) => session);
     mockLogChatMessages.mockResolvedValue({ logged: true, count: 3 });
     mockGetSession.mockReturnValue(null);
   });

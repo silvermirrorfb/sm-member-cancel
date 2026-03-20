@@ -26,6 +26,7 @@ const styles = {
           background: WHITE,
           color: TEXT,
           overflow: 'hidden',
+          WebkitTextSizeAdjust: '100%',
     },
     header: {
           background: WHITE,
@@ -117,7 +118,7 @@ const styles = {
           border: `1px solid ${BORDER}`,
           borderRadius: 22,
           padding: '10px 16px',
-          fontSize: 13,
+          fontSize: 16,
           outline: 'none',
           fontFamily: 'inherit',
           resize: 'none',
@@ -153,6 +154,13 @@ const styles = {
     },
 };
 
+function shouldAutoFocusInput() {
+    if (typeof window === 'undefined') return false;
+    if (window.matchMedia?.('(pointer: coarse)').matches) return false;
+    if (window.innerWidth <= 768) return false;
+    return true;
+}
+
 // ── MAIN WIDGET COMPONENT ─────────────────────────────────────
 export default function ChatWidget() {
     const [phase, setPhase] = useState('loading'); // loading, chat, ended
@@ -163,6 +171,7 @@ export default function ChatWidget() {
     const [loading, setLoading] = useState(false);
     const messagesEndRef = useRef(null);
     const inputRef = useRef(null);
+    const didInitRef = useRef(false);
 
   const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -172,7 +181,7 @@ export default function ChatWidget() {
         scrollToBottom();
   }, [messages, loading, scrollToBottom]);
 
-  const startChatSession = useCallback(async () => {
+  const startChatSession = useCallback(async (options = {}) => {
         try {
                 const res = await fetch(`${API_BASE}/start`, {
                           method: 'POST',
@@ -185,7 +194,11 @@ export default function ChatWidget() {
                 }
                 setSessionId(data.sessionId);
                 setMemberProfile(null);
-                setMessages([{ role: 'bot', content: data.message }]);
+                const visibleMessage =
+                          typeof options.visibleMessage === 'string' && options.visibleMessage.trim()
+                          ? options.visibleMessage.trim()
+                          : data.message;
+                setMessages([{ role: 'bot', content: visibleMessage }]);
                 setPhase('chat');
                 return true;
         } catch (err) {
@@ -202,6 +215,8 @@ export default function ChatWidget() {
 
   // ── Initialize session on mount ──
   useEffect(() => {
+        if (didInitRef.current) return;
+        didInitRef.current = true;
         async function init() {
                 await startChatSession();
         }
@@ -209,7 +224,7 @@ export default function ChatWidget() {
   }, [startChatSession]);
 
   useEffect(() => {
-        if (phase === 'chat' && inputRef.current) {
+        if (phase === 'chat' && inputRef.current && shouldAutoFocusInput()) {
                 inputRef.current.focus();
         }
   }, [phase]);
@@ -279,16 +294,10 @@ export default function ChatWidget() {
 
           if (!res.ok || data.error) {
                     if (res.status === 404 || res.status === 409) {
-                              const restarted = await startChatSession();
-                              if (restarted) {
-                                        setMessages(prev => [
-                                                    ...prev,
-                                            {
-                                                          role: 'bot',
-                                                          content: 'I refreshed the chat after a connection reset. Please resend your last message.',
-                                            },
-                                                    ]);
-                              } else {
+                              const restarted = await startChatSession({
+                                        visibleMessage: 'I refreshed the chat after a connection reset. Please resend your last message.',
+                              });
+                              if (!restarted) {
                                         setMessages(prev => [
                                                     ...prev,
                                             {

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createSession, getSession } from '../../../../../lib/sessions';
+import { createSession, getSession, saveSession } from '../../../../../lib/sessions';
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../../lib/rate-limit';
 import {
   bindPhoneToSession,
@@ -183,13 +183,13 @@ function buildUpgradeSupportIncident({
   };
 }
 
-function resolveSessionIdForPhone(phone) {
+async function resolveSessionIdForPhone(phone) {
   const existing = getSessionIdForPhone(phone);
   if (existing) {
-    const session = getSession(existing);
+    const session = await getSession(existing);
     if (session && session.status === 'active') return existing;
   }
-  const created = createSession(null, null);
+  const created = await createSession(null, null);
   bindPhoneToSession(phone, created.id);
   return created.id;
 }
@@ -271,13 +271,14 @@ export async function POST(request) {
       }
     }
 
-    const sessionId = resolveSessionIdForPhone(from);
-    const activeSession = getSession(sessionId);
+    const sessionId = await resolveSessionIdForPhone(from);
+    const activeSession = await getSession(sessionId);
     if (activeSession) {
       const currentCount = Number(activeSession.smsInboundCount || 0);
       activeSession.smsInboundCount = currentCount + 1;
       if (activeSession.smsHandoffToWeb === true || activeSession.smsInboundCount >= SMS_WEB_HANDOFF_LIMIT) {
         activeSession.smsHandoffToWeb = true;
+        await saveSession(activeSession);
         const handoffTwiml = buildTwimlMessage(buildSmsWebHandoffReply());
         if (messageSid) storeReplyForMessageSid(messageSid, handoffTwiml);
         return new NextResponse(handoffTwiml, {
@@ -293,11 +294,13 @@ export async function POST(request) {
       const hasPendingOffer = pendingOffer && !isPendingOfferExpired(pendingOffer);
       if (activeSession?.pendingUpgradeOffer && !hasPendingOffer) {
         activeSession.pendingUpgradeOffer = null;
+        await saveSession(activeSession);
       }
 
       if (hasPendingOffer && isNegative(intentText)) {
         activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
         activeSession.pendingUpgradeOffer = null;
+        await saveSession(activeSession);
         const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
         if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
         return new NextResponse(declineTwiml, {
@@ -325,6 +328,7 @@ export async function POST(request) {
         queueSupportIncident(incident);
         activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
         activeSession.pendingUpgradeOffer = null;
+        await saveSession(activeSession);
         const teamFinalizeTwiml = buildTwimlMessage(buildPendingOfferFinalizeReply(pendingOffer));
         if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
         return new NextResponse(teamFinalizeTwiml, {
@@ -358,6 +362,7 @@ export async function POST(request) {
         if (activeSession && profile) {
           activeSession.memberId = profile.clientId || null;
           activeSession.memberProfile = profile;
+          await saveSession(activeSession);
         }
       }
 
@@ -394,6 +399,7 @@ export async function POST(request) {
           if (activeSession) {
             activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
             activeSession.pendingUpgradeOffer = null;
+            await saveSession(activeSession);
           }
           const upgradeText = buildUpgradeApplyReply(upgradeResult, upgradeResult?.opportunity || null, pendingOffer);
           const upgradeTwiml = buildTwimlMessage(upgradeText);
@@ -442,6 +448,7 @@ export async function POST(request) {
         if (activeSession) {
           activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId || opportunity?.appointmentId || null;
           activeSession.pendingUpgradeOffer = null;
+          await saveSession(activeSession);
         }
         const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer);
         const upgradeTwiml = buildTwimlMessage(upgradeText);

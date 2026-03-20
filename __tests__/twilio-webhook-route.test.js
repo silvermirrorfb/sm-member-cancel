@@ -4,6 +4,7 @@ const mockCheckRateLimit = vi.fn();
 const mockGetClientIP = vi.fn();
 const mockCreateSession = vi.fn();
 const mockGetSession = vi.fn();
+const mockSaveSession = vi.fn();
 const mockBindPhoneToSession = vi.fn();
 const mockGetSessionIdForPhone = vi.fn();
 const mockGetReplyForMessageSid = vi.fn();
@@ -29,6 +30,7 @@ vi.mock('../src/lib/rate-limit.js', () => ({
 vi.mock('../src/lib/sessions.js', () => ({
   createSession: (...args) => mockCreateSession(...args),
   getSession: (...args) => mockGetSession(...args),
+  saveSession: (...args) => mockSaveSession(...args),
 }));
 
 vi.mock('../src/lib/sms-sessions.js', () => ({
@@ -72,6 +74,7 @@ describe('twilio webhook route', () => {
       'X-RateLimit-Backend': 'memory',
     });
     mockGetClientIP.mockReturnValue('127.0.0.1');
+    mockSaveSession.mockImplementation(async (session) => session);
     mockGetReplyForMessageSid.mockReturnValue(null);
     mockIsValidTwilioSignature.mockReturnValue(true);
     mockNormalizePhone.mockImplementation(value => String(value || ''));

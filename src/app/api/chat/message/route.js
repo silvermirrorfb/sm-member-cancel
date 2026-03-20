@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSession, addMessage, createSession, updateActivity } from '../../../../lib/sessions';
+import { getSession, addMessage, createSession, updateActivity, saveSession } from '../../../../lib/sessions';
 import {
     getSystemPrompt,
     buildSystemPromptWithProfile,
@@ -582,6 +582,7 @@ async function flushChatTranscript(session, sessionCreated, entries, contextLabe
             content: entry.content,
         })));
         session.chatTranscriptStarted = true;
+        await saveSession(session);
     } catch (err) {
         console.warn(`Chat transcript flush failed for ${contextLabel}:`, err);
     }
@@ -618,7 +619,7 @@ export async function POST(request) {
                       );
       }
 
-      let session = getSession(sessionId);
+      let session = await getSession(sessionId);
           if (!session) {
                   // Serverless instance rotation — recover session from client history
                   console.warn(`Session ${sessionId} not found — attempting recovery from client history`);
@@ -629,10 +630,10 @@ export async function POST(request) {
                             { status: 409, headers: buildRateLimitHeaders(rateLimit) }
                                       );
                   }
-                  session = createSession(null, null, sessionId);
+                  session = await createSession(null, null, sessionId);
                   session.chatTranscriptStarted = recoveredHistory.some(msg => msg.role === 'user');
                   for (const msg of recoveredHistory) {
-                          addMessage(session.id, msg.role, msg.content);
+                          await addMessage(session.id, msg.role, msg.content);
                   }
           }
 
@@ -658,7 +659,7 @@ export async function POST(request) {
         session.lastAssistantVisibleMessage.trim().length > 0;
 
       if (isDuplicateUserTurn) {
-            updateActivity(sessionId);
+            await updateActivity(sessionId);
             const dedupedResult = {
                   message: session.lastAssistantVisibleMessage,
                   sessionId,
@@ -678,13 +679,13 @@ export async function POST(request) {
       const pendingTranscriptEntries = [];
 
       // Add user message to history
-      addMessage(sessionId, 'user', sanitizedMessage);
+      await addMessage(sessionId, 'user', sanitizedMessage);
       pendingTranscriptEntries.push({ role: 'user', content: sanitizedMessage });
 
       // Direct FAQ answer for a common question: credits during pause/hold.
       if (isPauseCreditsQuestion(sanitizedMessage)) {
             const pauseCreditsResponse = buildPauseCreditsAnswer(session.memberProfile || null);
-            addMessage(sessionId, 'assistant', pauseCreditsResponse);
+            await addMessage(sessionId, 'assistant', pauseCreditsResponse);
             pendingTranscriptEntries.push({ role: 'assistant', content: pauseCreditsResponse });
             await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'pause-credit response');
             return NextResponse.json({
@@ -698,7 +699,7 @@ export async function POST(request) {
       // For unresolved general support issues, escalate and end chat immediately.
       if (session.mode !== 'membership' && isUnresolvedIssueMessage(sanitizedMessage)) {
             const unresolvedResponse = buildUnresolvedEscalationResponse();
-            addMessage(sessionId, 'assistant', unresolvedResponse);
+            await addMessage(sessionId, 'assistant', unresolvedResponse);
             pendingTranscriptEntries.push({ role: 'assistant', content: unresolvedResponse });
             await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'unresolved escalation response');
             return NextResponse.json({
@@ -732,7 +733,7 @@ export async function POST(request) {
             }
 
             const supportResponse = buildSupportIncidentResponse();
-            addMessage(sessionId, 'assistant', supportResponse);
+            await addMessage(sessionId, 'assistant', supportResponse);
             pendingTranscriptEntries.push({ role: 'assistant', content: supportResponse });
             await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'support incident response');
 
@@ -771,11 +772,12 @@ export async function POST(request) {
                   const upgradeMessage = upgradeResult.success
                     ? buildUpgradeSuccessMessage(upgradeResult, pendingOffer)
                     : buildUpgradeUnavailableMessage(upgradeResult, pendingOffer);
-                  addMessage(sessionId, 'assistant', upgradeMessage);
+                  await addMessage(sessionId, 'assistant', upgradeMessage);
                   pendingTranscriptEntries.push({ role: 'assistant', content: upgradeMessage });
                   await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'upgrade response');
                   session.lastUpgradeOfferAppointmentId = session.pendingUpgradeOffer.appointmentId || null;
                   session.pendingUpgradeOffer = null;
+                  await saveSession(session);
                   return NextResponse.json({
                         message: upgradeMessage,
                         sessionId,
@@ -798,11 +800,12 @@ export async function POST(request) {
                         markUpgradeOfferEvent(profilePhone, appointmentId, 'declined');
                   }
                   const declineMessage = 'No problem at all — we will keep your appointment as-is.';
-                  addMessage(sessionId, 'assistant', declineMessage);
+                  await addMessage(sessionId, 'assistant', declineMessage);
                   pendingTranscriptEntries.push({ role: 'assistant', content: declineMessage });
                   await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'upgrade decline response');
                   session.lastUpgradeOfferAppointmentId = session.pendingUpgradeOffer.appointmentId || null;
                   session.pendingUpgradeOffer = null;
+                  await saveSession(session);
                   return NextResponse.json({
                         message: declineMessage,
                         sessionId,
@@ -831,7 +834,7 @@ export async function POST(request) {
                                     createdAt: new Date().toISOString(),
                                     expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
                               };
-                              addMessage(sessionId, 'assistant', offerMessage);
+                              await addMessage(sessionId, 'assistant', offerMessage);
                               pendingTranscriptEntries.push({ role: 'assistant', content: offerMessage });
                               await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'direct upgrade offer');
                               return NextResponse.json({
@@ -862,7 +865,7 @@ export async function POST(request) {
 
       if (response === null) {
               // Claude is rate-limited \u2014 return friendly message without crashing
-            addMessage(sessionId, 'assistant', RATE_LIMIT_USER_MESSAGE);
+            await addMessage(sessionId, 'assistant', RATE_LIMIT_USER_MESSAGE);
             pendingTranscriptEntries.push({ role: 'assistant', content: RATE_LIMIT_USER_MESSAGE });
             await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'anthropic rate-limit response');
               return NextResponse.json({
@@ -948,7 +951,7 @@ export async function POST(request) {
                 // tier/rate/tenure data and avoid contradictory pre-lookup text.
                 const recentUserText = collectRecentUserText(session.messages);
                 const greeting = buildPostLookupGreeting(profile, sanitizedMessage, { recentUserText });
-                addMessage(sessionId, 'assistant', greeting);
+                await addMessage(sessionId, 'assistant', greeting);
                 pendingTranscriptEntries.push({ role: 'assistant', content: greeting });
                 await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'member greeting');
 
@@ -966,7 +969,7 @@ export async function POST(request) {
                       session.lookupFailureCount = Number(session.lookupFailureCount || 0) + 1;
                       const firstName = String(verificationLookup?.firstName || lookupRequest.firstName || '').trim();
                       const failureMessage = buildLookupFailureMessage(firstName, session.lookupFailureCount);
-                      addMessage(sessionId, 'assistant', failureMessage);
+                      await addMessage(sessionId, 'assistant', failureMessage);
                       pendingTranscriptEntries.push({ role: 'assistant', content: failureMessage });
                       await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'lookup failure response');
 
@@ -1015,7 +1018,7 @@ export async function POST(request) {
       }
 
       // Store CLEANED response in history (not raw with tags)
-      addMessage(sessionId, 'assistant', visibleResponse);
+      await addMessage(sessionId, 'assistant', visibleResponse);
       pendingTranscriptEntries.push({ role: 'assistant', content: visibleResponse });
       await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'bot response');
 
@@ -1033,6 +1036,7 @@ export async function POST(request) {
               result.summary = summary;
               session.summary = summary;
               session.outcome = summary.outcome;
+              await saveSession(session);
       }
 
       return NextResponse.json(result, {

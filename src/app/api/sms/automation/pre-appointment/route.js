@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createSession, getSession } from '../../../../../lib/sessions';
+import { createSession, getSession, saveSession } from '../../../../../lib/sessions';
 import { buildSystemPromptWithProfile } from '../../../../../lib/claude';
 import {
   evaluateUpgradeOpportunityForProfile,
@@ -284,16 +284,16 @@ function resolveCandidates(body) {
   return [];
 }
 
-function getOrCreateSmsSession(profile) {
+async function getOrCreateSmsSession(profile) {
   const phone = asText(profile?.phone);
   let session = null;
   const existingId = phone ? getSessionIdForPhone(phone) : null;
   if (existingId) {
-    const existing = getSession(existingId);
+    const existing = await getSession(existingId);
     if (existing && existing.status === 'active') session = existing;
   }
   if (!session) {
-    session = createSession(profile?.clientId || null, profile || null);
+    session = await createSession(profile?.clientId || null, profile || null);
   }
 
   session.memberId = profile?.clientId || session.memberId || null;
@@ -303,6 +303,7 @@ function getOrCreateSmsSession(profile) {
   session.status = 'active';
   session.lastActivity = new Date();
   if (phone) bindPhoneToSession(phone, session.id);
+  await saveSession(session);
   return session;
 }
 
@@ -653,7 +654,7 @@ export async function POST(request) {
         continue;
       }
 
-      const session = getOrCreateSmsSession(profile);
+      const session = await getOrCreateSmsSession(profile);
       const appointmentId = selectedOffer.appointmentId || null;
       const offerState = appointmentId ? getUpgradeOfferState(profilePhone, appointmentId) : null;
       if (offerState?.upgradedAt || offerState?.acceptedAt) {
@@ -885,6 +886,7 @@ export async function POST(request) {
           expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
           reminderSentAt: offerType === 'reminder' ? nowIso : pending?.reminderSentAt || null,
         };
+        await saveSession(session);
         sentCount += 1;
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
