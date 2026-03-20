@@ -13,6 +13,7 @@ function createSession(memberId, memberProfile, existingId) {
     memberId,
     memberProfile,
     messages: [], // Claude conversation history
+    chatTranscriptStarted: false,
     lastProcessedUserFingerprint: null,
     lastProcessedUserAt: null,
     lastAssistantVisibleMessage: null,

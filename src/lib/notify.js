@@ -1,6 +1,21 @@
 import nodemailer from 'nodemailer';
 
 const DEFAULT_SUPPORT_INCIDENT_SHEET_ID = '15Wame-TJbihEAKEnlL51rhSWRsiVpehz7RO1Gsa9s4c';
+const CHATLOG_SHEET_TITLE = 'Sheet1';
+const CHATLOG_HEADERS = [
+  'Session ID',
+  'Session Created At',
+  'Session Updated At',
+  'Message Role',
+  'Message Content',
+];
+const WIDGET_OPEN_SHEET_TITLE = 'WidgetOpens';
+const WIDGET_OPEN_HEADERS = [
+  'Session ID',
+  'Session Opened At',
+  'Logged At',
+  'Source',
+];
 
 function isNilLike(value) {
   if (value === null || value === undefined) return true;
@@ -74,6 +89,76 @@ async function getFirstSheetMeta(sheets, spreadsheetId) {
     title: sheet?.title || 'Sheet1',
     sheetId: sheet?.sheetId ?? 0,
   };
+}
+
+async function getOrCreateSheetMeta(sheets, spreadsheetId, title) {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets(properties(title,index,sheetId))',
+  });
+  const existing = (meta?.data?.sheets || [])
+    .map(sheet => sheet?.properties)
+    .find(sheet => String(sheet?.title || '').trim() === title);
+
+  if (existing) {
+    return {
+      title: existing.title,
+      sheetId: existing.sheetId ?? 0,
+    };
+  }
+
+  const created = await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [{
+        addSheet: {
+          properties: { title },
+        },
+      }],
+    },
+  });
+
+  const createdSheet = created?.data?.replies?.[0]?.addSheet?.properties;
+  return {
+    title: createdSheet?.title || title,
+    sheetId: createdSheet?.sheetId ?? 0,
+  };
+}
+
+async function ensureSimpleSheetHeaders(sheets, spreadsheetId, sheetMeta, headers) {
+  const headerRange = `${sheetMeta.title}!1:1`;
+  const currentHeader = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: headerRange,
+  });
+  const currentRow = currentHeader?.data?.values?.[0] || [];
+  const hasHeader = headers.every((value, index) => String(currentRow[index] || '').trim() === value);
+
+  if (!hasHeader) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheetMeta.title}!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [headers] },
+    });
+  }
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: {
+              sheetId: sheetMeta.sheetId,
+              gridProperties: { frozenRowCount: 1 },
+            },
+            fields: 'gridProperties.frozenRowCount',
+          },
+        },
+      ],
+    },
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -411,37 +496,80 @@ async function logToGoogleSheets(summary) {
 // Columns: Session ID | Session Created | Session Updated | Message Role | Message Content
 // ══════════════════════════════════════════════════════════════
 
-async function logChatMessage(sessionId, sessionCreated, role, content) {
+async function logChatMessages(entries) {
   const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
   if (!sheetId) {
     console.warn('GOOGLE_CHATLOG_SHEET_ID not configured — skipping message log');
     return { logged: false, reason: 'Not configured' };
   }
 
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { logged: false, reason: 'No entries' };
+  }
+
   try {
     const sheets = await getSheetsClient();
     if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
+    const sheetMeta = await getOrCreateSheetMeta(sheets, sheetId, CHATLOG_SHEET_TITLE);
+    await ensureSimpleSheetHeaders(sheets, sheetId, sheetMeta, CHATLOG_HEADERS);
 
     const now = new Date().toISOString();
+    const rows = entries.map((entry) => ([
+      entry.sessionId,
+      entry.sessionCreated,
+      entry.sessionUpdated || now,
+      entry.role,
+      entry.content,
+    ]));
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
-      range: 'Sheet1!A:E',
+      range: `${sheetMeta.title}!A:E`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: rows },
+    });
+
+    return { logged: true, count: rows.length };
+  } catch (err) {
+    console.error('Chat message logging failed:', err);
+    return { logged: false, reason: err.message };
+  }
+}
+
+async function logChatMessage(sessionId, sessionCreated, role, content) {
+  return logChatMessages([{ sessionId, sessionCreated, role, content }]);
+}
+
+async function logChatWidgetOpen(sessionId, sessionCreated, source = 'widget') {
+  const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
+  if (!sheetId) {
+    console.warn('GOOGLE_CHATLOG_SHEET_ID not configured — skipping widget open log');
+    return { logged: false, reason: 'Not configured' };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
+    const sheetMeta = await getOrCreateSheetMeta(sheets, sheetId, WIDGET_OPEN_SHEET_TITLE);
+    await ensureSimpleSheetHeaders(sheets, sheetId, sheetMeta, WIDGET_OPEN_HEADERS);
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: `${sheetMeta.title}!A:D`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[
           sessionId,
           sessionCreated,
-          now,
-          role,
-          content,
+          new Date().toISOString(),
+          source,
         ]],
       },
     });
 
     return { logged: true };
   } catch (err) {
-    console.error('Chat message logging failed:', err);
+    console.error('Widget open logging failed:', err);
     return { logged: false, reason: err.message };
   }
 }
@@ -691,7 +819,9 @@ async function processConversationEnd(summary, transcript) {
 export {
   sendSummaryEmail,
   logToGoogleSheets,
+  logChatMessages,
   logChatMessage,
+  logChatWidgetOpen,
   logSupportIncident,
   processConversationEnd,
 };

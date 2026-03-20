@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createSession } from '../../../../lib/sessions';
-import { logChatMessage } from '../../../../lib/notify';
+import { logChatWidgetOpen } from '../../../../lib/notify';
+import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
-
-const OPENING_MESSAGE = `Hi, I'm Silver Mirror's virtual assistant. I can help with facials, products, and memberships.\nHow can I help today?`;
 
 export async function POST(request) {
   try {
@@ -25,10 +24,11 @@ export async function POST(request) {
     const session = createSession(null, null);
     const sessionCreated = new Date(session.createdAt).toISOString();
 
-    // Log the greeting to the chatbot message log (fire-and-forget)
-    logChatMessage(session.id, sessionCreated, 'assistant', OPENING_MESSAGE).catch(err =>
-      console.warn('Chatlog failed for greeting:', err)
-    );
+    try {
+      await logChatWidgetOpen(session.id, sessionCreated, 'widget');
+    } catch (err) {
+      console.warn('Widget open log failed:', err);
+    }
 
     return NextResponse.json({
       sessionId: session.id,

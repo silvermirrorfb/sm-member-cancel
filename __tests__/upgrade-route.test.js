@@ -45,7 +45,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
 }));
 
 vi.mock('../src/lib/notify.js', () => ({
-  logChatMessage: vi.fn(async () => ({ logged: true })),
+  logChatMessages: vi.fn(async () => ({ logged: true })),
   logSupportIncident: vi.fn(async () => ({ logged: true })),
 }));
 

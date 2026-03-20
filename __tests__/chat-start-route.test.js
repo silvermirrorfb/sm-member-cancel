@@ -4,7 +4,7 @@ const mockCheckRateLimit = vi.fn();
 const mockGetClientIP = vi.fn();
 const mockBuildRateLimitHeaders = vi.fn();
 const mockCreateSession = vi.fn();
-const mockLogChatMessage = vi.fn();
+const mockLogChatWidgetOpen = vi.fn();
 
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
@@ -17,7 +17,7 @@ vi.mock('../src/lib/sessions.js', () => ({
 }));
 
 vi.mock('../src/lib/notify.js', () => ({
-  logChatMessage: (...args) => mockLogChatMessage(...args),
+  logChatWidgetOpen: (...args) => mockLogChatWidgetOpen(...args),
 }));
 
 import { POST } from '../src/app/api/chat/start/route.js';
@@ -36,7 +36,7 @@ describe('chat start route rate-limit headers', () => {
       id: 'sess-1',
       createdAt: '2026-03-18T00:00:00.000Z',
     });
-    mockLogChatMessage.mockResolvedValue({ logged: true });
+    mockLogChatWidgetOpen.mockResolvedValue({ logged: true });
   });
 
   afterEach(() => {
@@ -60,6 +60,11 @@ describe('chat start route rate-limit headers', () => {
     expect(body.sessionId).toBe('sess-1');
     expect(res.headers.get('x-ratelimit-limit')).toBe('10');
     expect(res.headers.get('x-ratelimit-remaining')).toBe('9');
+    expect(mockLogChatWidgetOpen).toHaveBeenCalledWith(
+      'sess-1',
+      '2026-03-18T00:00:00.000Z',
+      'widget'
+    );
   });
 
   it('returns rate-limit headers on blocked responses', async () => {

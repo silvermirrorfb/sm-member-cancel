@@ -12,6 +12,7 @@ describe('sessions', () => {
     expect(session.id).toBeTruthy();
     expect(session.status).toBe('active');
     expect(session.messages).toEqual([]);
+    expect(session.chatTranscriptStarted).toBe(false);
     expect(session.lastProcessedUserFingerprint).toBeNull();
     expect(session.lastAssistantVisibleMessage).toBeNull();
   });

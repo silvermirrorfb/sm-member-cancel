@@ -7,6 +7,8 @@ const mockUpdateActivity = vi.fn();
 const mockGetClientIP = vi.fn();
 const mockCheckRateLimit = vi.fn();
 const mockBuildRateLimitHeaders = vi.fn();
+const mockSendMessage = vi.fn();
+const mockLogChatMessages = vi.fn();
 
 vi.mock('../src/lib/sessions.js', () => ({
   getSession: (...args) => mockGetSession(...args),
@@ -24,7 +26,7 @@ vi.mock('../src/lib/rate-limit.js', () => ({
 vi.mock('../src/lib/claude.js', () => ({
   getSystemPrompt: vi.fn(),
   buildSystemPromptWithProfile: vi.fn(),
-  sendMessage: vi.fn(),
+  sendMessage: (...args) => mockSendMessage(...args),
   parseMemberLookup: vi.fn(),
   parseSessionSummary: vi.fn(),
   stripAllSystemTags: (value) => String(value || ''),
@@ -39,7 +41,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
 }));
 
 vi.mock('../src/lib/notify.js', () => ({
-  logChatMessage: vi.fn(),
+  logChatMessages: (...args) => mockLogChatMessages(...args),
   logSupportIncident: vi.fn(),
 }));
 
@@ -68,6 +70,7 @@ describe('chat message route rate-limit headers', () => {
       'X-RateLimit-Remaining': '29',
       'X-RateLimit-Backend': 'upstash',
     });
+    mockLogChatMessages.mockResolvedValue({ logged: true, count: 3 });
     mockGetSession.mockReturnValue(null);
   });
 
@@ -93,5 +96,68 @@ describe('chat message route rate-limit headers', () => {
     expect(body.error).toContain('Session expired');
     expect(res.headers.get('x-ratelimit-limit')).toBe('30');
     expect(res.headers.get('x-ratelimit-backend')).toBe('upstash');
+  });
+
+  it('logs the first real conversation turn as a single transcript batch', async () => {
+    const session = {
+      id: 'sess-2',
+      createdAt: '2026-03-18T00:00:00.000Z',
+      status: 'active',
+      messages: [],
+      memberProfile: null,
+      chatTranscriptStarted: false,
+      lastProcessedUserFingerprint: null,
+      lastProcessedUserAt: null,
+      lastAssistantVisibleMessage: null,
+      lastAssistantAt: null,
+    };
+
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sessionId, role, content) => {
+      session.messages.push({ role, content });
+      if (role === 'assistant') {
+        session.lastAssistantVisibleMessage = content;
+        session.lastAssistantAt = new Date('2026-03-18T00:00:01.000Z');
+      }
+      return session;
+    });
+    mockSendMessage.mockResolvedValue('Helpful assistant reply');
+
+    const req = new Request('http://localhost/api/chat/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-2',
+        message: 'hello there',
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.message).toBe('Helpful assistant reply');
+    expect(session.chatTranscriptStarted).toBe(true);
+    expect(mockLogChatMessages).toHaveBeenCalledTimes(1);
+    expect(mockLogChatMessages).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sessionId: 'sess-2',
+        sessionCreated: '2026-03-18T00:00:00.000Z',
+        role: 'assistant',
+        content: "Hi, I'm Silver Mirror's virtual assistant. I can help with facials, products, and memberships.\nHow can I help today?",
+      }),
+      expect.objectContaining({
+        sessionId: 'sess-2',
+        sessionCreated: '2026-03-18T00:00:00.000Z',
+        role: 'user',
+        content: 'hello there',
+      }),
+      expect.objectContaining({
+        sessionId: 'sess-2',
+        sessionCreated: '2026-03-18T00:00:00.000Z',
+        role: 'assistant',
+        content: 'Helpful assistant reply',
+      }),
+    ]);
   });
 });

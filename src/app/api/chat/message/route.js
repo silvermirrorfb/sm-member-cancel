@@ -15,7 +15,8 @@ import {
     evaluateUpgradeOpportunityForProfile,
     reverifyAndApplyUpgradeForProfile,
 } from '../../../../lib/boulevard';
-import { logChatMessage, logSupportIncident } from '../../../../lib/notify';
+import { logChatMessages, logSupportIncident } from '../../../../lib/notify';
+import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
 
@@ -555,6 +556,37 @@ async function safeSendMessage(systemPrompt, messages) {
     }
 }
 
+async function flushChatTranscript(session, sessionCreated, entries, contextLabel) {
+    if (!session || !Array.isArray(entries) || entries.length === 0) return;
+
+    const timestamp = new Date().toISOString();
+    const payload = session.chatTranscriptStarted
+        ? entries
+        : [
+            {
+                sessionId: session.id,
+                sessionCreated,
+                sessionUpdated: timestamp,
+                role: 'assistant',
+                content: OPENING_MESSAGE,
+            },
+            ...entries,
+        ];
+
+    try {
+        await logChatMessages(payload.map((entry) => ({
+            sessionId: session.id,
+            sessionCreated,
+            sessionUpdated: timestamp,
+            role: entry.role,
+            content: entry.content,
+        })));
+        session.chatTranscriptStarted = true;
+    } catch (err) {
+        console.warn(`Chat transcript flush failed for ${contextLabel}:`, err);
+    }
+}
+
 export async function POST(request) {
     let rateLimit = null;
     try {
@@ -598,6 +630,7 @@ export async function POST(request) {
                                       );
                   }
                   session = createSession(null, null, sessionId);
+                  session.chatTranscriptStarted = recoveredHistory.some(msg => msg.role === 'user');
                   for (const msg of recoveredHistory) {
                           addMessage(session.id, msg.role, msg.content);
                   }
@@ -641,23 +674,19 @@ export async function POST(request) {
 
       session.lastProcessedUserFingerprint = userFingerprint || null;
       session.lastProcessedUserAt = new Date();
+      const sessionCreated = new Date(session.createdAt).toISOString();
+      const pendingTranscriptEntries = [];
 
       // Add user message to history
       addMessage(sessionId, 'user', sanitizedMessage);
-
-      // Log user message to chatbot log (fire-and-forget)
-      const sessionCreated = new Date(session.createdAt).toISOString();
-          logChatMessage(sessionId, sessionCreated, 'user', sanitizedMessage).catch(err =>
-                  console.warn('Chatlog failed for user message:', err)
-                                                                               );
+      pendingTranscriptEntries.push({ role: 'user', content: sanitizedMessage });
 
       // Direct FAQ answer for a common question: credits during pause/hold.
       if (isPauseCreditsQuestion(sanitizedMessage)) {
             const pauseCreditsResponse = buildPauseCreditsAnswer(session.memberProfile || null);
             addMessage(sessionId, 'assistant', pauseCreditsResponse);
-            logChatMessage(sessionId, sessionCreated, 'assistant', pauseCreditsResponse).catch(err =>
-                console.warn('Chatlog failed for pause-credit response:', err)
-            );
+            pendingTranscriptEntries.push({ role: 'assistant', content: pauseCreditsResponse });
+            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'pause-credit response');
             return NextResponse.json({
                 message: pauseCreditsResponse,
                 sessionId,
@@ -670,9 +699,8 @@ export async function POST(request) {
       if (session.mode !== 'membership' && isUnresolvedIssueMessage(sanitizedMessage)) {
             const unresolvedResponse = buildUnresolvedEscalationResponse();
             addMessage(sessionId, 'assistant', unresolvedResponse);
-            logChatMessage(sessionId, sessionCreated, 'assistant', unresolvedResponse).catch(err =>
-                console.warn('Chatlog failed for unresolved escalation response:', err)
-            );
+            pendingTranscriptEntries.push({ role: 'assistant', content: unresolvedResponse });
+            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'unresolved escalation response');
             return NextResponse.json({
                 message: unresolvedResponse,
                 sessionId,
@@ -705,9 +733,8 @@ export async function POST(request) {
 
             const supportResponse = buildSupportIncidentResponse();
             addMessage(sessionId, 'assistant', supportResponse);
-            logChatMessage(sessionId, sessionCreated, 'assistant', supportResponse).catch(err =>
-                console.warn('Chatlog failed for support incident response:', err)
-            );
+            pendingTranscriptEntries.push({ role: 'assistant', content: supportResponse });
+            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'support incident response');
 
             return NextResponse.json({
                   message: supportResponse,
@@ -745,9 +772,8 @@ export async function POST(request) {
                     ? buildUpgradeSuccessMessage(upgradeResult, pendingOffer)
                     : buildUpgradeUnavailableMessage(upgradeResult, pendingOffer);
                   addMessage(sessionId, 'assistant', upgradeMessage);
-                  logChatMessage(sessionId, sessionCreated, 'assistant', upgradeMessage).catch(err =>
-                      console.warn('Chatlog failed for upgrade response:', err)
-                  );
+                  pendingTranscriptEntries.push({ role: 'assistant', content: upgradeMessage });
+                  await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'upgrade response');
                   session.lastUpgradeOfferAppointmentId = session.pendingUpgradeOffer.appointmentId || null;
                   session.pendingUpgradeOffer = null;
                   return NextResponse.json({
@@ -773,9 +799,8 @@ export async function POST(request) {
                   }
                   const declineMessage = 'No problem at all — we will keep your appointment as-is.';
                   addMessage(sessionId, 'assistant', declineMessage);
-                  logChatMessage(sessionId, sessionCreated, 'assistant', declineMessage).catch(err =>
-                      console.warn('Chatlog failed for upgrade decline response:', err)
-                  );
+                  pendingTranscriptEntries.push({ role: 'assistant', content: declineMessage });
+                  await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'upgrade decline response');
                   session.lastUpgradeOfferAppointmentId = session.pendingUpgradeOffer.appointmentId || null;
                   session.pendingUpgradeOffer = null;
                   return NextResponse.json({
@@ -807,9 +832,8 @@ export async function POST(request) {
                                     expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
                               };
                               addMessage(sessionId, 'assistant', offerMessage);
-                              logChatMessage(sessionId, sessionCreated, 'assistant', offerMessage).catch(err =>
-                                  console.warn('Chatlog failed for direct upgrade offer:', err)
-                              );
+                              pendingTranscriptEntries.push({ role: 'assistant', content: offerMessage });
+                              await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'direct upgrade offer');
                               return NextResponse.json({
                                     message: offerMessage,
                                     sessionId,
@@ -839,6 +863,8 @@ export async function POST(request) {
       if (response === null) {
               // Claude is rate-limited \u2014 return friendly message without crashing
             addMessage(sessionId, 'assistant', RATE_LIMIT_USER_MESSAGE);
+            pendingTranscriptEntries.push({ role: 'assistant', content: RATE_LIMIT_USER_MESSAGE });
+            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'anthropic rate-limit response');
               return NextResponse.json({
                         message: RATE_LIMIT_USER_MESSAGE,
                         sessionId,
@@ -923,11 +949,8 @@ export async function POST(request) {
                 const recentUserText = collectRecentUserText(session.messages);
                 const greeting = buildPostLookupGreeting(profile, sanitizedMessage, { recentUserText });
                 addMessage(sessionId, 'assistant', greeting);
-
-                // Log bot response to chatbot log
-                logChatMessage(sessionId, sessionCreated, 'assistant', greeting).catch(err =>
-                            console.warn('Chatlog failed for member greeting:', err)
-                                                                                                       );
+                pendingTranscriptEntries.push({ role: 'assistant', content: greeting });
+                await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'member greeting');
 
                 return NextResponse.json({
                             message: greeting,
@@ -944,11 +967,8 @@ export async function POST(request) {
                       const firstName = String(verificationLookup?.firstName || lookupRequest.firstName || '').trim();
                       const failureMessage = buildLookupFailureMessage(firstName, session.lookupFailureCount);
                       addMessage(sessionId, 'assistant', failureMessage);
-
-                // Log bot response to chatbot log
-                logChatMessage(sessionId, sessionCreated, 'assistant', failureMessage).catch(err =>
-                            console.warn('Chatlog failed for lookup fail response:', err)
-                                                                                                   );
+                      pendingTranscriptEntries.push({ role: 'assistant', content: failureMessage });
+                      await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'lookup failure response');
 
                 return NextResponse.json({
                             message: failureMessage,
@@ -996,11 +1016,8 @@ export async function POST(request) {
 
       // Store CLEANED response in history (not raw with tags)
       addMessage(sessionId, 'assistant', visibleResponse);
-
-      // Log bot response to chatbot log
-      logChatMessage(sessionId, sessionCreated, 'assistant', visibleResponse).catch(err =>
-              console.warn('Chatlog failed for bot response:', err)
-                                                                                        );
+      pendingTranscriptEntries.push({ role: 'assistant', content: visibleResponse });
+      await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'bot response');
 
       const result = {
               message: visibleResponse,
