@@ -48,6 +48,13 @@ const styles = {
     headerText: {
           flex: 1,
     },
+    headerActions: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          paddingRight: 34,
+          flexShrink: 0,
+    },
     headerTitle: {
           fontSize: 15,
           fontWeight: 600,
@@ -60,6 +67,20 @@ const styles = {
           color: BRIGHT_BLUE,
           margin: 0,
           fontWeight: 500,
+    },
+    headerIconBtn: {
+          width: 32,
+          height: 32,
+          borderRadius: '50%',
+          border: `1px solid ${BORDER}`,
+          background: WHITE,
+          color: TEXT_LIGHT,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          padding: 0,
+          flexShrink: 0,
     },
     messages: {
           flex: 1,
@@ -159,6 +180,27 @@ function shouldAutoFocusInput() {
     if (window.matchMedia?.('(pointer: coarse)').matches) return false;
     if (window.innerWidth <= 768) return false;
     return true;
+}
+
+function RestartIcon() {
+    return (
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M20 11a8 8 0 1 1-2.34-5.66"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M20 4v6h-6"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+    );
 }
 
 // ── MAIN WIDGET COMPONENT ─────────────────────────────────────
@@ -441,23 +483,18 @@ export default function ChatWidget() {
         <div style={styles.headerText}>
           <p style={styles.headerTitle}>Silver Mirror</p>
           <p style={styles.headerSub}>Virtual Assistant</p>
-          </div>
-{phase === 'chat' && (
+        </div>
+        {phase === 'chat' && (
+          <div style={styles.headerActions}>
             <button
-             onClick={handleEndChat}
-             style={{
-                             background: 'transparent',
-                             border: `1px solid ${BORDER}`,
-                             color: TEXT_LIGHT,
-                             borderRadius: 6,
-                             padding: '5px 10px',
-                             fontSize: 11,
-                             cursor: 'pointer',
-                             fontFamily: 'inherit',
-             }}
-          >
-            End Chat
-              </button>
+              onClick={handleEndChat}
+              style={styles.headerIconBtn}
+              aria-label="Start new chat"
+              title="Start new chat"
+            >
+              <RestartIcon />
+            </button>
+          </div>
         )}
 </div>
 
