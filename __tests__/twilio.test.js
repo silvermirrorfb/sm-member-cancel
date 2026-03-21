@@ -73,10 +73,22 @@ describe('twilio helpers', () => {
     expect(compact).toBe("Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: https://silvermirror.com/locations/");
   });
 
+  it('rewrites the live closest-location variant into a short prompt plus stable link', () => {
+    const verbose = "I'd be happy to help you find the closest Silver Mirror location! To give you the best recommendation, could you let me know what city or area you're in? We have locations in: - **New York City** (5 locations): Upper East Side";
+    const compact = trimSmsBody(verbose);
+    expect(compact).toBe("Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: https://silvermirror.com/locations/");
+  });
+
   it('rewrites location hours answers into a short stable response', () => {
     const verbose = 'Each Silver Mirror location has different hours. Direct guests to https://silvermirror.com/locations/ for specific hours.';
     const compact = trimSmsBody(verbose);
     expect(compact).toBe('Hours vary by location. See https://silvermirror.com/locations/ or text me the location name.');
+  });
+
+  it('rewrites any just-for-men recommendation into sms-safe copy without markdown', () => {
+    const verbose = "Great question! For a 41-year-old man, I'd recommend the **Just for Men Facial** because it helps with ingrown hairs and shaving irritation.";
+    const compact = trimSmsBody(verbose);
+    expect(compact).toBe('For ingrown hairs or shaving irritation, try the Just for Men Facial. Want booking, pricing, or locations?');
   });
 
   it('validates and rejects twilio signatures', () => {

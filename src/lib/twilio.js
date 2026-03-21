@@ -61,11 +61,23 @@ function rewriteCommonSmsPhrases(text) {
     `Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: ${LOCATIONS_URL}`,
   );
   value = value.replace(
+    /^I'd be happy to help you find the closest Silver Mirror location!.*$/i,
+    `Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: ${LOCATIONS_URL}`,
+  );
+  value = value.replace(
+    /^We have locations in:.*could you let me know what city or area you're in\?.*$/i,
+    `Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: ${LOCATIONS_URL}`,
+  );
+  value = value.replace(
     /^Each Silver Mirror location has different hours\..*$/i,
     `Hours vary by location. See ${LOCATIONS_URL} or text me the location name.`,
   );
   value = value.replace(
     /^Great question!\s*For a \d{1,3}-year-old man, I'd recommend the Just for Men Facial\s*\(([^)]+)\)\.?/i,
+    'For ingrown hairs or shaving irritation, try the Just for Men Facial. Want booking, pricing, or locations?',
+  );
+  value = value.replace(
+    /^.*Just for Men Facial.*$/i,
     'For ingrown hairs or shaving irritation, try the Just for Men Facial. Want booking, pricing, or locations?',
   );
   value = value.replace(/\s*\n+\s*/g, ' ');
