@@ -65,6 +65,7 @@ import { POST } from '../src/app/api/sms/automation/pre-appointment/route.js';
 describe('sms automation route', () => {
   beforeEach(() => {
     process.env.SMS_AUTOMATION_TOKEN = 'token';
+    process.env.SMS_UPGRADE_STATUS = 'live';
     vi.clearAllMocks();
     mockGetSessionIdForPhone.mockReturnValue(null);
     mockSaveSession.mockImplementation(async (session) => session);
@@ -125,6 +126,41 @@ describe('sms automation route', () => {
     expect(body.results[0].reason).toBe('queued_outside_send_window');
     expect(body.results[0].status).toBe('queued');
     expect(mockLookupMember).not.toHaveBeenCalled();
+  });
+
+  it('skips outbound upgrade work entirely while sms upgrades are pending', async () => {
+    process.env.SMS_UPGRADE_STATUS = 'pending';
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T15:00:00Z',
+        candidates: [
+          {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbie@example.com',
+            phone: '+1 (917) 555-1234',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.upgradeStatus).toBe('pending');
+    expect(body.results[0].status).toBe('skipped');
+    expect(body.results[0].reason).toBe('sms_upgrade_feature_pending');
+    expect(body.results[0].message).toContain('upgrade-by-text feature is still pending');
+    expect(mockLookupMember).not.toHaveBeenCalled();
+    expect(mockSendTwilioSms).not.toHaveBeenCalled();
   });
 
   it('tries both email and phone contacts for higher-accuracy matching', async () => {

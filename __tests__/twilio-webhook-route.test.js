@@ -65,7 +65,11 @@ import { POST } from '../src/app/api/sms/twilio/webhook/route.js';
 
 describe('twilio webhook route', () => {
   beforeEach(() => {
-    process.env = { ...originalEnv, BOULEVARD_ENABLE_UPGRADE_MUTATION: 'true' };
+    process.env = {
+      ...originalEnv,
+      BOULEVARD_ENABLE_UPGRADE_MUTATION: 'true',
+      SMS_UPGRADE_STATUS: 'live',
+    };
     vi.clearAllMocks();
     mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0, limit: 120, remaining: 119, backend: 'memory' });
     mockBuildRateLimitHeaders.mockReturnValue({
@@ -123,6 +127,41 @@ describe('twilio webhook route', () => {
     expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(session.smsHandoffToWeb).toBe(true);
     expect(session.smsInboundCount).toBe(10);
+  });
+
+  it('returns pending call-us copy for YES on a pending offer while sms upgrades are on hold', async () => {
+    process.env.SMS_UPGRADE_STATUS = 'pending';
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-pending-hold',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('upgrade-by-text feature is still pending');
+    expect(text).toContain('(888) 677-0055');
+    expect(session.pendingUpgradeOffer).toBeNull();
+    expect(session.lastUpgradeOfferAppointmentId).toBe('appt-1');
+    expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    expect(mockEvaluateUpgradeOpportunityForProfile).not.toHaveBeenCalled();
   });
 
   it('returns rate-limit headers on invalid signature responses', async () => {

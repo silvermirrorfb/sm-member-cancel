@@ -103,8 +103,14 @@ npx vercel curl /api/qa/upgrade-check -- --request POST \
 - Pre-appointment outbound automation: `POST /api/sms/automation/pre-appointment`
 
 ### Twilio inbound requirements
+- Point the Twilio phone number's incoming message webhook to your deployed app, for example:
+  `https://sm-member-cancel.vercel.app/api/sms/twilio/webhook`
 - Twilio should send form-encoded payload with `From`, `Body`, and `MessageSid`.
-- If `TWILIO_AUTH_TOKEN` is set, signature validation is enforced via `X-Twilio-Signature`.
+- Signature validation is enforced via `X-Twilio-Signature`; set `TWILIO_AUTH_TOKEN` in production or inbound SMS will be rejected.
+- Current safe launch posture is `SMS_UPGRADE_STATUS=pending`:
+  - inbound SMS handles general Q&A only,
+  - upgrade-related SMS replies tell the guest to call `(888) 677-0055`,
+  - no SMS upgrade offer should be treated as live until Boulevard API readiness is confirmed.
 
 ### Outbound automation request
 ```bash
@@ -145,6 +151,7 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
 - SMS responses are sanitized to plain ASCII and capped (`SMS_MAX_CHARS`, default `155`) so outbound and TwiML replies stay single-text friendly.
 - `SMS_WEB_HANDOFF_MESSAGE_LIMIT` (default `10`): after this many inbound SMS messages in one thread, bot replies with web-chat handoff URL.
 - `SMS_WEB_APP_URL` (default `https://sm-member-cancel.vercel.app/widget`): destination URL for the 10-message handoff.
+- `SMS_UPGRADE_STATUS` (default `pending`): keep SMS upgrade-by-text disabled until Boulevard/API readiness is confirmed; set to `live` only when the SMS upgrade flow is approved for launch.
 
 ### Klaviyo opt-in source of truth (required)
 - Outbound SMS route checks Klaviyo profile `subscriptions.sms.marketing`.
@@ -154,9 +161,12 @@ npx vercel curl /api/sms/automation/pre-appointment -- --request POST \
 - If Klaviyo is missing/unreachable/not subscribed, route fails closed and returns `status: "skipped"` with a Klaviyo reason code.
 
 Required env vars:
+- `TWILIO_AUTH_TOKEN` for inbound signature validation
+- `TWILIO_ACCOUNT_SID` and `TWILIO_FROM_NUMBER` for outbound sends
 - `KLAVIYO_PRIVATE_API_KEY`
 - `KLAVIYO_API_BASE_URL` (optional override, default `https://a.klaviyo.com/api`)
 - `KLAVIYO_REVISION` (optional override, default `2026-01-15`)
+- `SMS_UPGRADE_STATUS` (optional, default `pending`)
 - `SMS_REQUIRE_KLAVIYO_OPT_IN` (optional, default `true`)
 - `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` (optional, default `true`)
 - `SMS_ENABLE_ONE_HOUR_REMINDER` (optional, default `true`)

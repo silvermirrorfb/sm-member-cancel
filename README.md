@@ -58,6 +58,11 @@ For full functionality also set:
 - SMTP settings — For emailing summaries (without it, logs to console)
 - Google Sheets credentials — For tracking (without it, logs to console)
 
+For SMS support also set:
+- `TWILIO_AUTH_TOKEN` — Required for inbound Twilio signature validation
+- `TWILIO_ACCOUNT_SID`, `TWILIO_FROM_NUMBER` — Required for outbound SMS sends
+- `SMS_UPGRADE_STATUS=pending` — Safe default for general Q&A-only SMS launch while upgrade-by-text is still on hold
+
 ### 3. Run locally
 
 ```bash
@@ -67,6 +72,9 @@ npm run dev
 Visit:
 - `http://localhost:3000` — Status page
 - `http://localhost:3000/widget` — Chat widget
+
+If you are testing inbound SMS locally or in production, point the Twilio number's incoming message webhook to:
+- `https://<your-deploy-url>/api/sms/twilio/webhook`
 
 ### 4. Deploy to Vercel
 
@@ -147,6 +155,8 @@ Update the MEMBERSHIP TIERS AND PRICING section.
 
 - [ ] Set ANTHROPIC_API_KEY in Vercel
 - [ ] Wire up Boulevard API and test member lookup
+- [ ] Set `SMS_UPGRADE_STATUS=pending` until upgrade-by-text is explicitly approved
+- [ ] Configure Twilio env vars and point the phone number webhook to `/api/sms/twilio/webhook`
 - [ ] Configure Upstash Redis for shared rate limiting on production routes
 - [ ] Configure SMTP for email delivery
 - [ ] Set up Google Sheet and service account

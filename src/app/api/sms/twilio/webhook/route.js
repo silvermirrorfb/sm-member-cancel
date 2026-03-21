@@ -14,6 +14,10 @@ import {
   parseTwilioFormBody,
 } from '../../../../../lib/twilio';
 import {
+  buildSmsUpgradePendingReply,
+  isSmsUpgradeLive,
+} from '../../../../../lib/sms-upgrade-policy';
+import {
   evaluateUpgradeOpportunityForProfile,
   lookupMember,
   reverifyAndApplyUpgradeForProfile,
@@ -213,6 +217,7 @@ async function runChatMessageForSms(sessionId, body, from) {
     body: JSON.stringify({
       sessionId,
       message: String(body || '').trim(),
+      channel: 'sms',
     }),
   });
 
@@ -225,6 +230,7 @@ async function runChatMessageForSms(sessionId, body, from) {
 export async function POST(request) {
   let rateLimit = null;
   try {
+    const smsUpgradeLive = isSmsUpgradeLive();
     const ip = getClientIP(request);
     rateLimit = await checkRateLimit(ip, 'twilio-webhook', 120, 10 * 60 * 1000);
     if (!rateLimit.allowed) {
@@ -313,6 +319,17 @@ export async function POST(request) {
       const canFinalizeWithoutMutation = hasPendingOffer && (
         pendingOfferKind === 'addon' || !isUpgradeMutationEnabled()
       );
+      if (isAffirmative(intentText) && hasPendingOffer && !smsUpgradeLive) {
+        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
+        activeSession.pendingUpgradeOffer = null;
+        await saveSession(activeSession);
+        const pendingTwiml = buildTwimlMessage(buildSmsUpgradePendingReply());
+        if (messageSid) storeReplyForMessageSid(messageSid, pendingTwiml);
+        return new NextResponse(pendingTwiml, {
+          status: 200,
+          headers: buildTwimlHeaders(rateLimit),
+        });
+      }
       if (isAffirmative(intentText) && canFinalizeWithoutMutation) {
         const incident = buildUpgradeSupportIncident({
           sessionId,

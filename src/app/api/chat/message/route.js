@@ -19,6 +19,7 @@ import { logChatMessages, logSupportIncident } from '../../../../lib/notify';
 import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
+import { buildSmsUpgradePendingReply, isSmsUpgradeLive } from '../../../../lib/sms-upgrade-policy';
 
 // Friendly message shown when Claude API is rate-limited
 const RATE_LIMIT_USER_MESSAGE =
@@ -605,6 +606,8 @@ export async function POST(request) {
       const body = await request.json();
           const { sessionId } = body;
       const message = typeof body.message === 'string' ? body.message.trim() : '';
+      const channel = String(body.channel || '').trim().toLowerCase() === 'sms' ? 'sms' : 'web';
+      const smsUpgradeLive = channel !== 'sms' || isSmsUpgradeLive();
 
       if (!sessionId || !message) {
               return NextResponse.json(
@@ -755,6 +758,21 @@ export async function POST(request) {
       // YES/NO handling for an active pending upgrade offer
       if (session.pendingUpgradeOffer && session.memberProfile) {
             if (isAffirmativeUpgradeReply(sanitizedMessage)) {
+                  if (!smsUpgradeLive) {
+                        const upgradePendingReply = buildSmsUpgradePendingReply();
+                        session.lastUpgradeOfferAppointmentId = session.pendingUpgradeOffer?.appointmentId || null;
+                        session.pendingUpgradeOffer = null;
+                        await addMessage(sessionId, 'assistant', upgradePendingReply);
+                        pendingTranscriptEntries.push({ role: 'assistant', content: upgradePendingReply });
+                        await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'sms upgrade pending reply');
+                        await saveSession(session);
+                        return NextResponse.json({
+                              message: upgradePendingReply,
+                              sessionId,
+                        }, {
+                              headers: buildRateLimitHeaders(rateLimit),
+                        });
+                  }
                   const appointmentId = session.pendingUpgradeOffer?.appointmentId || null;
                   const profilePhone = session.memberProfile?.phone || null;
                   const upgradeResult = await reverifyAndApplyUpgradeForProfile(
@@ -819,6 +837,19 @@ export async function POST(request) {
 
       // Explicit upgrade request: run deterministic eligibility check before LLM response.
       if (session.memberProfile && mentionsUpgradeInterest(sanitizedMessage)) {
+            if (!smsUpgradeLive) {
+                  const upgradePendingReply = buildSmsUpgradePendingReply();
+                  await addMessage(sessionId, 'assistant', upgradePendingReply);
+                  pendingTranscriptEntries.push({ role: 'assistant', content: upgradePendingReply });
+                  await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'sms upgrade interest pending reply');
+                  return NextResponse.json({
+                        message: upgradePendingReply,
+                        sessionId,
+                        memberProfile: session.memberProfile,
+                  }, {
+                        headers: buildRateLimitHeaders(rateLimit),
+                  });
+            }
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
             if (opportunity?.eligible) {
                   if (session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
@@ -997,7 +1028,7 @@ export async function POST(request) {
       }
 
       // Proactive upgrade suggestion on logistics questions (e.g., directions) for identified members.
-      if (!summary && session.memberProfile && !session.pendingUpgradeOffer && isLogisticsContext(sanitizedMessage)) {
+      if (smsUpgradeLive && !summary && session.memberProfile && !session.pendingUpgradeOffer && isLogisticsContext(sanitizedMessage)) {
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
             if (opportunity?.eligible && session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
                   const proactiveOffer = buildUpgradeOfferMessage(opportunity, { proactive: true });

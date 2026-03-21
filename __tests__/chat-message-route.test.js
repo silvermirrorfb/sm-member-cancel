@@ -10,6 +10,7 @@ const mockCheckRateLimit = vi.fn();
 const mockBuildRateLimitHeaders = vi.fn();
 const mockSendMessage = vi.fn();
 const mockLogChatMessages = vi.fn();
+const originalEnv = process.env;
 
 vi.mock('../src/lib/sessions.js', () => ({
   getSession: (...args) => mockGetSession(...args),
@@ -55,6 +56,7 @@ import { POST } from '../src/app/api/chat/message/route.js';
 
 describe('chat message route rate-limit headers', () => {
   beforeEach(() => {
+    process.env = { ...originalEnv, SMS_UPGRADE_STATUS: 'live' };
     vi.clearAllMocks();
     mockGetClientIP.mockReturnValue('203.0.113.21');
     mockCheckRateLimit.mockResolvedValue({
@@ -79,6 +81,7 @@ describe('chat message route rate-limit headers', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    process.env = originalEnv;
   });
 
   it('returns rate-limit headers on session-expired recovery failures', async () => {
@@ -162,5 +165,55 @@ describe('chat message route rate-limit headers', () => {
         content: 'Helpful assistant reply',
       }),
     ]);
+  });
+
+  it('returns pending upgrade copy for sms upgrade interest while the feature is on hold', async () => {
+    process.env = { ...originalEnv, SMS_UPGRADE_STATUS: 'pending' };
+    const session = {
+      id: 'sess-sms-upgrade',
+      createdAt: '2026-03-18T00:00:00.000Z',
+      status: 'active',
+      messages: [],
+      memberProfile: {
+        clientId: 'client-1',
+        phone: '+12134401333',
+        tier: '30',
+      },
+      mode: 'membership',
+      chatTranscriptStarted: false,
+      lastProcessedUserFingerprint: null,
+      lastProcessedUserAt: null,
+      lastAssistantVisibleMessage: null,
+      lastAssistantAt: null,
+      pendingUpgradeOffer: null,
+    };
+
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sessionId, role, content) => {
+      session.messages.push({ role, content });
+      if (role === 'assistant') {
+        session.lastAssistantVisibleMessage = content;
+        session.lastAssistantAt = new Date('2026-03-18T00:00:01.000Z');
+      }
+      return session;
+    });
+
+    const req = new Request('http://localhost/api/chat/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-sms-upgrade',
+        message: 'Can I upgrade to 50 minutes?',
+        channel: 'sms',
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.message).toContain('upgrade-by-text feature is still pending');
+    expect(body.message).toContain('(888) 677-0055');
+    expect(mockSendMessage).not.toHaveBeenCalled();
   });
 });

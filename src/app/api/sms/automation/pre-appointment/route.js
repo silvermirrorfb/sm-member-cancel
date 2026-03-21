@@ -28,6 +28,11 @@ import {
   popDueCandidates,
 } from '../../../../../lib/sms-outbound-queue';
 import { checkKlaviyoSmsOptIn } from '../../../../../lib/klaviyo';
+import {
+  SMS_UPGRADE_PENDING_REASON,
+  buildSmsUpgradePendingReply,
+  isSmsUpgradeLive,
+} from '../../../../../lib/sms-upgrade-policy';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
 const REMINDER_YES_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_REMINDER_MIN || 10);
@@ -368,6 +373,68 @@ export async function POST(request) {
       startHour: sendStartHour,
       endHour: sendEndHour,
     });
+    const smsUpgradeLive = isSmsUpgradeLive();
+
+    if (!smsUpgradeLive) {
+      const heldQueuedItems = processQueued
+        ? popDueCandidates({ now: runNow, limit: maxQueueDrain > 0 ? maxQueueDrain : maxSends })
+        : [];
+      const heldQueuedCandidates = heldQueuedItems.map(row => ({
+        source: 'queued',
+        queueId: row.id,
+        candidate: row.payload?.candidate || {},
+      }));
+      const heldDirectWorkItems = directCandidates.map(candidate => ({
+        source: 'direct',
+        queueId: null,
+        candidate,
+      }));
+      const heldWorkItems = useQueuedOnly
+        ? heldQueuedCandidates
+        : [...heldDirectWorkItems, ...heldQueuedCandidates];
+
+      const upgradePendingReply = buildSmsUpgradePendingReply();
+      for (const work of heldWorkItems) {
+        const candidate = work.candidate || {};
+        results.push({
+          candidate: {
+            firstName: asText(candidate.firstName) || null,
+            lastName: asText(candidate.lastName) || null,
+            email: asText(candidate.email).toLowerCase() || null,
+            phone: asText(candidate.phone) || null,
+          },
+          status: 'skipped',
+          reason: SMS_UPGRADE_PENDING_REASON,
+          message: upgradePendingReply,
+          source: work.source,
+          queueId: work.queueId,
+        });
+      }
+
+      const summary = results.reduce((acc, row) => {
+        acc.total += 1;
+        acc[row.status] = (acc[row.status] || 0) + 1;
+        return acc;
+      }, { total: 0 });
+
+      return NextResponse.json({
+        ok: true,
+        dryRun,
+        upgradeStatus: 'pending',
+        upgradeMessage: upgradePendingReply,
+        sendWindow: {
+          enforced: enforceSendWindow,
+          allowed: sendWindow.allowed,
+          timeZone: sendWindow.timeZone,
+          hour: sendWindow.hour,
+          startHour: sendWindow.startHour,
+          endHour: sendWindow.endHour,
+        },
+        queue: getOutboundQueueSnapshot(),
+        summary,
+        results,
+      });
+    }
 
     if (!dryRun && requireManualLiveApproval && !liveApproval) {
       return NextResponse.json(
