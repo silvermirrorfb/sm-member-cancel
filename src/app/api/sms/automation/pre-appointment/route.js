@@ -15,7 +15,7 @@ import {
   markUpsellInitialSent,
   markUpgradeOfferEvent,
 } from '../../../../../lib/sms-sessions';
-import { sendTwilioSms } from '../../../../../lib/twilio';
+import { sendTwilioSms, trimSmsBodyShort } from '../../../../../lib/twilio';
 import {
   getNextWindowStartIso,
   getTimePartsInZone,
@@ -932,6 +932,7 @@ export async function POST(request) {
         const sms = await sendTwilioSms({
           to: profilePhone,
           body: offerMessage,
+          trimBody: trimSmsBodyShort,
           from: effectiveFromNumber || undefined,
           statusCallback: effectiveStatusCallback || undefined,
         });

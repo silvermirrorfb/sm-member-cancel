@@ -1,24 +1,31 @@
 import crypto from 'crypto';
 
-const SMS_HARD_MAX_CHARS = 150;
+const SMS_HARD_MAX_CHARS = 320;
 const MAX_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_MAX_CHARS || SMS_HARD_MAX_CHARS), 40), SMS_HARD_MAX_CHARS);
-const TARGET_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_TARGET_CHARS || 140), 40), MAX_SMS_CHARS);
+const TARGET_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_TARGET_CHARS || 300), 40), MAX_SMS_CHARS);
+const SMS_SHORT_HARD_MAX_CHARS = 150;
+const TARGET_SMS_SHORT_CHARS = 140;
 const BOOKING_URL = 'https://booking.silvermirror.com/booking/location';
 const LOCATIONS_URL = 'https://silvermirror.com/locations/';
 
-function stripSmsMarkdown(text) {
+function stripMarkdownForSms(text) {
   return String(text || '')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
     .replace(/\*([^*\n]+)\*/g, '$1')
     .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
     .replace(/^\s*[-*]\s+/gm, '')
+    .replace(/^\s*\d+\.\s+/gm, '')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+    .replace(/\n{2,}/g, ' ')
+    .replace(/\n/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
 function sanitizeSmsText(text) {
-  return stripSmsMarkdown(text)
+  return stripMarkdownForSms(text)
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2013\u2014]/g, '-')
@@ -94,43 +101,114 @@ function trimToWordBoundary(text, maxChars) {
   return text.slice(0, cut).trim();
 }
 
-function trimSmsBody(text) {
+function extractUrlPlaceholders(text) {
+  const urls = [];
+  const placeholderText = String(text || '').replace(/https?:\/\/[^\s<>"')]+/gi, (match) => {
+    const token = `__URL_${urls.length}__`;
+    urls.push(match);
+    return token;
+  });
+  return { placeholderText, urls };
+}
+
+function restoreUrlPlaceholders(text, urls) {
+  let restored = String(text || '');
+  urls.forEach((url, index) => {
+    restored = restored.replaceAll(`__URL_${index}__`, url);
+  });
+  return restored;
+}
+
+function finalizeTrimmedSmsText(text, urls, maxChars) {
+  const restored = restoreUrlPlaceholders(text, urls)
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (restored.length <= maxChars) return restored;
+  if (urls.length === 0) {
+    return trimToWordBoundary(restored, maxChars)
+      .replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '')
+      .replace(/[,:;-]$/, '')
+      .trim();
+  }
+
+  const presentUrls = urls.filter((url, index) => text.includes(`__URL_${index}__`));
+  if (presentUrls.length === 0) {
+    return trimToWordBoundary(restored, maxChars)
+      .replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '')
+      .replace(/[,:;-]$/, '')
+      .trim();
+  }
+
+  const primaryUrl = presentUrls[0];
+  if (primaryUrl.length >= maxChars) return primaryUrl.slice(0, maxChars);
+
+  const surroundingText = text
+    .replace(/__URL_\d+__/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const remainingChars = maxChars - primaryUrl.length - 1;
+  if (remainingChars <= 0) return primaryUrl;
+
+  const prefix = trimToWordBoundary(surroundingText, remainingChars)
+    .replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '')
+    .replace(/[,:;-]$/, '')
+    .trim();
+  return prefix ? `${prefix} ${primaryUrl}` : primaryUrl;
+}
+
+function trimSmsBodyWithLimits(text, { targetChars, maxChars }) {
   let value = sanitizeSmsText(text);
   value = rewriteCommonSmsPhrases(value);
   if (!value) return '';
-  if (value.length <= TARGET_SMS_CHARS) return value;
+  if (value.length <= targetChars) return value;
 
   const bookingUrlIndex = value.indexOf(BOOKING_URL);
   if (bookingUrlIndex >= 0) {
     const candidate = `Book online: ${BOOKING_URL}`;
-    if (candidate.length <= MAX_SMS_CHARS) return candidate;
+    if (candidate.length <= maxChars) return candidate;
   }
 
   const locationsUrlIndex = value.indexOf(LOCATIONS_URL);
   if (locationsUrlIndex >= 0) {
     const candidate = `Locations and hours: ${LOCATIONS_URL}`;
-    if (candidate.length <= MAX_SMS_CHARS) return candidate;
+    if (candidate.length <= maxChars) return candidate;
   }
 
-  const sentences = value.match(/[^.!?]+[.!?]?/g) || [value];
+  const { placeholderText, urls } = extractUrlPlaceholders(value);
+  const sentences = placeholderText.match(/[^.!?]+[.!?]?/g) || [placeholderText];
   let compact = '';
   for (const sentenceRaw of sentences) {
     const sentence = sentenceRaw.trim();
     if (!sentence) continue;
     const candidate = compact ? `${compact} ${sentence}` : sentence;
-    if (candidate.length > TARGET_SMS_CHARS) break;
+    if (candidate.length > targetChars) break;
     compact = candidate;
   }
 
-  if (compact && compact.length >= Math.min(80, TARGET_SMS_CHARS - 10)) {
-    return compact.replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '').trim();
+  if (compact && compact.length >= Math.min(80, targetChars - 10)) {
+    return finalizeTrimmedSmsText(
+      compact.replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '').trim(),
+      urls,
+      maxChars,
+    );
   }
 
-  if (value.length <= MAX_SMS_CHARS) return value;
-  return trimToWordBoundary(value, MAX_SMS_CHARS)
-    .replace(/\b(what|how|which|where|when|why|any|and|or|but|to|for|with|about)$/i, '')
-    .replace(/[,:;-]$/, '')
-    .trim();
+  if (value.length <= maxChars) return value;
+  return finalizeTrimmedSmsText(placeholderText, urls, maxChars);
+}
+
+function trimSmsBody(text) {
+  return trimSmsBodyWithLimits(text, {
+    targetChars: TARGET_SMS_CHARS,
+    maxChars: MAX_SMS_CHARS,
+  });
+}
+
+function trimSmsBodyShort(text) {
+  return trimSmsBodyWithLimits(text, {
+    targetChars: TARGET_SMS_SHORT_CHARS,
+    maxChars: SMS_SHORT_HARD_MAX_CHARS,
+  });
 }
 
 function escapeXml(text) {
@@ -176,7 +254,7 @@ function isValidTwilioSignature({ url, params, authToken, providedSignature }) {
   return crypto.timingSafeEqual(a, b);
 }
 
-async function sendTwilioSms({ to, body, from, statusCallback }) {
+async function sendTwilioSms({ to, body, from, statusCallback, trimBody = trimSmsBody }) {
   const accountSid = String(process.env.TWILIO_ACCOUNT_SID || '').trim();
   const authToken = String(process.env.TWILIO_AUTH_TOKEN || '').trim();
   const fromNumber = String(from || process.env.TWILIO_FROM_NUMBER || '').trim();
@@ -188,7 +266,7 @@ async function sendTwilioSms({ to, body, from, statusCallback }) {
   const form = new URLSearchParams();
   form.set('To', String(to || '').trim());
   form.set('From', fromNumber);
-  form.set('Body', trimSmsBody(body));
+  form.set('Body', trimBody(body));
   if (statusCallback) form.set('StatusCallback', String(statusCallback));
 
   const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
@@ -210,8 +288,10 @@ async function sendTwilioSms({ to, body, from, statusCallback }) {
 }
 
 export {
+  stripMarkdownForSms,
   sanitizeSmsText,
   trimSmsBody,
+  trimSmsBodyShort,
   buildTwimlMessage,
   parseTwilioFormBody,
   isValidTwilioSignature,

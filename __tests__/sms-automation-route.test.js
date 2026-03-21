@@ -48,6 +48,7 @@ vi.mock('../src/lib/sms-sessions.js', () => ({
 
 vi.mock('../src/lib/twilio.js', () => ({
   sendTwilioSms: (...args) => mockSendTwilioSms(...args),
+  trimSmsBodyShort: (value) => value,
 }));
 
 vi.mock('../src/lib/sms-outbound-queue.js', () => ({
@@ -394,6 +395,7 @@ describe('sms automation route', () => {
     expect(body.results[0].twilioSid).toBe('SM123');
     expect(body.results[0].klaviyo.profileId).toBe('klyv-3');
     expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+    expect(mockSendTwilioSms.mock.calls[0][0].trimBody).toBeTypeOf('function');
   });
 
   it('blocks live sends without manual liveApproval flag', async () => {

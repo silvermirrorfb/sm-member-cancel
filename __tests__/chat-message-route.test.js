@@ -8,6 +8,7 @@ const mockSaveSession = vi.fn();
 const mockGetClientIP = vi.fn();
 const mockCheckRateLimit = vi.fn();
 const mockBuildRateLimitHeaders = vi.fn();
+const mockGetSystemPrompt = vi.fn();
 const mockSendMessage = vi.fn();
 const mockLogChatMessages = vi.fn();
 const originalEnv = process.env;
@@ -27,7 +28,7 @@ vi.mock('../src/lib/rate-limit.js', () => ({
 }));
 
 vi.mock('../src/lib/claude.js', () => ({
-  getSystemPrompt: vi.fn(),
+  getSystemPrompt: (...args) => mockGetSystemPrompt(...args),
   buildSystemPromptWithProfile: vi.fn(),
   sendMessage: (...args) => mockSendMessage(...args),
   parseMemberLookup: vi.fn(),
@@ -74,6 +75,7 @@ describe('chat message route rate-limit headers', () => {
       'X-RateLimit-Remaining': '29',
       'X-RateLimit-Backend': 'upstash',
     });
+    mockGetSystemPrompt.mockReturnValue('Base system prompt.');
     mockSaveSession.mockImplementation(async (session) => session);
     mockLogChatMessages.mockResolvedValue({ logged: true, count: 3 });
     mockGetSession.mockReturnValue(null);
@@ -261,5 +263,57 @@ describe('chat message route rate-limit headers', () => {
     expect(body.message).toContain('upgrade-by-text feature is still pending');
     expect(body.message).toContain('(888) 677-0055');
     expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it('adds sms response guidance to the Claude system prompt for sms requests', async () => {
+    const session = {
+      id: 'sess-sms-guidance',
+      createdAt: '2026-03-18T00:00:00.000Z',
+      status: 'active',
+      messages: [],
+      memberProfile: null,
+      mode: null,
+      chatTranscriptStarted: false,
+      lastProcessedUserFingerprint: null,
+      lastProcessedUserAt: null,
+      lastAssistantVisibleMessage: null,
+      lastAssistantAt: null,
+      pendingUpgradeOffer: null,
+    };
+
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sessionId, role, content) => {
+      session.messages.push({ role, content });
+      if (role === 'assistant') {
+        session.lastAssistantVisibleMessage = content;
+        session.lastAssistantAt = new Date('2026-03-18T00:00:01.000Z');
+      }
+      return session;
+    });
+    mockSendMessage.mockResolvedValue('SMS-safe reply');
+
+    const req = new Request('http://localhost/api/chat/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-sms-guidance',
+        message: 'What are your hours?',
+        channel: 'sms',
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.message).toBe('SMS-safe reply');
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Channel: SMS. Keep replies under 300 characters.'),
+      session.messages,
+    );
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      expect.not.stringContaining('[SMS channel'),
+      session.messages,
+    );
   });
 });

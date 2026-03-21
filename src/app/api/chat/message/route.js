@@ -24,6 +24,8 @@ import { buildSmsUpgradePendingReply, isSmsUpgradeLive } from '../../../../lib/s
 // Friendly message shown when Claude API is rate-limited
 const RATE_LIMIT_USER_MESSAGE =
     "I'm sorry, I'm experiencing high demand right now. Please try again in a minute, or call (888) 677-0055 for immediate help.";
+const SMS_SYSTEM_PROMPT_SUFFIX =
+    '\n\nChannel: SMS. Keep replies under 300 characters. Use plain text only with no markdown, headers, or bullet points. Include full URLs when relevant.';
 
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_RECOVERY_MESSAGES = 40;
@@ -893,7 +895,10 @@ export async function POST(request) {
       }
 
       // Determine which system prompt to use
-      const systemPrompt = session.systemPrompt || getSystemPrompt();
+      const baseSystemPrompt = session.systemPrompt || getSystemPrompt();
+      const systemPrompt = channel === 'sms'
+        ? `${baseSystemPrompt || ''}${SMS_SYSTEM_PROMPT_SUFFIX}`
+        : baseSystemPrompt;
 
       // Send to Claude with full history (with 429 protection)
       let response = await safeSendMessage(systemPrompt, session.messages);

@@ -5,7 +5,9 @@ import {
   isValidTwilioSignature,
   parseTwilioFormBody,
   sanitizeSmsText,
+  stripMarkdownForSms,
   trimSmsBody,
+  trimSmsBodyShort,
 } from '../src/lib/twilio.js';
 
 describe('twilio helpers', () => {
@@ -26,7 +28,18 @@ describe('twilio helpers', () => {
   it('trims long sms content', () => {
     const long = 'x'.repeat(2000);
     const trimmed = trimSmsBody(long);
+    expect(trimmed.length).toBeLessThanOrEqual(320);
+  });
+
+  it('keeps short outbound sms content on the old limit', () => {
+    const long = 'x'.repeat(2000);
+    const trimmed = trimSmsBodyShort(long);
     expect(trimmed.length).toBeLessThanOrEqual(150);
+  });
+
+  it('allows longer conversational sms replies before trimming', () => {
+    const long = 'a'.repeat(280);
+    expect(trimSmsBody(long)).toBe(long);
   });
 
   it('rewrites verbose greeting to single-text concise copy', () => {
@@ -54,6 +67,11 @@ describe('twilio helpers', () => {
     expect(sanitized).toBe('Hi - yes "quoted"');
   });
 
+  it('strips markdown formatting broadly for sms output', () => {
+    const markdown = '# Header\n- Bullet\n1. Numbered\nVisit [booking](https://example.com/test)\n**Bold** and *italic*';
+    expect(stripMarkdownForSms(markdown)).toBe('Header Bullet Numbered Visit booking (https://example.com/test) Bold and italic');
+  });
+
   it('strips markdown emphasis from sms output', () => {
     const compact = trimSmsBody("Great question! I'd recommend the **Just for Men Facial** for ingrown hairs.");
     expect(compact).not.toContain('**');
@@ -65,6 +83,14 @@ describe('twilio helpers', () => {
     const compact = trimSmsBody(verbose);
     expect(compact).toBe('Book online at https://booking.silvermirror.com/booking/location');
     expect(compact.endsWith('/booking/location')).toBe(true);
+  });
+
+  it('keeps generic urls intact when trimming around them', () => {
+    const verbose = 'Here is the direct link you need for details and booking help: https://example.com/really/long/path.with.dots?query=yes and here is a little extra explanation that should be trimmed away at the end of the message.';
+    const compact = trimSmsBodyShort(verbose);
+    expect(compact).toContain('https://example.com/really/long/path.with.dots?query=yes');
+    expect(compact).not.toContain('__URL_0__');
+    expect(compact.endsWith('?query=yes')).toBe(true);
   });
 
   it('rewrites closest-location answers into a short prompt plus stable link', () => {
