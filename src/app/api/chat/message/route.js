@@ -835,21 +835,25 @@ export async function POST(request) {
             }
       }
 
+      if (!smsUpgradeLive && mentionsUpgradeInterest(sanitizedMessage)) {
+            const upgradePendingReply = buildSmsUpgradePendingReply();
+            await addMessage(sessionId, 'assistant', upgradePendingReply);
+            pendingTranscriptEntries.push({ role: 'assistant', content: upgradePendingReply });
+            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'sms upgrade interest pending reply');
+            const pendingResult = {
+                  message: upgradePendingReply,
+                  sessionId,
+            };
+            if (session.memberProfile) {
+                  pendingResult.memberProfile = session.memberProfile;
+            }
+            return NextResponse.json(pendingResult, {
+                  headers: buildRateLimitHeaders(rateLimit),
+            });
+      }
+
       // Explicit upgrade request: run deterministic eligibility check before LLM response.
       if (session.memberProfile && mentionsUpgradeInterest(sanitizedMessage)) {
-            if (!smsUpgradeLive) {
-                  const upgradePendingReply = buildSmsUpgradePendingReply();
-                  await addMessage(sessionId, 'assistant', upgradePendingReply);
-                  pendingTranscriptEntries.push({ role: 'assistant', content: upgradePendingReply });
-                  await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'sms upgrade interest pending reply');
-                  return NextResponse.json({
-                        message: upgradePendingReply,
-                        sessionId,
-                        memberProfile: session.memberProfile,
-                  }, {
-                        headers: buildRateLimitHeaders(rateLimit),
-                  });
-            }
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
             if (opportunity?.eligible) {
                   if (session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {

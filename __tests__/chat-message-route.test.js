@@ -216,4 +216,50 @@ describe('chat message route rate-limit headers', () => {
     expect(body.message).toContain('(888) 677-0055');
     expect(mockSendMessage).not.toHaveBeenCalled();
   });
+
+  it('returns pending upgrade copy for sms upgrade interest even before member lookup', async () => {
+    process.env = { ...originalEnv, SMS_UPGRADE_STATUS: 'pending' };
+    const session = {
+      id: 'sess-sms-upgrade-guest',
+      createdAt: '2026-03-18T00:00:00.000Z',
+      status: 'active',
+      messages: [],
+      memberProfile: null,
+      mode: null,
+      chatTranscriptStarted: false,
+      lastProcessedUserFingerprint: null,
+      lastProcessedUserAt: null,
+      lastAssistantVisibleMessage: null,
+      lastAssistantAt: null,
+      pendingUpgradeOffer: null,
+    };
+
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sessionId, role, content) => {
+      session.messages.push({ role, content });
+      if (role === 'assistant') {
+        session.lastAssistantVisibleMessage = content;
+        session.lastAssistantAt = new Date('2026-03-18T00:00:01.000Z');
+      }
+      return session;
+    });
+
+    const req = new Request('http://localhost/api/chat/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-sms-upgrade-guest',
+        message: 'Can I upgrade my appointment by text?',
+        channel: 'sms',
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.message).toContain('upgrade-by-text feature is still pending');
+    expect(body.message).toContain('(888) 677-0055');
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
 });
