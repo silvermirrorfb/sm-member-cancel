@@ -32,20 +32,51 @@ describe('twilio helpers', () => {
   it('rewrites verbose greeting to single-text concise copy', () => {
     const verbose = "Hi! I'm Silver Mirror's virtual assistant. How can I help you today? Whether you have questions about our facials, memberships, booking, or skincare advice?";
     const compact = trimSmsBody(verbose);
-    expect(compact).toBe("Hi! I'm Silver Mirror's virtual assistant. How can I help today? Any questions about our facials, memberships, booking, or skincare advice?");
+    expect(compact).toBe("Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
     expect(compact.length).toBeLessThanOrEqual(150);
   });
 
   it('rewrites long hello greeting from chat flow', () => {
     const verbose = "Hello! I'm Silver Mirror's virtual assistant. I'm here to help with questions about our facials, services, memberships, products, and skincare. What can I help you with today?";
     const compact = trimSmsBody(verbose);
-    expect(compact).toBe("Hi! I'm Silver Mirror's virtual assistant. How can I help today? Any questions about facials, memberships, booking, or skincare advice?");
+    expect(compact).toBe("Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
     expect(compact.length).toBeLessThanOrEqual(150);
+  });
+
+  it('rewrites chatty greeting replies into short sms copy', () => {
+    const verbose = "Hi there! I'm doing well, thank you. I'm Silver Mirror's virtual assistant and I'm here to help with any questions about our facials, services";
+    const compact = trimSmsBody(verbose);
+    expect(compact).toBe("Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
   });
 
   it('sanitizes emoji and non-ascii punctuation for sms-safe output', () => {
     const sanitized = sanitizeSmsText('Hi — yes 😊 “quoted”');
     expect(sanitized).toBe('Hi - yes "quoted"');
+  });
+
+  it('strips markdown emphasis from sms output', () => {
+    const compact = trimSmsBody("Great question! I'd recommend the **Just for Men Facial** for ingrown hairs.");
+    expect(compact).not.toContain('**');
+    expect(compact).toContain('Just for Men Facial');
+  });
+
+  it('preserves booking link as a complete known URL', () => {
+    const verbose = "I'd be happy to help you find the perfect facial! You can book online at https://booking.silvermirror.com/booking/location/manhattan-west-2026-05-26-7-30-pm-concert/17913877";
+    const compact = trimSmsBody(verbose);
+    expect(compact).toBe('Book online at https://booking.silvermirror.com/booking/location');
+    expect(compact.endsWith('/booking/location')).toBe(true);
+  });
+
+  it('rewrites closest-location answers into a short prompt plus stable link', () => {
+    const verbose = "I'd be happy to help you find the closest location! We have 10 locations across three cities:**New York City (5 locations):**- Upper East Side";
+    const compact = trimSmsBody(verbose);
+    expect(compact).toBe("Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: https://silvermirror.com/locations/");
+  });
+
+  it('rewrites location hours answers into a short stable response', () => {
+    const verbose = 'Each Silver Mirror location has different hours. Direct guests to https://silvermirror.com/locations/ for specific hours.';
+    const compact = trimSmsBody(verbose);
+    expect(compact).toBe('Hours vary by location. See https://silvermirror.com/locations/ or text me the location name.');
   });
 
   it('validates and rejects twilio signatures', () => {

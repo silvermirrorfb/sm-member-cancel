@@ -3,9 +3,22 @@ import crypto from 'crypto';
 const SMS_HARD_MAX_CHARS = 150;
 const MAX_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_MAX_CHARS || SMS_HARD_MAX_CHARS), 40), SMS_HARD_MAX_CHARS);
 const TARGET_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_TARGET_CHARS || 140), 40), MAX_SMS_CHARS);
+const BOOKING_URL = 'https://booking.silvermirror.com/booking/location';
+const LOCATIONS_URL = 'https://silvermirror.com/locations/';
+
+function stripSmsMarkdown(text) {
+  return String(text || '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    .replace(/^\s*[-*]\s+/gm, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 function sanitizeSmsText(text) {
-  return String(text || '')
+  return stripSmsMarkdown(text)
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2013\u2014]/g, '-')
@@ -14,14 +27,48 @@ function sanitizeSmsText(text) {
     .trim();
 }
 
-function rewriteCommonSmsPhrases(text) {
+function normalizeKnownSmsUrls(text) {
   let value = String(text || '');
+  value = value.replace(/https?:\/\/booking\.silvermirror\.com\/[^\s)]+/gi, BOOKING_URL);
+  value = value.replace(/https?:\/\/silvermirror\.com\/locations\/?[^\s)]+/gi, LOCATIONS_URL);
+  value = value.replace(/\bbooking\.silvermirror\.com\/[^\s)]+/gi, BOOKING_URL.replace(/^https?:\/\//, ''));
+  value = value.replace(/\bsilvermirror\.com\/locations\/?[^\s)]+/gi, LOCATIONS_URL.replace(/^https?:\/\//, ''));
+  return value;
+}
+
+function rewriteCommonSmsPhrases(text) {
+  let value = normalizeKnownSmsUrls(text);
   value = value.replace(/How can I help you today\?/gi, 'How can I help today?');
   value = value.replace(/Whether you have questions about/gi, 'Any questions about');
   value = value.replace(
-    /^Hello!\s*I'm Silver Mirror's virtual assistant\.\s*I'm here to help with questions about our facials,\s*services,\s*memberships,\s*products,\s*and skincare\.\s*What can I help you with today\?/i,
-    "Hi! I'm Silver Mirror's virtual assistant. How can I help today? Any questions about facials, memberships, booking, or skincare advice?",
+    /^Hi there!\s*I'm doing well, thank you\.\s*I'm Silver Mirror'?s virtual assistant and I'm here to help with any questions about our facials,\s*services.*$/i,
+    "Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
   );
+  value = value.replace(
+    /^Hello!\s*I'm Silver Mirror's virtual assistant\.\s*I'm here to help with questions about our facials,\s*services,\s*memberships,\s*products,\s*and skincare\.\s*What can I help you with today\?/i,
+    "Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
+  );
+  value = value.replace(
+    /^Hi[!. ]+I'm Silver Mirror'?s virtual assistant\.\s*How can I help today\?\s*Any questions about (?:our )?facials,\s*memberships,\s*booking,\s*or skincare advice\??/i,
+    "Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
+  );
+  value = value.replace(
+    /^I'd be happy to help you find the perfect facial!\s*You can book online at\s*(?:the following link:?\s*)?(?:https?:\/\/)?booking\.silvermirror\.com\/[^\s)]+.*$/i,
+    `Book online at ${BOOKING_URL}`,
+  );
+  value = value.replace(
+    /^I'd be happy to help you find the closest location!\s*We have \d+\s+locations.*$/i,
+    `Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: ${LOCATIONS_URL}`,
+  );
+  value = value.replace(
+    /^Each Silver Mirror location has different hours\..*$/i,
+    `Hours vary by location. See ${LOCATIONS_URL} or text me the location name.`,
+  );
+  value = value.replace(
+    /^Great question!\s*For a \d{1,3}-year-old man, I'd recommend the Just for Men Facial\s*\(([^)]+)\)\.?/i,
+    'For ingrown hairs or shaving irritation, try the Just for Men Facial. Want booking, pricing, or locations?',
+  );
+  value = value.replace(/\s*\n+\s*/g, ' ');
   return value;
 }
 
@@ -40,6 +87,18 @@ function trimSmsBody(text) {
   value = rewriteCommonSmsPhrases(value);
   if (!value) return '';
   if (value.length <= TARGET_SMS_CHARS) return value;
+
+  const bookingUrlIndex = value.indexOf(BOOKING_URL);
+  if (bookingUrlIndex >= 0) {
+    const candidate = `Book online: ${BOOKING_URL}`;
+    if (candidate.length <= MAX_SMS_CHARS) return candidate;
+  }
+
+  const locationsUrlIndex = value.indexOf(LOCATIONS_URL);
+  if (locationsUrlIndex >= 0) {
+    const candidate = `Locations and hours: ${LOCATIONS_URL}`;
+    if (candidate.length <= MAX_SMS_CHARS) return candidate;
+  }
 
   const sentences = value.match(/[^.!?]+[.!?]?/g) || [value];
   let compact = '';
