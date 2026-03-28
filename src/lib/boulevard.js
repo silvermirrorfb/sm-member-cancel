@@ -2203,7 +2203,19 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   }
 
   let result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, options);
-  if (result?.reason === 'provider_identity_unavailable' && result.appointmentId) {
+  const shouldRecoverProviderContext = Boolean(
+    result?.appointmentId &&
+    !String(result?.providerId || '').trim() &&
+    (
+      result?.reason === 'provider_identity_unavailable' ||
+      (
+        result?.reason === 'no_upgrade_target_for_duration' &&
+        Number(result?.currentDurationMinutes) >= 50 &&
+        result?.gapUnlimited == null
+      )
+    )
+  );
+  if (shouldRecoverProviderContext) {
     const appointmentContext = await fetchAppointmentContextById(
       auth.apiUrl,
       auth.headers,
