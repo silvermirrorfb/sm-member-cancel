@@ -1,5 +1,10 @@
 import { NextResponse } from 'next/server';
-import { createSession, getSession, saveSession } from '../../../../../lib/sessions';
+import {
+  createSession,
+  getAllActiveSessions,
+  getSession,
+  saveSession,
+} from '../../../../../lib/sessions';
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../../lib/rate-limit';
 import {
   bindPhoneToSession,
@@ -187,12 +192,60 @@ function buildUpgradeSupportIncident({
   };
 }
 
+function collectSessionPhoneCandidates(session) {
+  const candidates = [
+    session?.memberProfile?.phone,
+    session?.memberProfile?.mobilePhone,
+    session?.summary?.phone,
+  ];
+  return candidates
+    .map(value => normalizePhone(value))
+    .filter(Boolean);
+}
+
+function getSessionLastActivityMs(session) {
+  const timestamp = new Date(session?.lastActivity || 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+async function recoverActiveSessionIdForPhone(phone) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) return null;
+
+  const activeSessions = await getAllActiveSessions();
+  const matches = [];
+
+  for (const row of activeSessions || []) {
+    const sessionId = String(row?.id || '').trim();
+    if (!sessionId) continue;
+    const session = await getSession(sessionId);
+    if (!session || session.status !== 'active') continue;
+    const phoneCandidates = collectSessionPhoneCandidates(session);
+    if (!phoneCandidates.includes(normalizedPhone)) continue;
+    matches.push(session);
+  }
+
+  if (matches.length === 0) return null;
+
+  matches.sort((left, right) => {
+    const pendingDiff = Number(Boolean(right?.pendingUpgradeOffer)) - Number(Boolean(left?.pendingUpgradeOffer));
+    if (pendingDiff !== 0) return pendingDiff;
+    return getSessionLastActivityMs(right) - getSessionLastActivityMs(left);
+  });
+
+  const recovered = matches[0];
+  bindPhoneToSession(phone, recovered.id);
+  return recovered.id;
+}
+
 async function resolveSessionIdForPhone(phone) {
   const existing = getSessionIdForPhone(phone);
   if (existing) {
     const session = await getSession(existing);
     if (session && session.status === 'active') return existing;
   }
+  const recovered = await recoverActiveSessionIdForPhone(phone);
+  if (recovered) return recovered;
   const created = await createSession(null, null);
   bindPhoneToSession(phone, created.id);
   return created.id;
@@ -381,6 +434,36 @@ export async function POST(request) {
           activeSession.memberProfile = profile;
           await saveSession(activeSession);
         }
+      }
+
+      if (!profile && isNegative(intentText)) {
+        const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
+        if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
+        return new NextResponse(declineTwiml, {
+          status: 200,
+          headers: buildTwimlHeaders(rateLimit),
+        });
+      }
+
+      if (!profile && isAffirmative(intentText)) {
+        const incident = buildUpgradeSupportIncident({
+          sessionId,
+          from,
+          incomingText: intentText,
+          profile: activeSession?.memberProfile || null,
+          pendingOffer,
+          upgradeResult: {
+            success: false,
+            reason: hasPendingOffer ? 'pending_offer_context_unrecoverable' : 'member_lookup_failed_after_yes',
+          },
+        });
+        queueSupportIncident(incident);
+        const fallbackTwiml = buildTwimlMessage(YES_NO_PENDING_MANUAL_REPLY);
+        if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
+        return new NextResponse(fallbackTwiml, {
+          status: 200,
+          headers: buildTwimlHeaders(rateLimit),
+        });
       }
 
       if (profile) {

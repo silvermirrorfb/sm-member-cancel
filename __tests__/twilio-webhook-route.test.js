@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockCheckRateLimit = vi.fn();
 const mockGetClientIP = vi.fn();
 const mockCreateSession = vi.fn();
+const mockGetAllActiveSessions = vi.fn();
 const mockGetSession = vi.fn();
 const mockSaveSession = vi.fn();
 const mockBindPhoneToSession = vi.fn();
@@ -29,6 +30,7 @@ vi.mock('../src/lib/rate-limit.js', () => ({
 
 vi.mock('../src/lib/sessions.js', () => ({
   createSession: (...args) => mockCreateSession(...args),
+  getAllActiveSessions: (...args) => mockGetAllActiveSessions(...args),
   getSession: (...args) => mockGetSession(...args),
   saveSession: (...args) => mockSaveSession(...args),
 }));
@@ -77,6 +79,7 @@ describe('twilio webhook route', () => {
       'X-RateLimit-Remaining': '119',
       'X-RateLimit-Backend': 'memory',
     });
+    mockGetAllActiveSessions.mockResolvedValue([]);
     mockGetClientIP.mockReturnValue('127.0.0.1');
     mockSaveSession.mockImplementation(async (session) => session);
     mockGetReplyForMessageSid.mockReturnValue(null);
@@ -186,11 +189,16 @@ describe('twilio webhook route', () => {
     const session = { id: 'sess-1', status: 'active', smsInboundCount: 2 };
     mockGetSessionIdForPhone.mockReturnValue('sess-1');
     mockGetSession.mockReturnValue(session);
+    mockParseTwilioFormBody.mockReturnValue({
+      From: '+12134401333',
+      Body: 'What time is my appointment?',
+      MessageSid: 'SM-in-chat-1',
+    });
 
     const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
       method: 'POST',
       headers: { 'x-twilio-signature': 'sig' },
-      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+      body: 'From=%2B12134401333&Body=What+time+is+my+appointment%3F&MessageSid=SM-in-chat-1',
     });
 
     const res = await POST(req);
@@ -470,6 +478,55 @@ describe('twilio webhook route', () => {
     });
   });
 
+  it('recovers a remote active session by phone and finalizes pending add-on YES without chat fallback', async () => {
+    process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
+    const remoteSession = {
+      id: 'sess-remote',
+      status: 'active',
+      lastActivity: '2026-03-28T19:20:00.000Z',
+      smsInboundCount: 0,
+      memberProfile: {
+        phone: '+12134401333',
+      },
+      pendingUpgradeOffer: {
+        offerKind: 'addon',
+        appointmentId: 'appt-remote-1',
+        addOnName: 'Antioxidant Peel',
+        isMember: true,
+        pricing: { memberPrice: 40, walkinPrice: 50 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue(null);
+    mockGetAllActiveSessions.mockResolvedValue([{ id: 'sess-remote' }]);
+    mockGetSession.mockImplementation(async (sessionId) => {
+      if (sessionId === 'sess-remote') return remoteSession;
+      return null;
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-remote-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('an Antioxidant Peel is $50');
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(remoteSession.pendingUpgradeOffer).toBeNull();
+    expect(mockBindPhoneToSession).toHaveBeenCalledWith('+12134401333', 'sess-remote');
+    expect(mockPostChatMessage).not.toHaveBeenCalled();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'manual_addon_confirmation',
+      phone: '+12134401333',
+    });
+  });
+
   it('does not expose disallowed add-on names in manual confirmation SMS', async () => {
     process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
     const session = {
@@ -500,6 +557,32 @@ describe('twilio webhook route', () => {
     expect(res.status).toBe(200);
     expect(text).toContain('The add-on is $95');
     expect(text).not.toContain('Hydradermabrasion');
+  });
+
+  it('returns fast approved YES copy when profile lookup misses and no pending offer context is recoverable', async () => {
+    const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockResolvedValue(session);
+    mockLookupMember.mockResolvedValue(null);
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-fast-fallback',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Thanks for replying YES. We received your request');
+    expect(mockPostChatMessage).not.toHaveBeenCalled();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'member_lookup_failed_after_yes',
+      phone: '+12134401333',
+    });
   });
 
   it('logs support incident and returns approved manual-finalization copy when mutation attempt fails', async () => {
