@@ -2202,7 +2202,32 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
     };
   }
 
-  const result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, options);
+  let result = evaluateUpgradeEligibilityFromAppointments(appointments, profile, options);
+  if (result?.reason === 'provider_identity_unavailable' && result.appointmentId) {
+    const appointmentContext = await fetchAppointmentContextById(
+      auth.apiUrl,
+      auth.headers,
+      result.appointmentId,
+    );
+    const recoveredProviderId = String(appointmentContext?.providerId || '').trim();
+    if (recoveredProviderId) {
+      const targetAppointmentId = String(result.appointmentId).trim();
+      const recoveredAppointments = appointments.map(appointment => {
+        if (String(appointment?.id || '').trim() !== targetAppointmentId) return appointment;
+        return {
+          ...appointment,
+          providerId: String(appointment?.providerId || '').trim() || recoveredProviderId,
+          locationId: appointment?.locationId || appointmentContext?.locationId || null,
+          startOn: appointment?.startOn || appointmentContext?.startOn || null,
+          endOn: appointment?.endOn || appointmentContext?.endOn || null,
+        };
+      });
+      result = evaluateUpgradeEligibilityFromAppointments(recoveredAppointments, profile, options);
+      if (result && typeof result === 'object') {
+        result.providerContextRecovered = true;
+      }
+    }
+  }
   if (fallbackScanUsed) {
     result.locationFallbackUsed = true;
   }

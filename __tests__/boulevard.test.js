@@ -1352,6 +1352,160 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(result.appointmentId).toBe('appt-1');
   });
 
+  it('recovers provider identity from appointment context when scan omits providerId', async () => {
+    const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(init.body);
+      const typeName = body?.variables?.typeName;
+
+      if (body.query.includes('IntrospectTypeDetailed')) {
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    {
+                      name: 'notes',
+                      args: [],
+                      type: scalarType('String'),
+                    },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({ data: { __type: null } }),
+        };
+      }
+
+      if (body.query.includes('IntrospectType')) {
+        if (typeName === 'Query') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [{ name: 'appointments' }],
+                },
+              },
+            }),
+          };
+        }
+        if (typeName === 'Appointment') {
+          return {
+            ok: true,
+            json: async () => ({
+              data: {
+                __type: {
+                  fields: [
+                    { name: 'id' },
+                    { name: 'startOn' },
+                    { name: 'endOn' },
+                    { name: 'clientId' },
+                    { name: 'locationId' },
+                    { name: 'status' },
+                    { name: 'canceledAt' },
+                  ],
+                },
+              },
+            }),
+          };
+        }
+        return {
+          ok: true,
+          json: async () => ({ data: { __type: null } }),
+        };
+      }
+
+      if (body.query.includes('ScanAppointments')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              appointments: {
+                edges: [
+                  {
+                    node: {
+                      id: 'appt-1',
+                      clientId: 'client-1',
+                      locationId: 'loc-1',
+                      startOn: '2026-03-08T10:00:00.000Z',
+                      endOn: '2026-03-08T10:30:00.000Z',
+                      status: 'BOOKED',
+                      canceledAt: null,
+                    },
+                  },
+                  {
+                    node: {
+                      id: 'appt-2',
+                      clientId: 'other',
+                      providerId: 'prov-1',
+                      locationId: 'loc-1',
+                      startOn: '2026-03-08T11:10:00.000Z',
+                      endOn: '2026-03-08T11:40:00.000Z',
+                      status: 'BOOKED',
+                      canceledAt: null,
+                    },
+                  },
+                ],
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null,
+                },
+              },
+            },
+          }),
+        };
+      }
+
+      if (body.query.includes('FetchAppointmentContext')) {
+        return {
+          ok: true,
+          json: async () => ({
+            data: {
+              appointment: {
+                id: 'appt-1',
+                clientId: 'client-1',
+                locationId: 'loc-1',
+                startAt: '2026-03-08T10:00:00.000Z',
+                endAt: '2026-03-08T10:30:00.000Z',
+                notes: 'Internal note',
+                appointmentServices: [
+                  {
+                    id: 'aps-1',
+                    serviceId: 'svc-30',
+                    staffId: 'prov-1',
+                  },
+                ],
+              },
+            },
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ data: {} }),
+      };
+    });
+
+    const result = await evaluateUpgradeOpportunityForProfile(
+      { clientId: 'client-1', tier: '30', accountStatus: 'active' },
+      { now: '2026-03-08T08:00:00.000Z', windowHours: 6 },
+    );
+
+    expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
+    expect(result.appointmentId).toBe('appt-1');
+    expect(result.providerId).toBe('prov-1');
+    expect(result.providerContextRecovered).toBe(true);
+  });
+
   it('falls back to no-arg strategy when appointments rejects cursor args', async () => {
     const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
     const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });
