@@ -176,3 +176,30 @@
       - set `RATE_LIMIT_SHADOW_MODE=false`
       - redeploy
       - re-probe chat start / message / QA routes
+
+## 2026-03-28 Full-Day Session Log
+- Full record for today has been logged in:
+  - `docs/SESSION_ACTIVITY_LOG_2026-03-28.md`
+- Repo / production outcomes captured there include:
+  - duration-upgrade provider recovery and live proof
+  - add-on eligibility recovery for 50-minute bookings
+  - inbound Twilio `YES` timeout / session-recovery fix
+  - add-on mutation implementation using live Boulevard booking primitives
+  - final Matt Maroone appointment repair confirmation
+- Commit sequence completed on March 28, 2026:
+  - `48e8ea9` - `Recover provider identity for SMS upgrade rebooking`
+  - `ccabb1a` - `Recover addon gap context for 50-minute SMS offers`
+  - `0406f72` - `Recover inbound SMS session context across instances`
+  - `8ff115e` - `Apply SMS add-ons to Boulevard bookings`
+- Final verified production state at end of day:
+  - `https://sm-member-cancel.vercel.app`
+  - Matt test appointment `urn:blvd:Appointment:4141b2ae-3554-4a37-a104-8277d67692fe`
+  - final booked window: `4:00 PM` -> `5:15 PM ET`
+  - final services:
+    - `Sensitive Skin Facial`
+    - `Antioxidant Peel`
+
+## 2026-03-27 Evidence Log
+- No trustworthy repo-recorded code/deploy activity was found in the current workspace for Friday, March 27, 2026.
+- That negative-evidence record has been logged in:
+  - `docs/SESSION_ACTIVITY_LOG_2026-03-27.md`
