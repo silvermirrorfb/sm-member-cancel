@@ -16,13 +16,28 @@ const MEMBERSHIP_NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
 const CLIENT_FIELD_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const APPOINTMENT_SCAN_PAGE_SIZE = Number(process.env.BOULEVARD_APPOINTMENT_SCAN_PAGE_SIZE || 100);
 const APPOINTMENT_SCAN_MAX_PAGES = Number(process.env.BOULEVARD_APPOINTMENT_SCAN_MAX_PAGES || 80);
+const SERVICE_SCAN_PAGE_SIZE = Number(process.env.BOULEVARD_SERVICE_SCAN_PAGE_SIZE || 100);
+const SERVICE_SCAN_MAX_PAGES = Number(process.env.BOULEVARD_SERVICE_SCAN_MAX_PAGES || 80);
 const UPGRADE_WINDOW_HOURS = Number(process.env.BOULEVARD_UPGRADE_WINDOW_HOURS || 6);
 const PREP_BUFFER_30MIN = Number(process.env.PREP_BUFFER_30MIN || 15);
 const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
 const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
+const SMS_ADDON_MIN_GAP_MINUTES = Number(process.env.SMS_ADDON_MIN_GAP_MINUTES || 5);
 const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
 const ENABLE_CANCEL_REBOOK_FALLBACK = process.env.BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK === 'true';
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ADDON_SERVICE_ID_ENV_BY_CODE = Object.freeze({
+  antioxidant_peel: 'BOULEVARD_ADDON_SERVICE_ID_ANTIOXIDANT_PEEL',
+  neck_firming: 'BOULEVARD_ADDON_SERVICE_ID_NECK_FIRMING',
+  eye_puff_minimizer: 'BOULEVARD_ADDON_SERVICE_ID_EYE_PUFF_MINIMIZER',
+  lip_plump_and_scrub: 'BOULEVARD_ADDON_SERVICE_ID_LIP_PLUMP_AND_SCRUB',
+});
+const ADDON_DISPLAY_NAME_BY_CODE = Object.freeze({
+  antioxidant_peel: 'Antioxidant Peel',
+  neck_firming: 'Neck Firming',
+  eye_puff_minimizer: 'Eye Puff Minimizer',
+  lip_plump_and_scrub: 'Lip Plump and Scrub',
+});
 const OFFICIAL_LOCATION_REGISTRY = Object.freeze([
   { slug: 'brickell', name: 'Brickell', id: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65' },
   { slug: 'bryant-park', name: 'Bryant Park', id: 'urn:blvd:Location:c80e43fc-22f5-4adf-b406-f50f59a85b80' },
@@ -61,8 +76,20 @@ const membershipCache = new Map();
 const clientFieldCache = new Map();
 const typeFieldCache = new Map();
 const typeFieldDetailCache = new Map();
+const serviceContextCache = new Map();
+const serviceLookupCache = new Map();
 
 function normalizeLocationNameKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeServiceNameKey(value) {
   return String(value || '')
     .trim()
     .toLowerCase()
@@ -2335,7 +2362,177 @@ async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
     notes: readFirstPopulatedStringField(appointment, noteFieldCandidates) || null,
     providerId: String(primaryService?.staffId || '').trim() || null,
     serviceId: String(primaryService?.serviceId || '').trim() || null,
+    appointmentServices: services
+      .map(service => ({
+        id: String(service?.id || '').trim() || null,
+        serviceId: String(service?.serviceId || '').trim() || null,
+        staffId: String(service?.staffId || '').trim() || null,
+      }))
+      .filter(service => service.id || service.serviceId || service.staffId),
   };
+}
+
+async function fetchServiceContextById(apiUrl, headers, serviceId) {
+  const id = String(serviceId || '').trim();
+  if (!id) return null;
+  if (serviceContextCache.has(id)) return serviceContextCache.get(id) || null;
+
+  const query = `
+    query FetchServiceContext($id: ID!) {
+      service(id: $id) {
+        id
+        name
+        addon
+        active
+        defaultDuration
+        defaultPrice
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(
+    apiUrl,
+    headers,
+    query,
+    { id },
+    { silentErrors: true, returnErrors: true },
+  );
+  if (!data || data.__error) {
+    serviceContextCache.set(id, null);
+    return null;
+  }
+  const service = data?.data?.service || null;
+  if (!service?.id) {
+    serviceContextCache.set(id, null);
+    return null;
+  }
+
+  const context = {
+    id: String(service.id || '').trim() || null,
+    name: String(service.name || '').trim() || null,
+    addon: service.addon === true,
+    active: service.active !== false,
+    defaultDuration: Number(service.defaultDuration || 0) || 0,
+    defaultPrice: Number(service.defaultPrice || 0) || 0,
+  };
+  serviceContextCache.set(id, context);
+  return context;
+}
+
+async function findServiceContextByName(apiUrl, headers, serviceName, options = {}) {
+  const normalizedName = normalizeServiceNameKey(serviceName);
+  if (!normalizedName) return null;
+
+  const addonOnly = options.addonOnly === true;
+  const activeOnly = options.activeOnly !== false;
+  const cacheKey = `${normalizedName}::addon=${addonOnly ? '1' : '0'}::active=${activeOnly ? '1' : '0'}`;
+  if (serviceLookupCache.has(cacheKey)) return serviceLookupCache.get(cacheKey) || null;
+
+  const query = `
+    query ScanServices($after: String) {
+      services(first: ${SERVICE_SCAN_PAGE_SIZE}, after: $after) {
+        edges {
+          node {
+            id
+            name
+            addon
+            active
+            defaultDuration
+            defaultPrice
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  `;
+
+  const matches = [];
+  let after = null;
+  for (let page = 0; page < SERVICE_SCAN_MAX_PAGES; page += 1) {
+    const data = await fetchBoulevardGraphQL(
+      apiUrl,
+      headers,
+      query,
+      { after },
+      { silentErrors: true, returnErrors: true },
+    );
+    if (!data || data.__error) break;
+    const connection = data?.data?.services;
+    const edges = connection?.edges || [];
+    if (edges.length === 0) break;
+
+    for (const edge of edges) {
+      const node = edge?.node || null;
+      const candidateNameKey = normalizeServiceNameKey(node?.name);
+      if (candidateNameKey !== normalizedName) continue;
+      if (addonOnly && node?.addon !== true) continue;
+      if (activeOnly && node?.active === false) continue;
+      const context = {
+        id: String(node?.id || '').trim() || null,
+        name: String(node?.name || '').trim() || null,
+        addon: node?.addon === true,
+        active: node?.active !== false,
+        defaultDuration: Number(node?.defaultDuration || 0) || 0,
+        defaultPrice: Number(node?.defaultPrice || 0) || 0,
+      };
+      if (context.id) {
+        matches.push(context);
+        serviceContextCache.set(context.id, context);
+      }
+    }
+
+    if (!connection?.pageInfo?.hasNextPage) break;
+    after = String(connection?.pageInfo?.endCursor || '').trim() || null;
+    if (!after) break;
+  }
+
+  matches.sort((left, right) => {
+    const addonDiff = Number(Boolean(right?.addon)) - Number(Boolean(left?.addon));
+    if (addonDiff !== 0) return addonDiff;
+    const activeDiff = Number(Boolean(right?.active)) - Number(Boolean(left?.active));
+    if (activeDiff !== 0) return activeDiff;
+    return String(left?.id || '').localeCompare(String(right?.id || ''));
+  });
+
+  const resolved = matches[0] || null;
+  serviceLookupCache.set(cacheKey, resolved);
+  return resolved;
+}
+
+async function resolveAddonServiceContext(apiUrl, headers, pendingOffer) {
+  const addOnCode = String(pendingOffer?.addOnCode || '').trim();
+  const configuredEnvName = ADDON_SERVICE_ID_ENV_BY_CODE[addOnCode] || '';
+  const configuredServiceId = configuredEnvName ? String(process.env[configuredEnvName] || '').trim() : '';
+  if (configuredServiceId) {
+    const configuredContext = await fetchServiceContextById(apiUrl, headers, configuredServiceId);
+    if (configuredContext) return configuredContext;
+  }
+
+  const addOnName = String(
+    pendingOffer?.addOnName || ADDON_DISPLAY_NAME_BY_CODE[addOnCode] || '',
+  ).trim();
+  if (!addOnName) return null;
+  return findServiceContextByName(apiUrl, headers, addOnName, {
+    addonOnly: true,
+    activeOnly: true,
+  });
+}
+
+async function appointmentAlreadyHasAddon(apiUrl, headers, appointmentContext, targetAddonServiceId = '') {
+  const targetServiceId = String(targetAddonServiceId || '').trim();
+  const appointmentServices = Array.isArray(appointmentContext?.appointmentServices)
+    ? appointmentContext.appointmentServices
+    : [];
+  for (const appointmentService of appointmentServices) {
+    const serviceId = String(appointmentService?.serviceId || '').trim();
+    if (!serviceId) continue;
+    if (targetServiceId && serviceId === targetServiceId) return true;
+    const serviceContext = await fetchServiceContextById(apiUrl, headers, serviceId);
+    if (serviceContext?.addon === true) return true;
+  }
+  return false;
 }
 
 function toBoulevardNaiveDateTime(value) {
@@ -2773,14 +2970,784 @@ async function tryApplyUpgradeViaCancelRebook(apiUrl, headers, opportunity, serv
   };
 }
 
+function buildAddonReverifyResult(reason, opportunity = null, extra = {}) {
+  return {
+    success: false,
+    reason,
+    reverified: false,
+    opportunity: opportunity || null,
+    ...extra,
+  };
+}
+
+function isAddonGapEligible(opportunity) {
+  if (!opportunity) return false;
+  if (opportunity.gapUnlimited === true) return true;
+  const gapMinutes = Number(opportunity.availableGapMinutes);
+  return Number.isFinite(gapMinutes) && gapMinutes >= SMS_ADDON_MIN_GAP_MINUTES;
+}
+
+function getPrimaryAppointmentService(appointmentContext) {
+  const appointmentServices = Array.isArray(appointmentContext?.appointmentServices)
+    ? appointmentContext.appointmentServices
+    : [];
+  return appointmentServices.find(service => String(service?.staffId || '').trim()) || appointmentServices[0] || null;
+}
+
+async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointmentContext, addOnServiceId) {
+  const appointmentId = String(appointmentContext?.appointmentId || '').trim();
+  const targetAddonServiceId = String(addOnServiceId || '').trim();
+  const providerId = String(appointmentContext?.providerId || '').trim();
+  if (!appointmentId || !targetAddonServiceId || !providerId) {
+    return {
+      applied: false,
+      reason: 'addon_booking_from_appointment_missing_fields',
+    };
+  }
+
+  const bookingCreateQuery = `
+    mutation BookingCreateFromAppointmentForAddon($input: BookingCreateFromAppointmentInput!) {
+      bookingCreateFromAppointment(input: $input) {
+        booking {
+          id
+          bookingClients {
+            id
+            clientId
+          }
+          bookingServices {
+            id
+            baseBookingServiceId
+            editingAppointmentServiceId
+            serviceId
+            staffId
+          }
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const bookingCreateAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingCreateQuery,
+    {
+      input: {
+        appointmentId,
+      },
+    },
+    'bookingCreateFromAppointment',
+  );
+  const createWarnings = toBookingWarningList(bookingCreateAttempt.payload?.bookingWarnings);
+  const booking = bookingCreateAttempt.payload?.booking || null;
+  const bookingId = String(booking?.id || '').trim();
+  if (!bookingCreateAttempt.ok || !bookingId) {
+    return {
+      applied: false,
+      reason: 'addon_booking_from_appointment_failed',
+      error: bookingCreateAttempt.error || null,
+      warnings: createWarnings,
+    };
+  }
+  if (hasBlockingBookingWarnings(createWarnings)) {
+    return {
+      applied: false,
+      reason: 'addon_booking_from_appointment_warning_block',
+      warnings: createWarnings,
+    };
+  }
+
+  const bookingClientId = String(
+    booking?.bookingClients?.[0]?.id || '',
+  ).trim();
+  const sourcePrimaryAppointmentService = getPrimaryAppointmentService(appointmentContext);
+  const sourceAppointmentServiceId = String(sourcePrimaryAppointmentService?.id || '').trim();
+  const bookingServices = Array.isArray(booking?.bookingServices) ? booking.bookingServices : [];
+  const baseBookingService = bookingServices.find(service =>
+    !String(service?.baseBookingServiceId || '').trim() &&
+    String(service?.editingAppointmentServiceId || '').trim() === sourceAppointmentServiceId,
+  ) || bookingServices.find(service => !String(service?.baseBookingServiceId || '').trim()) || null;
+  const baseBookingServiceId = String(baseBookingService?.id || '').trim();
+  if (!bookingClientId || !baseBookingServiceId) {
+    return {
+      applied: false,
+      reason: 'addon_booking_from_appointment_missing_booking_context',
+      bookingId,
+    };
+  }
+
+  const bookingAddServiceAddonQuery = `
+    mutation BookingAddServiceAddonForSms($input: BookingAddServiceAddonInput!) {
+      bookingAddServiceAddon(input: $input) {
+        booking {
+          id
+        }
+        bookingService {
+          id
+          baseBookingServiceId
+          serviceId
+          staffId
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const addOnAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingAddServiceAddonQuery,
+    {
+      input: {
+        bookingId,
+        bookingClientId,
+        baseBookingServiceId,
+        serviceId: targetAddonServiceId,
+      },
+    },
+    'bookingAddServiceAddon',
+  );
+  const addOnWarnings = toBookingWarningList(addOnAttempt.payload?.bookingWarnings);
+  if (!addOnAttempt.ok) {
+    return {
+      applied: false,
+      reason: 'addon_booking_add_service_addon_failed',
+      error: addOnAttempt.error || null,
+      warnings: addOnWarnings,
+      bookingId,
+    };
+  }
+  if (hasBlockingBookingWarnings(addOnWarnings)) {
+    return {
+      applied: false,
+      reason: 'addon_booking_add_service_addon_warning_block',
+      warnings: addOnWarnings,
+      bookingId,
+    };
+  }
+
+  const bookingCompleteQuery = `
+    mutation BookingCompleteForAddon($input: BookingCompleteInput!) {
+      bookingComplete(input: $input) {
+        booking {
+          id
+        }
+        bookingAppointments {
+          appointmentId
+          clientId
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const bookingCompleteAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingCompleteQuery,
+    {
+      input: {
+        bookingId,
+        bookWithStaffId: providerId,
+        notifyClient: false,
+      },
+    },
+    'bookingComplete',
+  );
+  const completeWarnings = toBookingWarningList(bookingCompleteAttempt.payload?.bookingWarnings);
+  if (!bookingCompleteAttempt.ok) {
+    return {
+      applied: false,
+      reason: 'addon_booking_complete_failed',
+      error: bookingCompleteAttempt.error || null,
+      warnings: completeWarnings,
+      bookingId,
+    };
+  }
+  if (hasBlockingBookingWarnings(completeWarnings)) {
+    return {
+      applied: false,
+      reason: 'addon_booking_complete_warning_block',
+      warnings: completeWarnings,
+      bookingId,
+    };
+  }
+
+  const updatedAppointmentId = String(
+    (bookingCompleteAttempt.payload?.bookingAppointments || [])
+      .find(item => String(item?.appointmentId || '').trim() === appointmentId)?.appointmentId ||
+    bookingCompleteAttempt.payload?.bookingAppointments?.[0]?.appointmentId ||
+    appointmentId,
+  ).trim();
+
+  return {
+    applied: true,
+    mutationRoot: 'bookingCreateFromAppointment+bookingAddServiceAddon+bookingComplete',
+    updatedId: updatedAppointmentId || appointmentId,
+    bookingId,
+  };
+}
+
+async function tryApplyAddonViaCancelRebook(apiUrl, headers, appointmentContext, addOnServiceId) {
+  const appointmentId = String(appointmentContext?.appointmentId || '').trim();
+  const clientId = String(appointmentContext?.clientId || '').trim();
+  const locationId = normalizeBoulevardLocationId(appointmentContext?.locationId || '');
+  const providerId = String(appointmentContext?.providerId || '').trim();
+  const startTime = toBoulevardNaiveDateTime(appointmentContext?.startOn);
+  const sourceNotes = String(appointmentContext?.notes || '').trim();
+  const targetAddonServiceId = String(addOnServiceId || '').trim();
+  const originalServices = Array.isArray(appointmentContext?.appointmentServices)
+    ? appointmentContext.appointmentServices.filter(service => String(service?.serviceId || '').trim())
+    : [];
+
+  const missing = [];
+  if (!appointmentId) missing.push('appointmentId');
+  if (!clientId) missing.push('clientId');
+  if (!locationId) missing.push('locationId');
+  if (!providerId) missing.push('providerId');
+  if (!startTime) missing.push('startTime');
+  if (!targetAddonServiceId) missing.push('addOnServiceId');
+  if (originalServices.length === 0) missing.push('appointmentServices');
+  if (missing.length > 0) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_missing_fields',
+      missing,
+    };
+  }
+
+  const cancelQuery = `
+    mutation CancelAppointmentForAddon($input: CancelAppointmentInput!) {
+      cancelAppointment(input: $input) {
+        appointment {
+          id
+          cancelled
+          state
+        }
+      }
+    }
+  `;
+  const cancelAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    cancelQuery,
+    {
+      input: {
+        id: appointmentId,
+        reason: 'STAFF_CANCEL',
+        notifyClient: false,
+        notes: sourceNotes || 'Automated add-on flow: cancel + rebook with add-on.',
+      },
+    },
+    'cancelAppointment',
+  );
+  const canceledAppointmentId = String(cancelAttempt.payload?.appointment?.id || '').trim();
+  if (!cancelAttempt.ok || !canceledAppointmentId) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_cancel_failed',
+      error: cancelAttempt.error || null,
+    };
+  }
+
+  const bookingCreateQuery = `
+    mutation BookingCreateForAddon($input: BookingCreateInput!) {
+      bookingCreate(input: $input) {
+        booking {
+          id
+          bookingClients {
+            id
+            clientId
+          }
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const bookingCreateAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingCreateQuery,
+    {
+      input: {
+        clientId,
+        locationId,
+        startTime,
+      },
+    },
+    'bookingCreate',
+  );
+  const createWarnings = toBookingWarningList(bookingCreateAttempt.payload?.bookingWarnings);
+  const bookingId = String(bookingCreateAttempt.payload?.booking?.id || '').trim();
+  if (!bookingCreateAttempt.ok || !bookingId) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_booking_create_failed',
+      error: bookingCreateAttempt.error || null,
+      warnings: createWarnings,
+    };
+  }
+  if (hasBlockingBookingWarnings(createWarnings)) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_booking_create_warning_block',
+      warnings: createWarnings,
+    };
+  }
+
+  let bookingClientId = String(
+    (bookingCreateAttempt.payload?.booking?.bookingClients || [])
+      .find(client => String(client?.clientId || '').trim() === clientId)?.id ||
+    bookingCreateAttempt.payload?.booking?.bookingClients?.[0]?.id ||
+    '',
+  ).trim();
+  if (!bookingClientId) {
+    const bookingSetClientQuery = `
+      mutation BookingSetClientForAddon($input: BookingSetClientInput!) {
+        bookingSetClient(input: $input) {
+          booking {
+            id
+            bookingClients {
+              id
+              clientId
+            }
+          }
+          bookingWarnings {
+            code
+            message
+            staffId
+            serviceId
+          }
+        }
+      }
+    `;
+    const bookingSetClientAttempt = await runMutationRoot(
+      apiUrl,
+      headers,
+      bookingSetClientQuery,
+      {
+        input: {
+          bookingId,
+          clientId,
+        },
+      },
+      'bookingSetClient',
+    );
+    const setClientWarnings = toBookingWarningList(bookingSetClientAttempt.payload?.bookingWarnings);
+    if (!bookingSetClientAttempt.ok) {
+      return {
+        applied: false,
+        reason: 'addon_cancel_rebook_set_client_failed',
+        error: bookingSetClientAttempt.error || null,
+        warnings: setClientWarnings,
+      };
+    }
+    if (hasBlockingBookingWarnings(setClientWarnings)) {
+      return {
+        applied: false,
+        reason: 'addon_cancel_rebook_set_client_warning_block',
+        warnings: setClientWarnings,
+      };
+    }
+    bookingClientId = String(
+      (bookingSetClientAttempt.payload?.booking?.bookingClients || [])
+        .find(client => String(client?.clientId || '').trim() === clientId)?.id ||
+      bookingSetClientAttempt.payload?.booking?.bookingClients?.[0]?.id ||
+      '',
+    ).trim();
+  }
+  if (!bookingClientId) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_missing_booking_client',
+      bookingId,
+    };
+  }
+
+  const bookingAddServiceQuery = `
+    mutation BookingAddBaseServiceForAddon($input: BookingAddServiceInput!) {
+      bookingAddService(input: $input) {
+        booking {
+          id
+        }
+        bookingService {
+          id
+          serviceId
+          staffId
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+
+  let baseBookingServiceId = '';
+  for (const appointmentService of originalServices) {
+    const serviceId = String(appointmentService?.serviceId || '').trim();
+    const staffId = String(appointmentService?.staffId || '').trim() || providerId;
+    const addServiceAttempt = await runMutationRoot(
+      apiUrl,
+      headers,
+      bookingAddServiceQuery,
+      {
+        input: {
+          bookingId,
+          bookingClientId,
+          serviceId,
+          staffId,
+        },
+      },
+      'bookingAddService',
+    );
+    const addServiceWarnings = toBookingWarningList(addServiceAttempt.payload?.bookingWarnings);
+    if (!addServiceAttempt.ok) {
+      return {
+        applied: false,
+        reason: 'addon_cancel_rebook_add_base_service_failed',
+        error: addServiceAttempt.error || null,
+        warnings: addServiceWarnings,
+        bookingId,
+      };
+    }
+    if (hasBlockingBookingWarnings(addServiceWarnings)) {
+      return {
+        applied: false,
+        reason: 'addon_cancel_rebook_add_base_service_warning_block',
+        warnings: addServiceWarnings,
+        bookingId,
+      };
+    }
+    if (!baseBookingServiceId) {
+      baseBookingServiceId = String(addServiceAttempt.payload?.bookingService?.id || '').trim();
+    }
+  }
+
+  if (!baseBookingServiceId) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_missing_base_booking_service',
+      bookingId,
+    };
+  }
+
+  const bookingAddServiceAddonQuery = `
+    mutation BookingAddServiceAddonForCancelRebook($input: BookingAddServiceAddonInput!) {
+      bookingAddServiceAddon(input: $input) {
+        booking {
+          id
+        }
+        bookingService {
+          id
+          baseBookingServiceId
+          serviceId
+          staffId
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const addOnAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingAddServiceAddonQuery,
+    {
+      input: {
+        bookingId,
+        bookingClientId,
+        baseBookingServiceId,
+        serviceId: targetAddonServiceId,
+      },
+    },
+    'bookingAddServiceAddon',
+  );
+  const addOnWarnings = toBookingWarningList(addOnAttempt.payload?.bookingWarnings);
+  if (!addOnAttempt.ok) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_add_service_addon_failed',
+      error: addOnAttempt.error || null,
+      warnings: addOnWarnings,
+      bookingId,
+    };
+  }
+  if (hasBlockingBookingWarnings(addOnWarnings)) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_add_service_addon_warning_block',
+      warnings: addOnWarnings,
+      bookingId,
+    };
+  }
+
+  const bookingCompleteQuery = `
+    mutation BookingCompleteForAddonCancelRebook($input: BookingCompleteInput!) {
+      bookingComplete(input: $input) {
+        booking {
+          id
+        }
+        bookingAppointments {
+          appointmentId
+          clientId
+        }
+        bookingWarnings {
+          code
+          message
+          staffId
+          serviceId
+        }
+      }
+    }
+  `;
+  const bookingCompleteAttempt = await runMutationRoot(
+    apiUrl,
+    headers,
+    bookingCompleteQuery,
+    {
+      input: {
+        bookingId,
+        bookWithStaffId: providerId,
+        notifyClient: false,
+      },
+    },
+    'bookingComplete',
+  );
+  const completeWarnings = toBookingWarningList(bookingCompleteAttempt.payload?.bookingWarnings);
+  if (!bookingCompleteAttempt.ok) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_complete_failed',
+      error: bookingCompleteAttempt.error || null,
+      warnings: completeWarnings,
+      bookingId,
+    };
+  }
+  if (hasBlockingBookingWarnings(completeWarnings)) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_complete_warning_block',
+      warnings: completeWarnings,
+      bookingId,
+    };
+  }
+
+  const newAppointmentId = String(
+    (bookingCompleteAttempt.payload?.bookingAppointments || [])
+      .find(item => String(item?.clientId || '').trim() === clientId)?.appointmentId ||
+    bookingCompleteAttempt.payload?.bookingAppointments?.[0]?.appointmentId ||
+    '',
+  ).trim();
+  if (!newAppointmentId) {
+    return {
+      applied: false,
+      reason: 'addon_cancel_rebook_missing_new_appointment',
+      bookingId,
+    };
+  }
+
+  const notesSync = await trySyncAppointmentNotes(apiUrl, headers, newAppointmentId, sourceNotes);
+
+  return {
+    applied: true,
+    mutationRoot: 'cancelAppointment+bookingCreate+bookingAddService+bookingAddServiceAddon+bookingComplete',
+    updatedId: newAppointmentId,
+    canceledAppointmentId,
+    bookingId,
+    notesSync,
+  };
+}
+
 async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options = {}) {
   if (!pendingOffer || !pendingOffer.appointmentId) return { success: false, reason: 'missing_pending_offer' };
+
+  const offerKind = String(pendingOffer.offerKind || 'duration').trim().toLowerCase();
+  const auth = getBoulevardAuthContext();
+  const appointmentId = String(pendingOffer.appointmentId || '').trim();
+  const appointmentContext = auth
+    ? await fetchAppointmentContextById(auth.apiUrl, auth.headers, appointmentId)
+    : null;
+
+  if (offerKind === 'addon') {
+    const fresh = await evaluateUpgradeOpportunityForProfile(profile, {
+      now: options.now,
+      windowHours: options.windowHours,
+      appointmentId,
+      locationId: appointmentContext?.locationId || pendingOffer?.locationId || options.locationId,
+    });
+    const mergedOpportunity = {
+      ...(fresh || {}),
+      offerKind: 'addon',
+      appointmentId: fresh?.appointmentId || appointmentId || null,
+      currentDurationMinutes: Number(
+        fresh?.currentDurationMinutes || pendingOffer?.currentDurationMinutes || 0,
+      ) || null,
+      targetDurationMinutes: null,
+      addOnCode: String(pendingOffer?.addOnCode || '').trim() || null,
+      addOnName: String(pendingOffer?.addOnName || '').trim() || null,
+      pricing: pendingOffer?.pricing || null,
+      clientId: profile?.clientId || appointmentContext?.clientId || fresh?.clientId || null,
+      locationId: fresh?.locationId || appointmentContext?.locationId || null,
+      providerId: fresh?.providerId || appointmentContext?.providerId || null,
+      startOn: fresh?.startOn || appointmentContext?.startOn || null,
+      endOn: fresh?.endOn || appointmentContext?.endOn || null,
+      notes: appointmentContext?.notes || null,
+      appointmentServices: appointmentContext?.appointmentServices || [],
+    };
+
+    if (!appointmentContext?.appointmentId) {
+      return buildAddonReverifyResult('target_appointment_not_found', mergedOpportunity);
+    }
+    if (mergedOpportunity.currentDurationMinutes !== 50) {
+      return buildAddonReverifyResult('addon_requires_50_min_booking', mergedOpportunity);
+    }
+    const canAttemptWithoutGapProof = ['appointment_scan_failed', 'no_upcoming_appointment_in_window']
+      .includes(String(fresh?.reason || '').trim().toLowerCase());
+    if (!isAddonGapEligible(mergedOpportunity) && !canAttemptWithoutGapProof) {
+      return buildAddonReverifyResult('insufficient_addon_gap', mergedOpportunity);
+    }
+    if (!ENABLE_UPGRADE_MUTATION) {
+      return {
+        success: false,
+        reason: 'upgrade_mutation_disabled',
+        reverified: true,
+        opportunity: mergedOpportunity,
+      };
+    }
+    if (!auth) {
+      return {
+        success: false,
+        reason: 'boulevard_not_configured',
+        reverified: true,
+        opportunity: mergedOpportunity,
+      };
+    }
+    const appointmentAlreadyContainsAddon = fresh?.hasAddonOnBooking === true
+      || await appointmentAlreadyHasAddon(auth.apiUrl, auth.headers, appointmentContext);
+    if (appointmentAlreadyContainsAddon) {
+      return buildAddonReverifyResult('addon_already_on_booking', mergedOpportunity);
+    }
+
+    const addOnService = await resolveAddonServiceContext(auth.apiUrl, auth.headers, pendingOffer);
+    if (!addOnService?.id) {
+      return {
+        success: false,
+        reason: 'addon_service_id_not_configured',
+        reverified: true,
+        opportunity: mergedOpportunity,
+      };
+    }
+
+    if (await appointmentAlreadyHasAddon(auth.apiUrl, auth.headers, appointmentContext, addOnService.id)) {
+      return buildAddonReverifyResult('addon_already_on_booking', {
+        ...mergedOpportunity,
+        addOnServiceId: addOnService.id,
+      });
+    }
+
+    const bookingFromAppointmentApplied = await tryApplyAddonViaBookingFromAppointment(
+      auth.apiUrl,
+      auth.headers,
+      appointmentContext,
+      addOnService.id,
+    );
+    if (bookingFromAppointmentApplied.applied) {
+      return {
+        success: true,
+        reason: 'applied_addon_booking_from_appointment',
+        reverified: true,
+        opportunity: {
+          ...mergedOpportunity,
+          addOnServiceId: addOnService.id,
+        },
+        mutationRoot: bookingFromAppointmentApplied.mutationRoot,
+        updatedAppointmentId: bookingFromAppointmentApplied.updatedId || appointmentId,
+        bookingId: bookingFromAppointmentApplied.bookingId || null,
+      };
+    }
+
+    if (ENABLE_CANCEL_REBOOK_FALLBACK) {
+      const cancelRebookApplied = await tryApplyAddonViaCancelRebook(
+        auth.apiUrl,
+        auth.headers,
+        appointmentContext,
+        addOnService.id,
+      );
+      if (cancelRebookApplied.applied) {
+        const notesSyncFailed = Boolean(
+          cancelRebookApplied?.notesSync &&
+          cancelRebookApplied.notesSync.skipped !== true &&
+          cancelRebookApplied.notesSync.applied !== true,
+        );
+        return {
+          success: true,
+          reason: notesSyncFailed
+            ? 'applied_addon_cancel_rebook_notes_sync_failed'
+            : 'applied_addon_cancel_rebook',
+          reverified: true,
+          opportunity: {
+            ...mergedOpportunity,
+            addOnServiceId: addOnService.id,
+          },
+          mutationRoot: cancelRebookApplied.mutationRoot,
+          updatedAppointmentId: cancelRebookApplied.updatedId || appointmentId,
+          canceledAppointmentId: cancelRebookApplied.canceledAppointmentId || appointmentId,
+          bookingId: cancelRebookApplied.bookingId || null,
+          notesSync: cancelRebookApplied.notesSync || null,
+        };
+      }
+      return {
+        success: false,
+        reason: cancelRebookApplied.reason || bookingFromAppointmentApplied.reason || 'addon_mutation_failed',
+        reverified: true,
+        opportunity: {
+          ...mergedOpportunity,
+          addOnServiceId: addOnService.id,
+        },
+      };
+    }
+
+    return {
+      success: false,
+      reason: bookingFromAppointmentApplied.reason || 'addon_mutation_failed',
+      reverified: true,
+      opportunity: {
+        ...mergedOpportunity,
+        addOnServiceId: addOnService.id,
+      },
+    };
+  }
 
   const fresh = await evaluateUpgradeOpportunityForProfile(profile, {
     now: options.now,
     windowHours: options.windowHours,
-    appointmentId: pendingOffer.appointmentId,
+    appointmentId,
     targetDurationMinutes: pendingOffer.targetDurationMinutes,
+    locationId: appointmentContext?.locationId || pendingOffer?.locationId || options.locationId,
   });
   if (!fresh?.eligible) {
     return {
@@ -2800,7 +3767,6 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
     };
   }
 
-  const auth = getBoulevardAuthContext();
   if (!auth) {
     return {
       success: false,
@@ -3255,6 +4221,8 @@ function __resetBoulevardCachesForTests() {
   clientFieldCache.clear();
   typeFieldCache.clear();
   typeFieldDetailCache.clear();
+  serviceContextCache.clear();
+  serviceLookupCache.clear();
 }
 
 export {

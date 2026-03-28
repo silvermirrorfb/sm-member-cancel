@@ -478,6 +478,62 @@ describe('twilio webhook route', () => {
     });
   });
 
+  it('applies pending add-on YES through the live mutation path when enabled', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      memberProfile: {
+        clientId: 'client-1',
+        phone: '+12134401333',
+      },
+      pendingUpgradeOffer: {
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnCode: 'antioxidant_peel',
+        addOnName: 'Antioxidant Peel',
+        pricing: { memberPrice: 40, walkinPrice: 50 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: true,
+      reason: 'applied_addon_booking_from_appointment',
+      mutationRoot: 'bookingCreateFromAppointment+bookingAddServiceAddon+bookingComplete',
+      updatedAppointmentId: 'appt-1',
+      opportunity: {
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnCode: 'antioxidant_peel',
+        addOnName: 'Antioxidant Peel',
+      },
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-addon-apply-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain("You're all set. See you soon.");
+    expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalledWith(
+      session.memberProfile,
+      expect.objectContaining({
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnCode: 'antioxidant_peel',
+      }),
+    );
+    expect(session.pendingUpgradeOffer).toBeNull();
+    expect(mockLogSupportIncident).not.toHaveBeenCalled();
+  });
+
   it('recovers a remote active session by phone and finalizes pending add-on YES without chat fallback', async () => {
     process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
     const remoteSession = {

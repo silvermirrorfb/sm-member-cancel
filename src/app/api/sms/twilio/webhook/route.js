@@ -369,9 +369,7 @@ export async function POST(request) {
       }
 
       const pendingOfferKind = String(pendingOffer?.offerKind || 'duration').toLowerCase();
-      const canFinalizeWithoutMutation = hasPendingOffer && (
-        pendingOfferKind === 'addon' || !isUpgradeMutationEnabled()
-      );
+      const canFinalizeWithoutMutation = hasPendingOffer && !isUpgradeMutationEnabled();
       if (isAffirmative(intentText) && hasPendingOffer && !smsUpgradeLive) {
         activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
         activeSession.pendingUpgradeOffer = null;
@@ -479,11 +477,7 @@ export async function POST(request) {
         // Deterministic YES handling: if we have a live pending offer, reverify against
         // that exact appointment/target instead of doing a fresh generic opportunity pick.
         if (isAffirmative(intentText) && hasPendingOffer) {
-          const reverifyOffer = {
-            appointmentId: pendingOffer.appointmentId || null,
-            targetDurationMinutes: pendingOffer.targetDurationMinutes || null,
-          };
-          const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, reverifyOffer);
+          const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, pendingOffer);
           if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
             const incident = buildUpgradeSupportIncident({
               sessionId,
