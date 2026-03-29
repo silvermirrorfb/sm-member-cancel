@@ -804,20 +804,274 @@ async function logSupportIncident(incident) {
 // COMBINED: Process end of membership conversation
 // ══════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════
+// REASON-BASED TEAM ALERTS
+// Sends a plain-English email to specific team members based on
+// the cancellation reason. This is an internal alert — the guest
+// never sees it. Written for non-technical staff.
+// ══════════════════════════════════════════════════════════════
+
+const REASON_ALERT_ROUTING = {
+  travel:                ['memberships@silvermirror.com'],
+  relocation:            ['memberships@silvermirror.com'],
+  shifted_to_derm:       ['memberships@silvermirror.com'],
+  new_provider:          ['memberships@silvermirror.com'],
+  forgot_benefits:       ['memberships@silvermirror.com'],
+  felt_sold_to:          ['memberships@silvermirror.com'],
+  repetitive:            ['memberships@silvermirror.com'],
+  esthetician_turnover:  ['memberships@silvermirror.com'],
+  no_results:            ['memberships@silvermirror.com'],
+  no_personalized_plan:  ['memberships@silvermirror.com'],
+  reaction:              ['memberships@silvermirror.com', 'kristen.marchisotto@silvermirror.com', 'rachael.gallo@silvermirror.com', 'travis.jackson@silvermirror.com', 'amanda.vega@silvermirror.com'],
+  front_desk:            ['memberships@silvermirror.com', 'travis.jackson@silvermirror.com'],
+  inexperienced_esth:    ['memberships@silvermirror.com', 'kristen.marchisotto@silvermirror.com'],
+  voucher_buildup:       ['memberships@silvermirror.com'],
+  cost_overwhelming:     ['memberships@silvermirror.com'],
+  lost_job:              ['memberships@silvermirror.com'],
+  medical:               ['memberships@silvermirror.com'],
+  inconsistent:          ['memberships@silvermirror.com'],
+  parking:               ['memberships@silvermirror.com'],
+  lack_of_value:         ['memberships@silvermirror.com'],
+};
+
+const REASON_FRIENDLY_LABELS = {
+  travel:                'will be traveling and won\'t be able to use their membership for a while',
+  relocation:            'is moving to a new area and may not be near a Silver Mirror location',
+  shifted_to_derm:       'has started seeing a dermatologist and feels they don\'t need both',
+  new_provider:          'has switched to a different skincare provider',
+  forgot_benefits:       'forgot about their membership benefits and hasn\'t been using them',
+  felt_sold_to:          'felt like they were being sold to rather than cared for during visits',
+  repetitive:            'feels their treatments have become repetitive and aren\'t seeing anything new',
+  esthetician_turnover:  'is frustrated that their preferred esthetician left or keeps changing',
+  no_results:            'isn\'t seeing the results they expected from their facials',
+  no_personalized_plan:  'feels they don\'t have a personalized skincare plan',
+  reaction:              'had a reaction or negative skin response after a treatment',
+  front_desk:            'had a negative experience with front desk staff',
+  inexperienced_esth:    'felt their esthetician was inexperienced or not skilled enough',
+  voucher_buildup:       'has accumulated unused credits and feels overwhelmed by the buildup',
+  cost_overwhelming:     'is finding the monthly cost too much for their budget right now',
+  lost_job:              'lost their job and needs to cut expenses',
+  medical:               'has a medical reason and was advised to pause treatments',
+  inconsistent:          'has had inconsistent experiences — some visits were great, others weren\'t',
+  parking:               'is having trouble with parking at their location',
+  lack_of_value:         'doesn\'t feel they\'re getting enough value from the membership',
+};
+
+function matchReasonToCategory(reasonPrimary) {
+  if (!reasonPrimary) return null;
+  const r = String(reasonPrimary).toLowerCase().trim();
+
+  if (/\btravel\b/.test(r)) return 'travel';
+  if (/\brelocat/.test(r) || /\bmov(e|ed|ing)\b/.test(r)) return 'relocation';
+  if (/\bderm/.test(r) || /\bdermatolog/.test(r)) return 'shifted_to_derm';
+  if (/\bnew provider\b/.test(r) || /\bswitched provider\b/.test(r) || /\bother provider\b/.test(r)) return 'new_provider';
+  if (/\bforgot\b/.test(r) || /\bdidn.t use\b/.test(r) || /\bnot using\b/.test(r)) return 'forgot_benefits';
+  if (/\bsold to\b/.test(r) || /\bpushy\b/.test(r) || /\bupsell\b/.test(r)) return 'felt_sold_to';
+  if (/\brepetiti/.test(r) || /\bsame (thing|treatment)\b/.test(r)) return 'repetitive';
+  if (/\bturnover\b/.test(r) || /\besthetician.*(left|gone|changed|keeps changing)\b/.test(r)) return 'esthetician_turnover';
+  if (/\bno results?\b/.test(r) || /\bnot.*(see|noticing).*(results?|difference|improvement)\b/.test(r)) return 'no_results';
+  if (/\bpersonali/.test(r) || /\bskin plan\b/.test(r) || /\bno plan\b/.test(r)) return 'no_personalized_plan';
+  if (/\breaction\b/.test(r) || /\ballerg/.test(r) || /\bskin (issue|problem|irritat)\b/.test(r)) return 'reaction';
+  if (/\bfront desk\b/.test(r) || /\breception/.test(r) || /\bcheck.in\b/.test(r)) return 'front_desk';
+  if (/\binexperienc/.test(r) || /\besthetician.*(inexperienc|not.*(good|skilled))\b/.test(r)) return 'inexperienced_esth';
+  if (/\bvoucher\b/.test(r) || /\bcredit.*(build|pile|accumulat)/.test(r)) return 'voucher_buildup';
+  if (/\bcost\b/.test(r) || /\bexpens/.test(r) || /\bafford/.test(r) || /\bbudget\b/.test(r) || /\bpric/.test(r)) return 'cost_overwhelming';
+  if (/\b(lost|losing) (my |a )?job\b/.test(r) || /\bjob loss\b/.test(r) || /\bunemploy/.test(r) || /\blaid off\b/.test(r)) return 'lost_job';
+  if (/\bmedical\b/.test(r) || /\bhealth\b/.test(r) || /\bsurgery\b/.test(r) || /\bpregnant\b/.test(r) || /\bpregnancy\b/.test(r)) return 'medical';
+  if (/\binconsisten/.test(r) || /\buneven/.test(r) || /\bhit.or.miss\b/.test(r)) return 'inconsistent';
+  if (/\bparking\b/.test(r) || /\binconveni/.test(r) || /\blocation\b/.test(r)) return 'parking';
+  if (/\bvalue\b/.test(r) || /\bnot worth\b/.test(r) || /\bwaste\b/.test(r)) return 'lack_of_value';
+
+  return null;
+}
+
+function buildReasonAlertHtml(summary, transcript, category) {
+  const esc = (str) => String(str || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const friendlyReason = REASON_FRIENDLY_LABELS[category] || 'mentioned a concern about their membership';
+  const name = summary.client_name || 'A member';
+  const firstName = String(name).split(' ')[0];
+  const tier = summary.membership_tier ? `${summary.membership_tier}-minute` : '';
+  const location = summary.location || 'their location';
+  const rate = summary.monthly_rate ? `$${summary.monthly_rate}/month` : '';
+  const tenure = summary.tenure_months ? `${summary.tenure_months} months` : '';
+
+  const outcomeMap = {
+    'RETAINED': `The bot was able to keep them as a member. They accepted an offer to stay.`,
+    'CANCELLED': `They decided to cancel. The bot confirmed their request and passed it to the memberships team for processing.`,
+    'MANAGER_CALLBACK': `They asked to speak with a manager. Someone needs to follow up.`,
+    'REFERRED': `The bot referred them to the team for further help.`,
+    'INCOMPLETE': `The conversation didn't reach a clear resolution. Someone should follow up.`,
+  };
+  const outcomeText = outcomeMap[summary.outcome] || `The conversation ended with outcome: ${esc(summary.outcome || 'unknown')}.`;
+
+  const memberDetails = [
+    tier ? `Membership: ${tier}${rate ? ` at ${rate}` : ''}` : null,
+    location ? `Location: ${location}` : null,
+    tenure ? `Member for: ${tenure}` : null,
+    summary.email ? `Email: ${esc(summary.email)}` : null,
+    summary.phone ? `Phone: ${esc(summary.phone)}` : null,
+  ].filter(Boolean).map(line => `<li>${line}</li>`).join('\n');
+
+  const verbatim = summary.reason_verbatim
+    ? `<p style="margin:12px 0;padding:12px 16px;background:#f5f5f5;border-left:4px solid #1B365D;font-style:italic;">"${esc(summary.reason_verbatim)}"</p>`
+    : '';
+
+  const actionRequired = summary.action_required
+    ? `<div style="background:#FFF3E0;border-left:4px solid #FF9800;padding:12px 16px;margin:16px 0;"><strong>What needs to happen next:</strong><br/>${esc(summary.action_required)}</div>`
+    : '';
+
+  const transcriptLines = String(transcript || '').split('\n').map(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('User:') || trimmed.startsWith('Customer:')) {
+      return `<div style="margin:4px 0;"><strong style="color:#2196F3;">Customer:</strong> ${esc(trimmed.replace(/^(User|Customer):\s*/i, ''))}</div>`;
+    }
+    if (trimmed.startsWith('Assistant:') || trimmed.startsWith('Bot:')) {
+      return `<div style="margin:4px 0;"><strong style="color:#666;">Bot:</strong> ${esc(trimmed.replace(/^(Assistant|Bot):\s*/i, ''))}</div>`;
+    }
+    return `<div style="margin:4px 0;">${esc(trimmed)}</div>`;
+  }).join('\n');
+
+  return `
+<!DOCTYPE html>
+<html>
+<head><style>
+  body { font-family: Arial, sans-serif; color: #333; max-width: 650px; margin: 0 auto; line-height: 1.5; }
+  .header { background: #1B365D; color: white; padding: 20px; }
+  .header h2 { margin: 0; }
+  .content { padding: 20px; }
+  .transcript-box { background: #f9f9f9; padding: 16px; border: 1px solid #ddd; border-radius: 6px; margin-top: 16px; max-height: 500px; overflow-y: auto; font-size: 13px; }
+</style></head>
+<body>
+  <div class="header">
+    <h2>Membership Chat Alert</h2>
+    <div style="opacity:0.8;margin-top:4px;">Category: ${esc(summary.reason_primary || category)}</div>
+  </div>
+  <div class="content">
+    <p><strong>${esc(firstName)}</strong> (${esc(name)}) chatted with the website bot about their membership. They ${friendlyReason}.</p>
+
+    ${verbatim}
+
+    <p>${outcomeText}</p>
+
+    <h3 style="color:#1B365D;border-bottom:1px solid #ddd;padding-bottom:6px;">Member Details</h3>
+    <ul style="padding-left:20px;">
+      ${memberDetails}
+    </ul>
+
+    ${actionRequired}
+
+    <h3 style="color:#1B365D;border-bottom:1px solid #ddd;padding-bottom:6px;">Full Conversation</h3>
+    <p style="font-size:13px;color:#666;">This is the actual chat between the member and the bot, so you can see the full context.</p>
+    <div class="transcript-box">
+      ${transcriptLines}
+    </div>
+
+    <p style="margin-top:20px;font-size:12px;color:#999;">This is an automated alert from Silver Mirror's chatbot system. The member did not see this email — it's for internal team awareness only.</p>
+  </div>
+</body>
+</html>`;
+}
+
+function buildReasonAlertText(summary, transcript, category) {
+  const friendlyReason = REASON_FRIENDLY_LABELS[category] || 'mentioned a concern about their membership';
+  const name = summary.client_name || 'A member';
+
+  return `MEMBERSHIP CHAT ALERT
+Category: ${summary.reason_primary || category}
+
+${name} chatted with the website bot about their membership. They ${friendlyReason}.
+
+${summary.reason_verbatim ? `In their own words: "${summary.reason_verbatim}"` : ''}
+
+Outcome: ${summary.outcome || 'Unknown'}
+${summary.action_required ? `\nWhat needs to happen next: ${summary.action_required}` : ''}
+
+Member Details:
+- Membership: ${summary.membership_tier ? `${summary.membership_tier}-minute` : 'Unknown'}${summary.monthly_rate ? ` at $${summary.monthly_rate}/month` : ''}
+- Location: ${summary.location || 'Unknown'}
+- Member for: ${summary.tenure_months ? `${summary.tenure_months} months` : 'Unknown'}
+- Email: ${summary.email || 'Not provided'}
+- Phone: ${summary.phone || 'Not provided'}
+
+Full Conversation:
+${transcript || '(No transcript available)'}
+
+---
+This is an automated alert from Silver Mirror's chatbot. The member did not see this email.
+`;
+}
+
+async function sendReasonAlert(summary, transcript) {
+  const category = matchReasonToCategory(summary.reason_primary);
+  if (!category) {
+    console.log('[reason-alert] No matching category for reason:', summary.reason_primary || '(empty)');
+    return { sent: false, reason: 'no_matching_category' };
+  }
+
+  const recipients = REASON_ALERT_ROUTING[category];
+  if (!recipients || recipients.length === 0) {
+    console.log('[reason-alert] No recipients configured for category:', category);
+    return { sent: false, reason: 'no_recipients' };
+  }
+
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT || '587');
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.EMAIL_FROM || 'info@silvermirror.com';
+
+  if (!host || !user || !pass) {
+    console.warn('[reason-alert] SMTP not configured — alert skipped for category:', category);
+    return { sent: false, reason: 'smtp_not_configured' };
+  }
+
+  const to = mergeRecipientLists(recipients).join(', ');
+  const name = summary.client_name || 'Unknown Member';
+  const outcomeTag = summary.outcome === 'CANCELLED' ? 'CANCELLED' : summary.outcome === 'RETAINED' ? 'RETAINED' : 'NEEDS REVIEW';
+  const subject = `[Chat Alert] ${outcomeTag} — ${name} — ${summary.reason_primary || category}`;
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text: buildReasonAlertText(summary, transcript, category),
+      html: buildReasonAlertHtml(summary, transcript, category),
+    });
+    console.log('[reason-alert] Sent to', to, 'for category:', category);
+    return { sent: true, category, to };
+  } catch (err) {
+    console.error('[reason-alert] Send failed:', err.message);
+    return { sent: false, reason: err.message };
+  }
+}
+
 async function processConversationEnd(summary, transcript) {
-  const [emailResult, sheetResult] = await Promise.allSettled([
+  const [emailResult, sheetResult, alertResult] = await Promise.allSettled([
     sendSummaryEmail(summary, transcript),
     logToGoogleSheets(summary),
+    sendReasonAlert(summary, transcript),
   ]);
 
   return {
     email: emailResult.status === 'fulfilled' ? emailResult.value : { sent: false, reason: emailResult.reason?.message },
     sheet: sheetResult.status === 'fulfilled' ? sheetResult.value : { logged: false, reason: sheetResult.reason?.message },
+    alert: alertResult.status === 'fulfilled' ? alertResult.value : { sent: false, reason: alertResult.reason?.message },
   };
 }
 
 export {
   sendSummaryEmail,
+  sendReasonAlert,
+  matchReasonToCategory,
   logToGoogleSheets,
   logChatMessages,
   logChatMessage,
