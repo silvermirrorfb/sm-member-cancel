@@ -231,7 +231,7 @@ const PERKS = [
   { month: 42, name: 'Year 3.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
   { month: 48, name: 'Year 4 Anniversary — Foundational Bundle + SM Hat', value: 213, type: 'retail' },
   { month: 54, name: 'Year 4.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
-  { month: 60, name: 'Year 5 Anniversary — 90-Min Upgrade or HydraFacial', value: 279, type: 'service_upgrade' },
+  { month: 60, name: 'Year 5 Anniversary — 90-Min Upgrade or Hydradermabrasion', value: 279, type: 'service_upgrade' },
   { month: 66, name: 'Year 5.5 Recognition Email (no perk)', value: 0, type: 'recognition' },
   { month: 72, name: 'Year 6 Anniversary — Pick add-on + Signature Mask', value: 119, type: 'service_choice_with_retail' },
   { month: 78, name: 'Year 6.5 Mid-Year — $50 Enhancement Credit', value: 50, type: 'credit' },
