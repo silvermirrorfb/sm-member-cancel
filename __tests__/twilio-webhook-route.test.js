@@ -394,6 +394,44 @@ describe('twilio webhook route', () => {
     expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
   });
 
+  it('falls back to chat instead of offering 90-minute upgrades over sms', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+12134401333',
+      tier: '50',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-90',
+      currentDurationMinutes: 50,
+      targetDurationMinutes: 90,
+      pricing: { walkinDelta: 110, walkinTotal: 279 },
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-90-blocked',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Handled in chat');
+    expect(mockPostChatMessage).toHaveBeenCalledTimes(1);
+    expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    expect(mockLogSupportIncident).not.toHaveBeenCalled();
+  });
+
   it('returns human-finalization copy when upgrade mutation is disabled', async () => {
     process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
     const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };

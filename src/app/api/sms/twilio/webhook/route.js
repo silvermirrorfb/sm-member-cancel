@@ -65,6 +65,11 @@ function isPendingOfferExpired(offer) {
   return !Number.isFinite(expiresMs) || Date.now() > expiresMs;
 }
 
+function isSmsDurationOfferAllowed(opportunity) {
+  const target = Number(opportunity?.targetDurationMinutes || 0) || null;
+  return !target || target <= 50;
+}
+
 function buildDurationPricingText(opportunity) {
   const pricing = opportunity?.pricing || null;
   if (!pricing) return '';
@@ -350,7 +355,10 @@ export async function POST(request) {
     const intentText = String(body || '').trim();
     if (isAffirmative(intentText) || isNegative(intentText)) {
       const pendingOffer = activeSession?.pendingUpgradeOffer || null;
-      const hasPendingOffer = pendingOffer && !isPendingOfferExpired(pendingOffer);
+      const pendingOfferBlocked =
+        pendingOffer?.offerKind === 'duration' &&
+        !isSmsDurationOfferAllowed(pendingOffer);
+      const hasPendingOffer = pendingOffer && !pendingOfferBlocked && !isPendingOfferExpired(pendingOffer);
       if (activeSession?.pendingUpgradeOffer && !hasPendingOffer) {
         activeSession.pendingUpgradeOffer = null;
         await saveSession(activeSession);
@@ -505,6 +513,15 @@ export async function POST(request) {
         }
 
         const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
+        if (opportunity?.eligible && !isSmsDurationOfferAllowed(opportunity)) {
+          const reply = await runChatMessageForSms(sessionId, body, from);
+          const twiml = buildTwimlMessage(reply || GENERIC_FAILURE_REPLY);
+          if (messageSid) storeReplyForMessageSid(messageSid, twiml);
+          return new NextResponse(twiml, {
+            status: 200,
+            headers: buildTwimlHeaders(rateLimit),
+          });
+        }
         if (!opportunity?.eligible) {
           // If YES arrives without recoverable pending context, fail safe to approved manual confirmation copy.
           const incident = buildUpgradeSupportIncident({

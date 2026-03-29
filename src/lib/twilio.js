@@ -1,10 +1,19 @@
 import crypto from 'crypto';
 
-const SMS_HARD_MAX_CHARS = 320;
-const MAX_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_MAX_CHARS || SMS_HARD_MAX_CHARS), 40), SMS_HARD_MAX_CHARS);
-const TARGET_SMS_CHARS = Math.min(Math.max(Number(process.env.SMS_TARGET_CHARS || 300), 40), MAX_SMS_CHARS);
+const SMS_LONG_HARD_MAX_CHARS = 320;
+const MAX_SMS_LONG_CHARS = Math.min(
+  Math.max(Number(process.env.SMS_MAX_CHARS || SMS_LONG_HARD_MAX_CHARS), 40),
+  SMS_LONG_HARD_MAX_CHARS,
+);
+const TARGET_SMS_LONG_CHARS = Math.min(
+  Math.max(Number(process.env.SMS_TARGET_CHARS || MAX_SMS_LONG_CHARS), 40),
+  MAX_SMS_LONG_CHARS,
+);
 const SMS_SHORT_HARD_MAX_CHARS = 150;
-const TARGET_SMS_SHORT_CHARS = 140;
+const TARGET_SMS_SHORT_CHARS = Math.min(
+  Math.max(Number(process.env.SMS_TARGET_SHORT_CHARS || SMS_SHORT_HARD_MAX_CHARS), 40),
+  SMS_SHORT_HARD_MAX_CHARS,
+);
 const BOOKING_URL = 'https://booking.silvermirror.com/booking/location';
 const LOCATIONS_URL = 'https://silvermirror.com/locations/';
 
@@ -49,15 +58,15 @@ function rewriteCommonSmsPhrases(text) {
   value = value.replace(/Whether you have questions about/gi, 'Any questions about');
   value = value.replace(
     /^Hi there!\s*I'm doing well, thank you\.\s*I'm Silver Mirror'?s virtual assistant and I'm here to help with any questions about our facials,\s*services.*$/i,
-    "Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
+    "Hi, I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
   );
   value = value.replace(
     /^Hello!\s*I'm Silver Mirror's virtual assistant\.\s*I'm here to help with questions about our facials,\s*services,\s*memberships,\s*products,\s*and skincare\.\s*What can I help you with today\?/i,
-    "Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
+    "Hi, I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
   );
   value = value.replace(
     /^Hi[!. ]+I'm Silver Mirror'?s virtual assistant\.\s*How can I help today\?\s*Any questions about (?:our )?facials,\s*memberships,\s*booking,\s*or skincare advice\??/i,
-    "Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
+    "Hi, I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.",
   );
   value = value.replace(
     /^I'd be happy to help you find the perfect facial!\s*You can book online at\s*(?:the following link:?\s*)?(?:https?:\/\/)?booking\.silvermirror\.com\/[^\s)]+.*$/i,
@@ -197,18 +206,22 @@ function trimSmsBodyWithLimits(text, { targetChars, maxChars }) {
   return finalizeTrimmedSmsText(placeholderText, urls, maxChars);
 }
 
-function trimSmsBody(text) {
+function trimSmsBodyLong(text) {
   return trimSmsBodyWithLimits(text, {
-    targetChars: TARGET_SMS_CHARS,
-    maxChars: MAX_SMS_CHARS,
+    targetChars: TARGET_SMS_LONG_CHARS,
+    maxChars: MAX_SMS_LONG_CHARS,
   });
 }
 
-function trimSmsBodyShort(text) {
+function trimSmsBody(text) {
   return trimSmsBodyWithLimits(text, {
     targetChars: TARGET_SMS_SHORT_CHARS,
     maxChars: SMS_SHORT_HARD_MAX_CHARS,
   });
+}
+
+function trimSmsBodyShort(text) {
+  return trimSmsBody(text);
 }
 
 function escapeXml(text) {
@@ -221,7 +234,7 @@ function escapeXml(text) {
 }
 
 function buildTwimlMessage(text) {
-  const safeBody = escapeXml(trimSmsBody(text));
+  const safeBody = escapeXml(trimSmsBodyLong(text));
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${safeBody}</Message></Response>`;
 }
 
@@ -291,6 +304,7 @@ export {
   stripMarkdownForSms,
   sanitizeSmsText,
   trimSmsBody,
+  trimSmsBodyLong,
   trimSmsBodyShort,
   buildTwimlMessage,
   parseTwilioFormBody,

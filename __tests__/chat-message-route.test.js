@@ -11,6 +11,7 @@ const mockBuildRateLimitHeaders = vi.fn();
 const mockGetSystemPrompt = vi.fn();
 const mockSendMessage = vi.fn();
 const mockLogChatMessages = vi.fn();
+const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const originalEnv = process.env;
 
 vi.mock('../src/lib/sessions.js', () => ({
@@ -40,7 +41,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: vi.fn(),
   formatProfileForPrompt: vi.fn(),
   verifyMemberIdentity: vi.fn(),
-  evaluateUpgradeOpportunityForProfile: vi.fn(),
+  evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
   reverifyAndApplyUpgradeForProfile: vi.fn(),
 }));
 
@@ -79,6 +80,7 @@ describe('chat message route rate-limit headers', () => {
     mockSaveSession.mockImplementation(async (session) => session);
     mockLogChatMessages.mockResolvedValue({ logged: true, count: 3 });
     mockGetSession.mockReturnValue(null);
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({ eligible: false, reason: 'none' });
   });
 
   afterEach(() => {
@@ -308,12 +310,71 @@ describe('chat message route rate-limit headers', () => {
     expect(res.status).toBe(200);
     expect(body.message).toBe('SMS-safe reply');
     expect(mockSendMessage).toHaveBeenCalledWith(
-      expect.stringContaining('Channel: SMS. Keep replies under 300 characters.'),
+      expect.stringContaining('SMS CHANNEL RULES: You are responding via text message. Keep responses under 280 characters.'),
       session.messages,
     );
     expect(mockSendMessage).toHaveBeenCalledWith(
       expect.not.stringContaining('[SMS channel'),
       session.messages,
     );
+  });
+
+  it('does not create a 90-minute upgrade offer in sms chat flow', async () => {
+    const session = {
+      id: 'sess-sms-90-blocked',
+      createdAt: '2026-03-18T00:00:00.000Z',
+      status: 'active',
+      messages: [],
+      memberProfile: {
+        clientId: 'client-1',
+        phone: '+12134401333',
+        tier: '50',
+        firstName: 'Matt',
+      },
+      mode: 'membership',
+      chatTranscriptStarted: false,
+      lastProcessedUserFingerprint: null,
+      lastProcessedUserAt: null,
+      lastAssistantVisibleMessage: null,
+      lastAssistantAt: null,
+      pendingUpgradeOffer: null,
+    };
+
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sessionId, role, content) => {
+      session.messages.push({ role, content });
+      if (role === 'assistant') {
+        session.lastAssistantVisibleMessage = content;
+        session.lastAssistantAt = new Date('2026-03-18T00:00:01.000Z');
+      }
+      return session;
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-90',
+      currentDurationMinutes: 50,
+      targetDurationMinutes: 90,
+      pricing: { walkinDelta: 110 },
+    });
+    mockSendMessage.mockResolvedValue('We can help with changes by phone if needed.');
+
+    const req = new Request('http://localhost/api/chat/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'sess-sms-90-blocked',
+        message: 'Can I upgrade to 90 minutes?',
+        channel: 'sms',
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.message).toBe('We can help with changes by phone if needed.');
+    expect(body.pendingUpgradeOffer).toBeUndefined();
+    expect(session.pendingUpgradeOffer).toBeNull();
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
   });
 });

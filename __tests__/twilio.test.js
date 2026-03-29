@@ -1,16 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import crypto from 'crypto';
 import {
   buildTwimlMessage,
   isValidTwilioSignature,
   parseTwilioFormBody,
   sanitizeSmsText,
+  sendTwilioSms,
   stripMarkdownForSms,
   trimSmsBody,
+  trimSmsBodyLong,
   trimSmsBodyShort,
 } from '../src/lib/twilio.js';
 
 describe('twilio helpers', () => {
+  const originalEnv = process.env;
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
   it('parses form payloads', () => {
     const parsed = parseTwilioFormBody('From=%2B15555551234&Body=Hello%20there');
     expect(parsed.From).toBe('+15555551234');
@@ -25,41 +34,46 @@ describe('twilio helpers', () => {
     expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>')).toBe(true);
   });
 
-  it('trims long sms content', () => {
+  it('trims long inbound sms content to the long limit', () => {
     const long = 'x'.repeat(2000);
-    const trimmed = trimSmsBody(long);
+    const trimmed = trimSmsBodyLong(long);
     expect(trimmed.length).toBeLessThanOrEqual(320);
   });
 
-  it('keeps short outbound sms content on the old limit', () => {
+  it('keeps outbound sms content on the short limit', () => {
     const long = 'x'.repeat(2000);
-    const trimmed = trimSmsBodyShort(long);
+    const trimmed = trimSmsBody(long);
     expect(trimmed.length).toBeLessThanOrEqual(150);
   });
 
   it('allows longer conversational sms replies before trimming', () => {
     const long = 'a'.repeat(280);
-    expect(trimSmsBody(long)).toBe(long);
+    expect(trimSmsBodyLong(long)).toBe(long);
+  });
+
+  it('allows up to 320 chars for inbound conversational sms replies', () => {
+    const long = 'a'.repeat(320);
+    expect(trimSmsBodyLong(long)).toBe(long);
   });
 
   it('rewrites verbose greeting to single-text concise copy', () => {
     const verbose = "Hi! I'm Silver Mirror's virtual assistant. How can I help you today? Whether you have questions about our facials, memberships, booking, or skincare advice?";
-    const compact = trimSmsBody(verbose);
-    expect(compact).toBe("Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
-    expect(compact.length).toBeLessThanOrEqual(150);
+    const compact = trimSmsBodyLong(verbose);
+    expect(compact).toBe("Hi, I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
+    expect(compact.length).toBeLessThanOrEqual(320);
   });
 
   it('rewrites long hello greeting from chat flow', () => {
     const verbose = "Hello! I'm Silver Mirror's virtual assistant. I'm here to help with questions about our facials, services, memberships, products, and skincare. What can I help you with today?";
-    const compact = trimSmsBody(verbose);
-    expect(compact).toBe("Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
-    expect(compact.length).toBeLessThanOrEqual(150);
+    const compact = trimSmsBodyLong(verbose);
+    expect(compact).toBe("Hi, I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
+    expect(compact.length).toBeLessThanOrEqual(320);
   });
 
   it('rewrites chatty greeting replies into short sms copy', () => {
     const verbose = "Hi there! I'm doing well, thank you. I'm Silver Mirror's virtual assistant and I'm here to help with any questions about our facials, services";
-    const compact = trimSmsBody(verbose);
-    expect(compact).toBe("Hi! I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
+    const compact = trimSmsBodyLong(verbose);
+    expect(compact).toBe("Hi, I'm Silver Mirror's text assistant. Ask me about facials, booking, memberships, or skincare.");
   });
 
   it('sanitizes emoji and non-ascii punctuation for sms-safe output', () => {
@@ -73,14 +87,14 @@ describe('twilio helpers', () => {
   });
 
   it('strips markdown emphasis from sms output', () => {
-    const compact = trimSmsBody("Great question! I'd recommend the **Just for Men Facial** for ingrown hairs.");
+    const compact = trimSmsBodyLong("Great question! I'd recommend the **Just for Men Facial** for ingrown hairs.");
     expect(compact).not.toContain('**');
     expect(compact).toContain('Just for Men Facial');
   });
 
   it('preserves booking link as a complete known URL', () => {
     const verbose = "I'd be happy to help you find the perfect facial! You can book online at https://booking.silvermirror.com/booking/location/manhattan-west-2026-05-26-7-30-pm-concert/17913877";
-    const compact = trimSmsBody(verbose);
+    const compact = trimSmsBodyLong(verbose);
     expect(compact).toBe('Book online at https://booking.silvermirror.com/booking/location');
     expect(compact.endsWith('/booking/location')).toBe(true);
   });
@@ -95,26 +109,49 @@ describe('twilio helpers', () => {
 
   it('rewrites closest-location answers into a short prompt plus stable link', () => {
     const verbose = "I'd be happy to help you find the closest location! We have 10 locations across three cities:**New York City (5 locations):**- Upper East Side";
-    const compact = trimSmsBody(verbose);
+    const compact = trimSmsBodyLong(verbose);
     expect(compact).toBe("Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: https://silvermirror.com/locations/");
   });
 
   it('rewrites the live closest-location variant into a short prompt plus stable link', () => {
     const verbose = "I'd be happy to help you find the closest Silver Mirror location! To give you the best recommendation, could you let me know what city or area you're in? We have locations in: - **New York City** (5 locations): Upper East Side";
-    const compact = trimSmsBody(verbose);
+    const compact = trimSmsBodyLong(verbose);
     expect(compact).toBe("Tell me your neighborhood or ZIP code and I'll suggest the closest location. All locations: https://silvermirror.com/locations/");
   });
 
   it('rewrites location hours answers into a short stable response', () => {
     const verbose = 'Each Silver Mirror location has different hours. Direct guests to https://silvermirror.com/locations/ for specific hours.';
-    const compact = trimSmsBody(verbose);
+    const compact = trimSmsBodyLong(verbose);
     expect(compact).toBe('Hours vary by location. See https://silvermirror.com/locations/ or text me the location name.');
   });
 
   it('rewrites any just-for-men recommendation into sms-safe copy without markdown', () => {
     const verbose = "Great question! For a 41-year-old man, I'd recommend the **Just for Men Facial** because it helps with ingrown hairs and shaving irritation.";
-    const compact = trimSmsBody(verbose);
+    const compact = trimSmsBodyLong(verbose);
     expect(compact).toBe('For ingrown hairs or shaving irritation, try the Just for Men Facial. Want booking, pricing, or locations?');
+  });
+
+  it('uses the short trim by default for outbound Twilio sends', async () => {
+    process.env = {
+      ...originalEnv,
+      TWILIO_ACCOUNT_SID: 'AC123',
+      TWILIO_AUTH_TOKEN: 'token',
+      TWILIO_FROM_NUMBER: '+15555550000',
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ sid: 'SM123' }),
+    });
+
+    await sendTwilioSms({
+      to: '+15555551234',
+      body: 'x'.repeat(400),
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, options] = fetchSpy.mock.calls[0];
+    const params = new URLSearchParams(options.body);
+    expect(params.get('Body').length).toBeLessThanOrEqual(150);
   });
 
   it('validates and rejects twilio signatures', () => {

@@ -33,7 +33,6 @@ import {
   buildSmsUpgradePendingReply,
   isSmsUpgradeLive,
 } from '../../../../../lib/sms-upgrade-policy';
-import { getDurationOfferDisplayName } from '../../../../../lib/sms-copy';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
 const REMINDER_YES_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_REMINDER_MIN || 10);
@@ -118,6 +117,11 @@ function isAddonFallbackReason(opportunity) {
   ].includes(reason);
 }
 
+function isSmsDurationOfferAllowed(opportunity) {
+  const target = Number(opportunity?.targetDurationMinutes || 0) || null;
+  return !target || target <= 50;
+}
+
 function buildAddonOffer(profile, opportunity, options = {}) {
   const currentDuration = Number(opportunity?.currentDurationMinutes || 0) || null;
   const availableGapMinutes = Number(opportunity?.availableGapMinutes);
@@ -158,52 +162,17 @@ function isPendingOfferExpired(offer) {
   return !Number.isFinite(expires) || Date.now() > expires;
 }
 
-function pickIndefiniteArticle(phrase) {
-  const token = String(phrase || '')
-    .trim()
-    .toLowerCase()
-    .split(/[\s-]+/)[0];
-  if (!token) return 'a';
-  if (/^(honest|honor|hour|heir)/.test(token)) return 'an';
-  if (/^(one|uni|use|euro|user|u[bcfhjkqrstnlg])/i.test(token)) return 'a';
-  return /^[aeiou]/.test(token) ? 'an' : 'a';
-}
-
-function withIndefiniteArticle(phrase) {
-  const value = asText(phrase);
-  if (!value) return 'an add-on';
-  return `${pickIndefiniteArticle(value)} ${value}`;
-}
-
-function formatTimeForGuest(iso, timeZone = 'America/New_York') {
-  if (!iso) return 'your upcoming appointment';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return 'your upcoming appointment';
-  return d.toLocaleString('en-US', {
-    timeZone,
-    hour: 'numeric',
-    minute: '2-digit',
-    month: 'short',
-    day: 'numeric',
-  });
-}
-
 function buildDurationOfferMessage(opportunity, options = {}) {
   if (!opportunity?.pricing) return null;
   const reminder = options.reminder === true;
   const firstName = asText(options.firstName);
   const pricing = opportunity.pricing;
   const delta = Number(pricing.walkinDelta || 50);
-  const serviceName = getDurationOfferDisplayName(opportunity?.targetDurationMinutes);
-  const responseWindowMinutes = Math.max(
-    1,
-    Number(options.responseWindowMinutes || (reminder ? REMINDER_YES_WINDOW_MINUTES : OFFER_WINDOW_MINUTES)) || OFFER_WINDOW_MINUTES,
-  );
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
   if (reminder) {
-    return `${greeting} reminder: space is still open to extend your facial today to a ${serviceName} for only $${delta} more. Reply YES in the next ${responseWindowMinutes} minutes.`;
+    return `${greeting} just a reminder - the upgrade to 50 minutes is still available for your appointment today. Reply YES or NO.`;
   }
-  return `${greeting} we have space to extend your facial today. Upgrade to a ${serviceName} for only $${delta} more. Reply YES in the next ${responseWindowMinutes} minutes.`;
+  return `${greeting} good news - there's room to extend your facial today to 50 minutes for just $${delta} more. Reply YES to upgrade or NO to keep your current booking.`;
 }
 
 function buildAddonOfferMessage(offer, options = {}) {
@@ -212,15 +181,10 @@ function buildAddonOfferMessage(offer, options = {}) {
   const firstName = asText(options.firstName);
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
   const price = Number(offer?.pricing?.walkinPrice || 0);
-  const responseWindowMinutes = Math.max(
-    1,
-    Number(options.responseWindowMinutes || (reminder ? REMINDER_YES_WINDOW_MINUTES : OFFER_WINDOW_MINUTES)) || OFFER_WINDOW_MINUTES,
-  );
-  const addonWithArticle = withIndefiniteArticle(offer.addOnName);
   if (reminder) {
-    return `${greeting} reminder: want to add ${addonWithArticle} today for $${price}? Members get 20% off. Reply YES in the next ${responseWindowMinutes} minutes.`;
+    return `${greeting} still time to add ${offer.addOnName} to today's facial. Reply YES or NO.`;
   }
-  return `${greeting} want to add ${addonWithArticle} today for $${price} more? Members get 20% off. Reply YES in the next ${responseWindowMinutes} minutes.`;
+  return `${greeting} we can add ${offer.addOnName} to your facial today for $${price} (members save 20%). Reply YES to add it or NO to skip.`;
 }
 
 function buildOutboundOfferMessage(offer, options = {}) {
@@ -676,12 +640,15 @@ export async function POST(request) {
       if (effectiveOfferType === 'addon') {
         selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
       } else if (effectiveOfferType === 'auto') {
-        if (opportunity?.eligible) {
+        if (opportunity?.eligible && isSmsDurationOfferAllowed(opportunity)) {
           selectedOffer = { offerKind: 'duration', ...opportunity };
-        } else if (effectiveEnableAddonFallback && isAddonFallbackReason(opportunity)) {
+        } else if (
+          effectiveEnableAddonFallback &&
+          (isAddonFallbackReason(opportunity) || (opportunity?.eligible && !isSmsDurationOfferAllowed(opportunity)))
+        ) {
           selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
         }
-      } else if (opportunity?.eligible) {
+      } else if (opportunity?.eligible && isSmsDurationOfferAllowed(opportunity)) {
         selectedOffer = { offerKind: 'duration', ...opportunity };
       } else if (effectiveEnableAddonFallback && isAddonFallbackReason(opportunity)) {
         selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
@@ -690,6 +657,7 @@ export async function POST(request) {
       if (!selectedOffer) {
         const currentDuration = Number(opportunity?.currentDurationMinutes || 0) || null;
         const addonGap = Number(opportunity?.availableGapMinutes);
+        const targetDurationBlocked = opportunity?.eligible && !isSmsDurationOfferAllowed(opportunity);
         const addonUnavailableReason = opportunity?.hasAddonOnBooking
           ? 'addon_already_on_booking'
           : (!opportunity?.gapUnlimited && Number.isFinite(addonGap) && addonGap < ADDON_MIN_GAP_MINUTES)
@@ -699,7 +667,9 @@ export async function POST(request) {
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           profile: { clientId: profile.clientId || null, phone: profile.phone || null, tier: profile.tier || null },
           status: 'skipped',
-          reason: (effectiveOfferType === 'addon' || currentDuration === 50)
+          reason: targetDurationBlocked
+            ? 'sms_target_duration_blocked'
+            : (effectiveOfferType === 'addon' || currentDuration === 50)
             ? addonUnavailableReason
             : (opportunity?.reason || 'not_eligible'),
           matchedContact,

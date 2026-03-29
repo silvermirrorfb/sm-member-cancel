@@ -214,12 +214,12 @@ describe('sms automation route', () => {
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].matchedContact).toContain('917');
-    expect(body.results[0].message).toContain('for only $50 more');
-    expect(body.results[0].message).toContain('Reply YES in the next 15 minutes');
+    expect(body.results[0].message).toContain("there's room to extend your facial today to 50 minutes");
+    expect(body.results[0].message).toContain('Reply YES to upgrade or NO to keep your current booking.');
     expect(mockLookupMember).toHaveBeenCalledTimes(2);
   });
 
-  it('uses the correct 90-minute service name for duration upgrade copy', async () => {
+  it('skips 50-to-90 duration upgrades in SMS automation', async () => {
     mockLookupMember.mockResolvedValue({
       clientId: 'client-1',
       phone: '+19175551234',
@@ -247,6 +247,7 @@ describe('sms automation route', () => {
       body: JSON.stringify({
         dryRun: true,
         now: '2026-03-09T15:00:00Z',
+        enableAddonFallback: false,
         sendTimezone: 'America/New_York',
         sendStartHour: 9,
         sendEndHour: 17,
@@ -265,9 +266,8 @@ describe('sms automation route', () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.results[0].status).toBe('dry_run');
-    expect(body.results[0].message).toContain('90-Min Premier Contour');
-    expect(body.results[0].message).toContain('for only $110 more');
+    expect(body.results[0].status).toBe('skipped');
+    expect(body.results[0].reason).toBe('sms_target_duration_blocked');
   });
 
   it('can process queued work with useQueuedOnly', async () => {
@@ -653,10 +653,10 @@ describe('sms automation route', () => {
     expect(body.results[0].addOnCode).toBe('antioxidant_peel');
     expect(body.results[0].message).toContain('Antioxidant Peel');
     expect(body.results[0].message).toContain('$50');
-    expect(body.results[0].message).toContain('Members get 20% off');
+    expect(body.results[0].message).toContain('members save 20%');
   });
 
-  it('uses correct article for add-on copy (a Lip Plump and Scrub)', async () => {
+  it('uses the refined add-on copy for Lip Plump and Scrub', async () => {
     mockLookupMember.mockResolvedValue({
       clientId: 'client-10',
       phone: '+19175550001',
@@ -705,6 +705,7 @@ describe('sms automation route', () => {
 
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('dry_run');
-    expect(body.results[0].message).toContain('add a Lip Plump and Scrub');
+    expect(body.results[0].message).toContain('we can add Lip Plump and Scrub');
+    expect(body.results[0].message).toContain('Reply YES to add it or NO to skip.');
   });
 });

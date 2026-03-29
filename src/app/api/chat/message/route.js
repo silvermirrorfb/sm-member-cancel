@@ -26,7 +26,7 @@ import { getDurationOfferDisplayName } from '../../../../lib/sms-copy';
 const RATE_LIMIT_USER_MESSAGE =
     "I'm sorry, I'm experiencing high demand right now. Please try again in a minute, or call (888) 677-0055 for immediate help.";
 const SMS_SYSTEM_PROMPT_SUFFIX =
-    '\n\nChannel: SMS. Keep replies under 300 characters. Use plain text only with no markdown, headers, or bullet points. Include full URLs when relevant.';
+    '\n\nSMS CHANNEL RULES: You are responding via text message. Keep responses under 280 characters. Use plain text only - no bold, no bullets, no headers, no markdown. Include full URLs when relevant. Be concise and direct.';
 
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_RECOVERY_MESSAGES = 40;
@@ -200,8 +200,26 @@ function formatTimeForGuest(iso) {
     });
 }
 
+function getProfileFirstName(profile) {
+    const raw = String(profile?.firstName || profile?.fullName || profile?.name || '').trim();
+    return raw ? raw.split(/\s+/)[0] : '';
+}
+
+function isSmsDurationOfferAllowed(opportunity) {
+    const target = Number(opportunity?.targetDurationMinutes || 0) || null;
+    return !target || target <= 50;
+}
+
 function buildUpgradeOfferMessage(opportunity, options = {}) {
     if (!opportunity?.pricing) return null;
+    const channel = String(options.channel || 'web').toLowerCase();
+    if (channel === 'sms') {
+          if (!isSmsDurationOfferAllowed(opportunity)) return null;
+          const delta = Number(opportunity?.pricing?.walkinDelta || 50);
+          const firstName = String(options.firstName || '').trim();
+          const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
+          return `${greeting} good news - there's room to extend your facial today to 50 minutes for just $${delta} more. Reply YES to upgrade or NO to keep your current booking.`;
+    }
     const proactive = options.proactive === true;
     const pricing = opportunity.pricing;
     const delta = Number(pricing.walkinDelta || 50);
@@ -758,6 +776,13 @@ export async function POST(request) {
       if (session.pendingUpgradeOffer && isPendingOfferExpired(session.pendingUpgradeOffer)) {
             session.pendingUpgradeOffer = null;
       }
+      if (
+        channel === 'sms' &&
+        session.pendingUpgradeOffer?.offerKind === 'duration' &&
+        !isSmsDurationOfferAllowed(session.pendingUpgradeOffer)
+      ) {
+            session.pendingUpgradeOffer = null;
+      }
 
       // YES/NO handling for an active pending upgrade offer
       if (session.pendingUpgradeOffer && session.memberProfile) {
@@ -821,7 +846,7 @@ export async function POST(request) {
                   if (profilePhone && appointmentId) {
                         markUpgradeOfferEvent(profilePhone, appointmentId, 'declined');
                   }
-                  const declineMessage = 'No problem at all — we will keep your appointment as-is.';
+                  const declineMessage = 'No problem - we will keep your appointment as-is.';
                   await addMessage(sessionId, 'assistant', declineMessage);
                   pendingTranscriptEntries.push({ role: 'assistant', content: declineMessage });
                   await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'upgrade decline response');
@@ -859,9 +884,13 @@ export async function POST(request) {
       // Explicit upgrade request: run deterministic eligibility check before LLM response.
       if (session.memberProfile && mentionsUpgradeInterest(sanitizedMessage)) {
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
-            if (opportunity?.eligible) {
+            if (opportunity?.eligible && (channel !== 'sms' || isSmsDurationOfferAllowed(opportunity))) {
                   if (session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
-                        const offerMessage = buildUpgradeOfferMessage(opportunity, { proactive: false });
+                        const offerMessage = buildUpgradeOfferMessage(opportunity, {
+                              proactive: false,
+                              channel,
+                              firstName: getProfileFirstName(session.memberProfile),
+                        });
                         if (offerMessage) {
                               session.pendingUpgradeOffer = {
                                     appointmentId: opportunity.appointmentId,
@@ -1039,10 +1068,14 @@ export async function POST(request) {
       }
 
       // Proactive upgrade suggestion on logistics questions (e.g., directions) for identified members.
-      if (smsUpgradeLive && !summary && session.memberProfile && !session.pendingUpgradeOffer && isLogisticsContext(sanitizedMessage)) {
+      if (channel !== 'sms' && smsUpgradeLive && !summary && session.memberProfile && !session.pendingUpgradeOffer && isLogisticsContext(sanitizedMessage)) {
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
             if (opportunity?.eligible && session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
-                  const proactiveOffer = buildUpgradeOfferMessage(opportunity, { proactive: true });
+                  const proactiveOffer = buildUpgradeOfferMessage(opportunity, {
+                        proactive: true,
+                        channel,
+                        firstName: getProfileFirstName(session.memberProfile),
+                  });
                   if (proactiveOffer) {
                         session.pendingUpgradeOffer = {
                               appointmentId: opportunity.appointmentId,
