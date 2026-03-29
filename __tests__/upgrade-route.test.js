@@ -118,6 +118,33 @@ describe('upgrade route flows', () => {
     expect(session.pendingUpgradeOffer?.appointmentId).toBe('appt-1');
   });
 
+  it('uses the correct 90-minute service name in chat upgrade offers', async () => {
+    const session = createSession({
+      memberProfile: { clientId: 'client-1', tier: '50', accountStatus: 'active' },
+    });
+    sessionStore.set('sess-1', session);
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-90',
+      currentDurationMinutes: 50,
+      targetDurationMinutes: 90,
+      requiredExtraMinutes: 40,
+      availableGapMinutes: 45,
+      gapUnlimited: false,
+      isMember: true,
+      startOn: '2026-03-09T16:00:00.000Z',
+      pricing: { memberTotal: 189, memberDelta: 60, walkinTotal: 279, walkinDelta: 110 },
+    });
+
+    const res = await POST(makeRequest('Can I upgrade to 90 minutes?'));
+    const body = await res.json();
+
+    expect(body.pendingUpgradeOffer).toBe(true);
+    expect(body.message).toContain('90-Min Premier Contour');
+    expect(body.message).toContain('$110 more');
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
   it('YES inside active window re-verifies and confirms upgrade', async () => {
     const session = createSession({
       pendingUpgradeOffer: {

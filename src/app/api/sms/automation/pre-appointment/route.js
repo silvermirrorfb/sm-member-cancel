@@ -33,6 +33,7 @@ import {
   buildSmsUpgradePendingReply,
   isSmsUpgradeLive,
 } from '../../../../../lib/sms-upgrade-policy';
+import { getDurationOfferDisplayName } from '../../../../../lib/sms-copy';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
 const REMINDER_YES_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_REMINDER_MIN || 10);
@@ -193,15 +194,16 @@ function buildDurationOfferMessage(opportunity, options = {}) {
   const firstName = asText(options.firstName);
   const pricing = opportunity.pricing;
   const delta = Number(pricing.walkinDelta || 50);
+  const serviceName = getDurationOfferDisplayName(opportunity?.targetDurationMinutes);
   const responseWindowMinutes = Math.max(
     1,
     Number(options.responseWindowMinutes || (reminder ? REMINDER_YES_WINDOW_MINUTES : OFFER_WINDOW_MINUTES)) || OFFER_WINDOW_MINUTES,
   );
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
   if (reminder) {
-    return `${greeting} reminder: space is still open to extend your facial today to a 50-Min Esthetician's Choice Facial for only $${delta} more. Reply YES in the next ${responseWindowMinutes} minutes.`;
+    return `${greeting} reminder: space is still open to extend your facial today to a ${serviceName} for only $${delta} more. Reply YES in the next ${responseWindowMinutes} minutes.`;
   }
-  return `${greeting} we have space to extend your facial today. Upgrade to a 50-Min Esthetician's Choice Facial for only $${delta} more. Reply YES in the next ${responseWindowMinutes} minutes.`;
+  return `${greeting} we have space to extend your facial today. Upgrade to a ${serviceName} for only $${delta} more. Reply YES in the next ${responseWindowMinutes} minutes.`;
 }
 
 function buildAddonOfferMessage(offer, options = {}) {

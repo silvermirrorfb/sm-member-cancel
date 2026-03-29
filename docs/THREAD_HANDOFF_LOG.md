@@ -203,3 +203,39 @@
 - No trustworthy repo-recorded code/deploy activity was found in the current workspace for Friday, March 27, 2026.
 - That negative-evidence record has been logged in:
   - `docs/SESSION_ACTIVITY_LOG_2026-03-27.md`
+
+## 2026-03-29 01:47 UTC
+- Completed a late-night continuity pass after the March 28 live SMS/add-on repairs.
+- Cloud continuity work completed:
+  - GitHub-safe handoff package pushed to `main` at `c9f85c6`
+  - full raw export archived on dedicated branch `archive/raw-export-2026-03-28` at `f369dc1`
+  - raw archive path on archive branch:
+    - `cloud-archive/ai_takeover_export_2026-03-28.tar.gz`
+- Additional code improvement completed locally in this window:
+  - fixed duration-offer copy so future `50 -> 90` upsells no longer say `50-Min Esthetician's Choice Facial`
+  - shared helper added:
+    - `src/lib/sms-copy.js`
+  - updated routes:
+    - `src/app/api/sms/automation/pre-appointment/route.js`
+    - `src/app/api/chat/message/route.js`
+  - new duration naming behavior:
+    - `50` -> `50-Min Esthetician's Choice Facial`
+    - `90` -> `90-Min Premier Contour`
+- New regression coverage added:
+  - `__tests__/sms-automation-route.test.js`
+  - `__tests__/upgrade-route.test.js`
+- Verification completed:
+  - `npm test -- __tests__/sms-automation-route.test.js __tests__/upgrade-route.test.js`
+  - result: `42/42` passing
+  - `npm run build`
+  - result: success
+- User-facing decision/support doc added:
+  - `docs/TOMORROW_DECISIONS_IN_PLAIN_ENGLISH_2026-03-28.md`
+- Exact next actions:
+  - commit and push the 90-minute copy-correctness patch plus the plain-English decision doc
+  - next user feedback should focus on:
+    - SMS tone direction
+    - whether to actively market `50 -> 90`
+    - allowed add-on catalog / ranking
+    - reminder policy
+    - manual-fallback wording

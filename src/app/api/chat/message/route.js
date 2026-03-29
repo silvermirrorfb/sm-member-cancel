@@ -20,6 +20,7 @@ import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
 import { buildSmsUpgradePendingReply, isSmsUpgradeLive } from '../../../../lib/sms-upgrade-policy';
+import { getDurationOfferDisplayName } from '../../../../lib/sms-copy';
 
 // Friendly message shown when Claude API is rate-limited
 const RATE_LIMIT_USER_MESSAGE =
@@ -204,11 +205,12 @@ function buildUpgradeOfferMessage(opportunity, options = {}) {
     const proactive = options.proactive === true;
     const pricing = opportunity.pricing;
     const delta = Number(pricing.walkinDelta || 50);
+    const serviceName = getDurationOfferDisplayName(opportunity?.targetDurationMinutes);
     const timeText = formatTimeForGuest(opportunity.startOn);
     const opener = proactive
       ? `I also see room after your ${timeText} session.`
       : `I checked your ${timeText} appointment.`;
-    const priceLine = `Upgrade to a 50-Min Esthetician's Choice Facial for $${delta} more.`;
+    const priceLine = `Upgrade to a ${serviceName} for $${delta} more.`;
 
     return `${opener} ${priceLine} Reply YES in ${OFFER_WINDOW_MINUTES} minutes or NO.`;
 }

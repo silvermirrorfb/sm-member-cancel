@@ -219,6 +219,57 @@ describe('sms automation route', () => {
     expect(mockLookupMember).toHaveBeenCalledTimes(2);
   });
 
+  it('uses the correct 90-minute service name for duration upgrade copy', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '50',
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+      email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-90',
+      targetDurationMinutes: 90,
+      pricing: { memberTotal: 189, memberDelta: 60, walkinTotal: 279, walkinDelta: 110 },
+      isMember: true,
+      currentDurationMinutes: 50,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Debbie',
+            lastName: 'Von Ahrens',
+            email: 'debbie@example.com',
+            phone: '+1 (917) 555-1234',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].message).toContain('90-Min Premier Contour');
+    expect(body.results[0].message).toContain('for only $110 more');
+  });
+
   it('can process queued work with useQueuedOnly', async () => {
     mockPopDueCandidates.mockReturnValue([
       {

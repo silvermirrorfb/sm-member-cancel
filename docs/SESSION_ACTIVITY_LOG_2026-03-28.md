@@ -245,3 +245,43 @@ Timezone reference:
 - Improve SMS copy quality now that the mechanics are proven.
 - QA other add-on types besides Antioxidant Peel.
 - Add explicit regression coverage around the new Boulevard add-on mutation helper paths if deeper mutation mocking is added to the Boulevard test suite later.
+
+## Late-Night Continuity Pass
+
+### Cloud Safekeeping Work
+- Added a GitHub-safe takeover package to `main` so another AI can resume work from the repo without relying on local thread state.
+- Added a separate archival branch for the full raw takeover bundle so the raw export is also stored in GitHub cloud history without polluting `main`.
+- Verified remote branch state:
+  - `main` -> `c9f85c6`
+  - `archive/raw-export-2026-03-28` -> `f369dc1`
+
+### Copy-Correctness Fix Shipped Locally
+- Found a concrete outbound/chat SMS copy bug:
+  - duration-upgrade offer text was still hardcoded to the `50-Min Esthetician's Choice Facial`
+  - this would have mis-described future `50 -> 90` offers
+- Added a shared helper:
+  - `src/lib/sms-copy.js`
+- Updated both routes to use the correct target-duration service name:
+  - `src/app/api/sms/automation/pre-appointment/route.js`
+  - `src/app/api/chat/message/route.js`
+- New mapping introduced:
+  - `50` -> `50-Min Esthetician's Choice Facial`
+  - `90` -> `90-Min Premier Contour`
+
+### New Regression Coverage
+- Added route-level regression coverage for correct 90-minute naming in:
+  - `__tests__/sms-automation-route.test.js`
+  - `__tests__/upgrade-route.test.js`
+
+### Verification
+- Focused tests run:
+  - `npm test -- __tests__/sms-automation-route.test.js __tests__/upgrade-route.test.js`
+  - result: `42/42` passing
+- Full build run:
+  - `npm run build`
+  - result: success
+
+### Plain-English Decision Memo Added
+- Added `docs/TOMORROW_DECISIONS_IN_PLAIN_ENGLISH_2026-03-28.md`
+- Purpose:
+  - leave the user a non-technical summary of what still needs approval or taste feedback

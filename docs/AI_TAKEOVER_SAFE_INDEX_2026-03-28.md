@@ -53,6 +53,7 @@ Latest trustworthy live proof in this repo is from March 28, 2026.
 - `docs/SESSION_ACTIVITY_LOG_2026-03-12_SANITIZED.md`
 - `docs/THREAD_RECOVERY_2026-03-12.md`
 - `docs/PRIVATE_RAW_ARCHIVE_MANIFEST_2026-03-28.md`
+- `docs/TOMORROW_DECISIONS_IN_PLAIN_ENGLISH_2026-03-28.md`
 
 ## Private Raw Archive
 
