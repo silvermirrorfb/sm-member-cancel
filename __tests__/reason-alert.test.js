@@ -52,6 +52,10 @@ describe('Reason-based team alerts', () => {
       expect(matchReasonToCategory('I moved to a different city')).toBe('relocation');
       expect(matchReasonToCategory('budget')).toBe('cost_overwhelming');
       expect(matchReasonToCategory('cost became too expensive')).toBe('cost_overwhelming');
+      expect(matchReasonToCategory('this is too much for me right now')).toBe('cost_overwhelming');
+      expect(matchReasonToCategory('I am under financial pressure')).toBe('cost_overwhelming');
+      expect(matchReasonToCategory('I need to save money')).toBe('cost_overwhelming');
+      expect(matchReasonToCategory('it feels cheap for what I pay')).toBe('cost_overwhelming');
       expect(matchReasonToCategory('I was laid off')).toBe('lost_job');
       expect(matchReasonToCategory('I started seeing a dermatologist')).toBe('shifted_to_derm');
       expect(matchReasonToCategory('My esthetician left')).toBe('esthetician_turnover');

@@ -875,7 +875,7 @@ function matchReasonToCategory(reasonPrimary) {
   if (/\bfront desk\b/.test(r) || /\breception/.test(r) || /\bcheck.in\b/.test(r)) return 'front_desk';
   if (/\binexperienc/.test(r) || /\besthetician.*(inexperienc|not.*(good|skilled))\b/.test(r)) return 'inexperienced_esth';
   if (/\bvoucher\b/.test(r) || /\bcredit.*(build|pile|accumulat)/.test(r)) return 'voucher_buildup';
-  if (/\bcost\b/.test(r) || /\bexpens/.test(r) || /\bafford/.test(r) || /\bbudget\b/.test(r) || /\bpric/.test(r)) return 'cost_overwhelming';
+  if (/\bcost\b/.test(r) || /\bexpens/.test(r) || /\bafford/.test(r) || /\bbudget\b/.test(r) || /\bpric/.test(r) || /\btoo much\b/.test(r) || /\bfinancial\b/.test(r) || /\bmoney\b/.test(r) || /\bcan'?t afford\b/.test(r) || /\bcheap\b/.test(r)) return 'cost_overwhelming';
   if (/\b(lost|losing) (my |a )?job\b/.test(r) || /\bjob loss\b/.test(r) || /\bunemploy/.test(r) || /\blaid off\b/.test(r)) return 'lost_job';
   if (/\bmedical\b/.test(r) || /\bhealth\b/.test(r) || /\bsurgery\b/.test(r) || /\bpregnant\b/.test(r) || /\bpregnancy\b/.test(r)) return 'medical';
   if (/\binconsisten/.test(r) || /\buneven/.test(r) || /\bhit.or.miss\b/.test(r)) return 'inconsistent';
