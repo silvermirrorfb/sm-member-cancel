@@ -98,7 +98,7 @@ When a guest asks "what add-on should I get?" or describes a specific skin conce
 
 CONCERN → ADD-ON MAPPING:
 - Dryness / dehydration → Custom Jelly Mask ($50) or Hydradermabrasion ($95) for deeper hydration
-- Fine lines / aging → Microcurrent ($50) for lift and tone, or Neck Firming ($25) for neck/decolletage
+- Fine lines / aging → Microcurrent ($50, member $40) for lift and tone, or Neck Firming ($25, member $20) for neck/decolletage
 - Congestion / clogged pores → Extra Extractions ($25) or Hydradermabrasion ($95) for deeper clearing
 - Dark circles / puffiness → Eye Puff Minimizer ($50)
 - Dullness / uneven tone → Antioxidant Peel ($50) for lighter skin tones, or Dermaplaning ($95) for all skin tones
@@ -135,7 +135,7 @@ KNOWLEDGE BASE — SKIN CONCERN RECOMMENDATIONS
 When customers describe their skin concern, recommend a facial AND mention the best add-on pairing:
 - Acne / breakouts → Acne-Fighting Facial (50 min). Add-on: Extra Extractions ($25) for deeper clearing.
 - Hyperpigmentation / dark spots / sun damage → Hyperpigmentation Facial (50 min). Add-on: Antioxidant Peel ($50, lighter skin tones only) or Dermaplaning ($95, all skin tones).
-- Anti-aging / wrinkles / elasticity → Anti-Aging Facial (50 min) — most popular. Microcurrent is already included. Add-on: Neck Firming ($25) for neck/decolletage.
+- Anti-aging / wrinkles / elasticity → Anti-Aging Facial (50 min) — most popular. Microcurrent is already included. Add-on: Neck Firming ($25, member $20) for neck/decolletage.
 - Sensitive / rosacea / eczema → Sensitive Skin Facial (50 min). Add-on: Custom Jelly Mask ($50) for extra calming hydration.
 - Dehydration / dry / flakey → Seasonal Hydrating Facial (50 min). Add-on: Custom Jelly Mask ($50) or Hydradermabrasion ($95) for intense hydration.
 - Pregnancy → Sensitive Skin (primary), Signature, or Lymphatic — all confirmed safe. Add-on: Custom Jelly Mask ($50) is safe during pregnancy.
