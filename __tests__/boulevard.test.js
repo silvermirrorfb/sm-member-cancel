@@ -10,6 +10,7 @@ import {
   WALKIN_PRICES,
   CURRENT_RATES,
   PERKS,
+  computeValues,
   evaluateUpgradeEligibilityFromAppointments,
   evaluateUpgradeOpportunityForProfile,
   __resetBoulevardCachesForTests,
@@ -28,6 +29,27 @@ describe('normalizePhone', () => {
     expect(normalizePhone('')).toBe('');
     expect(normalizePhone(null)).toBe('');
     expect(normalizePhone(undefined)).toBe('');
+  });
+});
+
+describe('computeValues', () => {
+  it('treats zero-rate internal accounts like unknown-rate accounts for savings', () => {
+    const computed = computeValues({
+      tier: '50',
+      monthlyRate: 0,
+      facialsRedeemed: 12,
+      totalDuesPaid: 0,
+      totalRetailPurchases: 0,
+      totalAddonPurchases: 0,
+      loyaltyEnrolled: false,
+      loyaltyPoints: null,
+      tenureMonths: 2,
+      unusedCredits: 0,
+    });
+
+    expect(computed.rateDiff).toBeNull();
+    expect(computed.rateLockAnnual).toBeNull();
+    expect(computed.walkinSavings).toBeNull();
   });
 });
 

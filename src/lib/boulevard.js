@@ -4069,11 +4069,16 @@ function buildProfile(d) {
 
 function computeValues(p) {
   const wp = p.tier && WALKIN_PRICES[p.tier] ? WALKIN_PRICES[p.tier] : null;
-  const ws = wp !== null && isFiniteNumber(p.facialsRedeemed) && isFiniteNumber(p.totalDuesPaid)
+  const ws = wp !== null
+    && isFiniteNumber(p.facialsRedeemed)
+    && isFiniteNumber(p.totalDuesPaid)
+    && p.totalDuesPaid > 0
+    && isFiniteNumber(p.monthlyRate)
+    && p.monthlyRate > 0
     ? p.facialsRedeemed * wp - p.totalDuesPaid
     : null;
   const cr = p.tier && CURRENT_RATES[p.tier] ? CURRENT_RATES[p.tier] : null;
-  const rd = cr !== null && isFiniteNumber(p.monthlyRate) ? cr - p.monthlyRate : null;
+  const rd = cr !== null && isFiniteNumber(p.monthlyRate) && p.monthlyRate > 0 ? cr - p.monthlyRate : null;
   const nextPerk = getNextPerkMilestone(p.tenureMonths);
   let loyaltyRedeemable = null, loyaltyNextTier = null;
   if (p.loyaltyEnrolled === true && isFiniteNumber(p.loyaltyPoints) && p.loyaltyPoints > 0) {
@@ -4090,7 +4095,7 @@ function computeValues(p) {
   const addonDiscountEstimate = isFiniteNumber(p.totalAddonPurchases)
     ? roundCurrency(p.totalAddonPurchases * (0.20 / 0.80))
     : null;
-  const perFacialServiceDiscount = wp !== null && isFiniteNumber(p.monthlyRate)
+  const perFacialServiceDiscount = wp !== null && isFiniteNumber(p.monthlyRate) && p.monthlyRate > 0
     ? Math.max(wp - p.monthlyRate, 0)
     : null;
   const serviceDiscountEstimate = isFiniteNumber(perFacialServiceDiscount) && isFiniteNumber(p.facialsRedeemed)
@@ -4146,7 +4151,7 @@ function formatProfileForPrompt(profile) {
     `Location: ${profile.location || 'UNKNOWN'}`,
     `Client Record Created: ${profile.clientSince || 'UNKNOWN'}`,
     `Membership Tier: ${profile.tier ? `${profile.tier}-Minute (known)` : 'UNKNOWN — do not state tier'}`,
-    `Monthly Rate: ${isFiniteNumber(profile.monthlyRate) ? `$${profile.monthlyRate}/month` : 'UNKNOWN — do not state monthly rate'}`,
+    `Monthly Rate: ${isFiniteNumber(profile.monthlyRate) && profile.monthlyRate > 0 ? `$${profile.monthlyRate}/month` : 'UNKNOWN — do not state monthly rate'}`,
     `Member Since: ${profile.memberSince || 'UNKNOWN — do not state join date/tenure'}`,
     `Tenure: ${isFiniteNumber(profile.tenureMonths) ? `${profile.tenureMonths} months` : 'UNKNOWN — do not state tenure'}`,
     `Next Charge Date: ${profile.nextChargeDate || 'UNKNOWN'}`,

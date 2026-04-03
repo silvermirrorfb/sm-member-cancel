@@ -335,7 +335,9 @@ function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     const sentences = [];
 
     const tierLabel = profile?.tier ? `${profile.tier}-Minute Membership` : null;
-    const rateLabel = typeof profile?.monthlyRate === 'number' ? `${formatMoney(profile.monthlyRate)}/month` : null;
+    const rateLabel = Number.isFinite(profile?.monthlyRate) && profile.monthlyRate > 0
+      ? `${formatMoney(profile.monthlyRate)}/month`
+      : null;
     const location = profile?.location && profile.location !== 'Unknown' ? profile.location : null;
     const intro = pickVariant([
           `Thanks, ${firstName}. I found your membership.`,
