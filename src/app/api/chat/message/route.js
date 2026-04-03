@@ -40,6 +40,7 @@ const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospita
 const PAUSE_CREDIT_KEYWORDS = /\b(credit|credits)\b/i;
 const PAUSE_HOLD_KEYWORDS = /\b(pause|paused|hold|on hold)\b/i;
 const UNRESOLVED_KEYWORDS = /\b(not resolved|still not resolved|this (isn't|is not|wasn't|was not) resolved|didn't resolve|did not resolve|not fixed|still broken)\b/i;
+const MEMBERSHIP_INTENT_KEYWORDS = /\b(membership|member|cancel|pause|hold|downgrade|upgrade tier|billing cycle|monthly rate|credits?\s*(expire|expir|remain|left|unused))\b/i;
 const BOOKING_CONTEXT_KEYWORDS = /\b(book|booking|appointment|calendar|checkout|payment|credit card|billing|cvv|cvc|zip(?:\s*code)?|widget)\b/i;
 const ISSUE_CONTEXT_KEYWORDS = /\b(error|issue|problem|fail(?:ed|s|ing)?|freez(?:e[sd]?|ing)|frozen|not loading|cannot|can't|wont|won't|stuck|broken|crash(?:e[sd]?|ing)?|glitch(?:e[sd]?|ing)?)\b/i;
 const LOCATION_CANDIDATES = [
@@ -89,8 +90,9 @@ function formatMonthYear(isoDate) {
     return d.toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
 
-function isBookingPaymentIncident(text) {
+export function isBookingPaymentIncident(text) {
     const input = String(text || '').toLowerCase();
+    if (MEMBERSHIP_INTENT_KEYWORDS.test(input)) return false;
     return BOOKING_CONTEXT_KEYWORDS.test(input) && ISSUE_CONTEXT_KEYWORDS.test(input);
 }
 

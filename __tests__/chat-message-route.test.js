@@ -54,7 +54,32 @@ vi.mock('../src/lib/sms-sessions.js', () => ({
   markUpgradeOfferEvent: vi.fn(),
 }));
 
-import { POST } from '../src/app/api/chat/message/route.js';
+import { POST, isBookingPaymentIncident } from '../src/app/api/chat/message/route.js';
+
+describe('isBookingPaymentIncident', () => {
+  it('detects real booking issues', () => {
+    expect(isBookingPaymentIncident('booking page is frozen')).toBe(true);
+    expect(isBookingPaymentIncident('checkout error with credit card')).toBe(true);
+    expect(isBookingPaymentIncident('calendar not loading')).toBe(true);
+    expect(isBookingPaymentIncident('payment failed at checkout')).toBe(true);
+  });
+
+  it('does not trigger for membership intent with overlapping words', () => {
+    expect(
+      isBookingPaymentIncident(
+        "I need to pause my membership, wont be returning until July, resume billing in July",
+      ),
+    ).toBe(false);
+    expect(isBookingPaymentIncident('I want to cancel my membership, billing issue')).toBe(false);
+    expect(isBookingPaymentIncident("my member credits won't load")).toBe(false);
+    expect(isBookingPaymentIncident("hold my membership, can't make appointments")).toBe(false);
+  });
+
+  it('still triggers for actual booking issues', () => {
+    expect(isBookingPaymentIncident('the booking widget is broken')).toBe(true);
+    expect(isBookingPaymentIncident('zip code error at checkout')).toBe(true);
+  });
+});
 
 describe('chat message route rate-limit headers', () => {
   beforeEach(() => {
