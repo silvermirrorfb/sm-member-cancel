@@ -1,3 +1,4 @@
+export const maxDuration = 300;
 import { NextResponse } from 'next/server';
 import {
   canonicalizeBoulevardLocationId,
@@ -7,7 +8,7 @@ import {
 } from '../../../../lib/boulevard';
 import { getNextWindowStartIso, isWithinSendWindow } from '../../../../lib/sms-window';
 
-const PAGE_SIZE = Number(process.env.SMS_CRON_PAGE_SIZE || 100);
+const PAGE_SIZE = Number(process.env.SMS_CRON_PAGE_SIZE || 20);
 const MAX_PAGES = Number(process.env.SMS_CRON_MAX_PAGES || 5);
 const SEND_TIMEZONE = process.env.SMS_SEND_TIMEZONE || 'America/New_York';
 const SEND_START_HOUR = Number(process.env.SMS_CRON_SEND_START_HOUR || 9);
