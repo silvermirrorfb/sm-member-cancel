@@ -1845,7 +1845,9 @@ async function scanAppointments(apiUrl, headers, context = {}) {
 
   const selectedFields = ['id', startField, endField];
   if (clientIdField) selectedFields.push(clientIdField);
-  else if (clientObjectField) selectedFields.push(`${clientObjectField} { id }`);
+  else if (clientObjectField) {
+    selectedFields.push(`${clientObjectField} { id firstName lastName email phone phoneNumber mobilePhone }`);
+  }
   if (providerIdField) selectedFields.push(providerIdField);
   else if (providerObjectField) selectedFields.push(`${providerObjectField} { id }`);
   else {
@@ -1937,11 +1939,20 @@ async function scanAppointments(apiUrl, headers, context = {}) {
 
         for (const rawNode of nodes) {
           const node = rawNode || {};
+          const clientNode = clientObjectField ? node?.[clientObjectField] || null : null;
           const normalized = {
             id: String(node.id || ''),
             startOn: node[startField] || null,
             endOn: node[endField] || null,
             clientId: readNodeFieldAsString(node, clientIdField, clientObjectField),
+            clientFirstName: String(clientNode?.firstName || '').trim() || null,
+            clientLastName: String(clientNode?.lastName || '').trim() || null,
+            clientEmail: String(clientNode?.email || '').trim().toLowerCase() || null,
+            clientPhone:
+              String(clientNode?.phoneNumber || '').trim() ||
+              String(clientNode?.mobilePhone || '').trim() ||
+              String(clientNode?.phone || '').trim() ||
+              null,
             providerId:
               readNodeFieldAsString(node, providerIdField, providerObjectField) ||
               providerNestedPlans.map(plan => readProviderFromNestedPlan(node, plan)).find(Boolean) ||
@@ -4231,7 +4242,9 @@ function __resetBoulevardCachesForTests() {
 }
 
 export {
+  getBoulevardAuthContext,
   lookupMember,
+  scanAppointments,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
   probeCancelRebookCapabilities,

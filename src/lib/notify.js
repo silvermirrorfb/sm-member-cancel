@@ -9,6 +9,18 @@ const CHATLOG_HEADERS = [
   'Message Role',
   'Message Content',
 ];
+const SMS_CHATLOG_SHEET_TITLE = 'SMS';
+const SMS_CHATLOG_HEADERS = [
+  'Session ID',
+  'Timestamp',
+  'Direction (inbound/outbound)',
+  'Phone',
+  'Member Name',
+  'Location',
+  'Message Content',
+  'Offer Type',
+  'Outcome',
+];
 const WIDGET_OPEN_SHEET_TITLE = 'WidgetOpens';
 const WIDGET_OPEN_HEADERS = [
   'Session ID',
@@ -574,6 +586,49 @@ async function logChatWidgetOpen(sessionId, sessionCreated, source = 'widget') {
   }
 }
 
+async function logSmsChatMessages(entries) {
+  const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
+  if (!sheetId) {
+    console.warn('GOOGLE_CHATLOG_SHEET_ID not configured — skipping SMS log');
+    return { logged: false, reason: 'Not configured' };
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { logged: false, reason: 'No entries' };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
+    const sheetMeta = await getOrCreateSheetMeta(sheets, sheetId, SMS_CHATLOG_SHEET_TITLE);
+    await ensureSimpleSheetHeaders(sheets, sheetId, sheetMeta, SMS_CHATLOG_HEADERS);
+
+    const now = new Date().toISOString();
+    const rows = entries.map((entry) => ([
+      toSheetValue(entry.sessionId),
+      toSheetValue(entry.timestamp || now),
+      toSheetValue(entry.direction),
+      toSheetValue(entry.phone),
+      toSheetValue(entry.memberName),
+      toSheetValue(entry.location),
+      toSheetValue(entry.content),
+      toSheetValue(entry.offerType),
+      toSheetValue(entry.outcome),
+    ]));
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: `${sheetMeta.title}!A:I`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: rows },
+    });
+
+    return { logged: true, count: rows.length };
+  } catch (err) {
+    console.error('SMS chat logging failed:', err);
+    return { logged: false, reason: err.message };
+  }
+}
+
 async function logSupportIncidentToGoogleSheets(incident) {
   const sheetId = process.env.GOOGLE_SUPPORT_INCIDENT_SHEET_ID || DEFAULT_SUPPORT_INCIDENT_SHEET_ID;
   if (!sheetId) {
@@ -1076,6 +1131,7 @@ export {
   logChatMessages,
   logChatMessage,
   logChatWidgetOpen,
+  logSmsChatMessages,
   logSupportIncident,
   processConversationEnd,
 };

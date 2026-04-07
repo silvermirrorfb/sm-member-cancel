@@ -20,6 +20,7 @@ const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockReverifyAndApplyUpgradeForProfile = vi.fn();
 const mockLogSupportIncident = vi.fn();
+const mockLogSmsChatMessages = vi.fn();
 const originalEnv = process.env;
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -61,6 +62,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
 
 vi.mock('../src/lib/notify.js', () => ({
   logSupportIncident: (...args) => mockLogSupportIncident(...args),
+  logSmsChatMessages: (...args) => mockLogSmsChatMessages(...args),
 }));
 
 import { POST } from '../src/app/api/sms/twilio/webhook/route.js';
@@ -104,6 +106,7 @@ describe('twilio webhook route', () => {
       email: { sent: true },
       sheet: { logged: true },
     });
+    mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
   });
 
   afterEach(() => {

@@ -27,7 +27,7 @@ import {
   lookupMember,
   reverifyAndApplyUpgradeForProfile,
 } from '../../../../../lib/boulevard';
-import { logSupportIncident } from '../../../../../lib/notify';
+import { logSmsChatMessages, logSupportIncident } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
@@ -337,6 +337,17 @@ export async function POST(request) {
 
     const sessionId = await resolveSessionIdForPhone(from);
     const activeSession = await getSession(sessionId);
+    await logSmsChatMessages([{
+      sessionId,
+      timestamp: new Date().toISOString(),
+      direction: 'inbound',
+      phone: from,
+      memberName: activeSession?.memberProfile?.name || null,
+      location: activeSession?.memberProfile?.locationName || null,
+      content: body,
+      offerType: activeSession?.pendingUpgradeOffer?.offerKind || null,
+      outcome: (isAffirmative(body) || isNegative(body)) ? 'intent_response' : 'message_received',
+    }]);
     if (activeSession) {
       const currentCount = Number(activeSession.smsInboundCount || 0);
       activeSession.smsInboundCount = currentCount + 1;

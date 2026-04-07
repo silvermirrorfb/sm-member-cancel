@@ -4,9 +4,12 @@ import { buildSystemPromptWithProfile } from '../../../../../lib/claude';
 import {
   evaluateUpgradeOpportunityForProfile,
   formatProfileForPrompt,
+  getBoulevardAuthContext,
   lookupMember,
   resolveBoulevardLocationInput,
+  scanAppointments,
 } from '../../../../../lib/boulevard';
+import { logSmsChatMessages } from '../../../../../lib/notify';
 import {
   bindPhoneToSession,
   getSessionIdForPhone,
@@ -37,6 +40,7 @@ import {
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
 const REMINDER_YES_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_REMINDER_MIN || 10);
 const ADDON_MIN_GAP_MINUTES = Number(process.env.SMS_ADDON_MIN_GAP_MINUTES || 5);
+const DEFAULT_DISCOVERY_WINDOW_HOURS = Number(process.env.SMS_DISCOVERY_WINDOW_HOURS || 6);
 const ADDON_CATALOG = {
   antioxidant_peel: { code: 'antioxidant_peel', name: 'Antioxidant Peel', memberPrice: 40, walkinPrice: 50 },
   neck_firming: { code: 'neck_firming', name: 'Neck Firming', memberPrice: 20, walkinPrice: 25 },
@@ -255,6 +259,30 @@ function resolveCandidates(body) {
   return [];
 }
 
+function normalizeCandidateDedupKey(candidate) {
+  const clientId = asText(candidate?.clientId);
+  const phone = asText(candidate?.phone).replace(/\D/g, '');
+  const email = asText(candidate?.email).toLowerCase();
+  if (clientId) return `client:${clientId}`;
+  if (phone) return `phone:${phone}`;
+  if (email) return `email:${email}`;
+  const fallbackName = `${asText(candidate?.firstName).toLowerCase()}|${asText(candidate?.lastName).toLowerCase()}`;
+  return fallbackName ? `name:${fallbackName}` : '';
+}
+
+function toLocationCandidate(locationName, appointment) {
+  return {
+    firstName: asText(appointment?.clientFirstName),
+    lastName: asText(appointment?.clientLastName),
+    email: asText(appointment?.clientEmail).toLowerCase(),
+    phone: asText(appointment?.clientPhone),
+    clientId: asText(appointment?.clientId),
+    appointmentId: asText(appointment?.id),
+    locationId: asText(appointment?.locationId),
+    locationName: asText(locationName) || asText(appointment?.locationName),
+  };
+}
+
 async function getOrCreateSmsSession(profile) {
   const phone = asText(profile?.phone);
   let session = null;
@@ -331,6 +359,46 @@ export async function POST(request) {
       asBool(process.env.SMS_ENABLE_ADDON_FALLBACK, true),
     );
     const directCandidates = useQueuedOnly ? [] : resolveCandidates(body);
+    const locations = Array.isArray(body.locations)
+      ? body.locations.map(item => asText(item)).filter(Boolean)
+      : [];
+    const discoveryWindowHours = Math.max(
+      1,
+      asInt(body.discoveryWindowHours, asInt(body.windowHours, DEFAULT_DISCOVERY_WINDOW_HOURS)),
+    );
+    const discoveredCandidates = [];
+    if (!useQueuedOnly && locations.length > 0) {
+      const auth = getBoulevardAuthContext();
+      if (!auth) {
+        return NextResponse.json(
+          { error: 'Boulevard API credentials are not configured for location discovery.' },
+          { status: 500 },
+        );
+      }
+      const nowMs = new Date(runNow).getTime();
+      const cutoffMs = nowMs + discoveryWindowHours * 60 * 60 * 1000;
+      const dedup = new Set();
+      for (const rawLocation of locations) {
+        const location = resolveBoulevardLocationInput(rawLocation);
+        const scan = await scanAppointments(auth.apiUrl, auth.headers, {
+          locationId: location.locationId || rawLocation,
+        });
+        const appointments = Array.isArray(scan?.appointments) ? scan.appointments : [];
+        for (const appointment of appointments) {
+          const startMs = new Date(appointment?.startOn || '').getTime();
+          if (!Number.isFinite(startMs) || startMs < nowMs || startMs > cutoffMs) continue;
+          const candidate = toLocationCandidate(location.locationName || rawLocation, appointment);
+          if (!candidate.firstName || !candidate.lastName || (!candidate.email && !candidate.phone)) continue;
+          const dedupKey = normalizeCandidateDedupKey(candidate);
+          if (!dedupKey || dedup.has(dedupKey)) continue;
+          dedup.add(dedupKey);
+          discoveredCandidates.push(candidate);
+        }
+      }
+    }
+    const allDirectCandidates = useQueuedOnly
+      ? []
+      : [...directCandidates, ...discoveredCandidates];
 
     const results = [];
     let sentCount = 0;
@@ -350,7 +418,7 @@ export async function POST(request) {
         queueId: row.id,
         candidate: row.payload?.candidate || {},
       }));
-      const heldDirectWorkItems = directCandidates.map(candidate => ({
+      const heldDirectWorkItems = allDirectCandidates.map(candidate => ({
         source: 'direct',
         queueId: null,
         candidate,
@@ -420,7 +488,7 @@ export async function POST(request) {
         endHour: sendEndHour,
       }) || new Date().toISOString();
 
-      for (const candidate of directCandidates) {
+      for (const candidate of allDirectCandidates) {
         const queuedCandidate = {
           firstName: asText(candidate.firstName),
           lastName: asText(candidate.lastName),
@@ -523,7 +591,7 @@ export async function POST(request) {
       candidate: row.payload?.candidate || {},
       queuedOptions: row.payload?.options || {},
     }));
-    const directWorkItems = directCandidates.map(candidate => ({
+    const directWorkItems = allDirectCandidates.map(candidate => ({
       source: 'direct',
       queueId: null,
       candidate,
@@ -534,7 +602,7 @@ export async function POST(request) {
       : [...directWorkItems, ...queuedCandidates];
 
     if (workItems.length === 0) {
-      if (directCandidates.length === 0 && queuedCandidates.length === 0) {
+      if (allDirectCandidates.length === 0 && queuedCandidates.length === 0) {
         return NextResponse.json({
           ok: true,
           dryRun,
@@ -927,6 +995,17 @@ export async function POST(request) {
           reminderSentAt: offerType === 'reminder' ? nowIso : pending?.reminderSentAt || null,
         };
         await saveSession(session);
+        await logSmsChatMessages([{
+          sessionId: session.id,
+          timestamp: nowIso,
+          direction: 'outbound',
+          phone: profilePhone,
+          memberName: fullName || profile?.name || null,
+          location: profile?.locationName || candidate?.locationName || null,
+          content: offerMessage,
+          offerType: selectedOffer.offerKind || 'duration',
+          outcome: offerType === 'reminder' ? 'reminder_sent' : 'initial_sent',
+        }]);
         sentCount += 1;
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },

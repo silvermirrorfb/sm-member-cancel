@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockResolveBoulevardLocationInput = vi.fn();
+const mockGetBoulevardAuthContext = vi.fn();
+const mockScanAppointments = vi.fn();
 const mockCreateSession = vi.fn();
 const mockGetSession = vi.fn();
 const mockSaveSession = vi.fn();
@@ -19,12 +21,15 @@ const mockEnqueueOutboundCandidate = vi.fn();
 const mockPopDueCandidates = vi.fn();
 const mockGetOutboundQueueSnapshot = vi.fn();
 const mockCheckKlaviyoSmsOptIn = vi.fn();
+const mockLogSmsChatMessages = vi.fn();
 
 vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
   formatProfileForPrompt: (...args) => mockFormatProfileForPrompt(...args),
   resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
+  getBoulevardAuthContext: (...args) => mockGetBoulevardAuthContext(...args),
+  scanAppointments: (...args) => mockScanAppointments(...args),
 }));
 
 vi.mock('../src/lib/sessions.js', () => ({
@@ -59,6 +64,10 @@ vi.mock('../src/lib/sms-outbound-queue.js', () => ({
 
 vi.mock('../src/lib/klaviyo.js', () => ({
   checkKlaviyoSmsOptIn: (...args) => mockCheckKlaviyoSmsOptIn(...args),
+}));
+
+vi.mock('../src/lib/notify.js', () => ({
+  logSmsChatMessages: (...args) => mockLogSmsChatMessages(...args),
 }));
 
 import { POST } from '../src/app/api/sms/automation/pre-appointment/route.js';
@@ -98,6 +107,13 @@ describe('sms automation route', () => {
       consent: 'SUBSCRIBED',
       canReceiveSmsMarketing: true,
     });
+    mockGetBoulevardAuthContext.mockReturnValue({
+      apiUrl: 'https://dashboard.boulevard.io/api/2020-01/admin',
+      headers: { Authorization: 'Basic test' },
+      businessId: 'biz',
+    });
+    mockScanAppointments.mockResolvedValue({ appointments: [] });
+    mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
   });
 
   it('queues candidates outside send window before any lookups', async () => {
