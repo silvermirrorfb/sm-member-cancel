@@ -74,7 +74,7 @@ async function fetchBoulevardGraphQL(auth, query, variables) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${auth.apiUrl}/graphql`, {
+    const response = await fetch(`${auth.apiUrl}`, {
       method: 'POST',
       headers: auth.headers,
       body: JSON.stringify({ query, variables }),
