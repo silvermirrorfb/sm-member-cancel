@@ -4,6 +4,10 @@
     {
       "path": "/api/cron/sms-upgrade-scan",
       "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/sms-registry-seed",
+      "schedule": "0 10 * * *"
     }
   ]
 }

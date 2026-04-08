@@ -1,43 +1,16 @@
-export const maxDuration = 300;
+export const maxDuration = 60;
+
 import { NextResponse } from 'next/server';
 import {
   canonicalizeBoulevardLocationId,
-  getBoulevardAuthContext,
-  normalizePhone,
   resolveBoulevardLocationInput,
 } from '../../../../lib/boulevard';
-import { getNextWindowStartIso, isWithinSendWindow } from '../../../../lib/sms-window';
+import { getRegisteredMembers, getRegistryCounts } from '../../../../lib/sms-member-registry';
+import { isWithinSendWindow, getNextWindowStartIso } from '../../../../lib/sms-window';
 
-const PAGE_SIZE = Number(process.env.SMS_CRON_PAGE_SIZE || 20);
-const MAX_PAGES = Number(process.env.SMS_CRON_MAX_PAGES || 5);
 const SEND_TIMEZONE = process.env.SMS_SEND_TIMEZONE || 'America/New_York';
 const SEND_START_HOUR = Number(process.env.SMS_CRON_SEND_START_HOUR || 9);
 const SEND_END_HOUR = Number(process.env.SMS_CRON_SEND_END_HOUR || 19);
-
-const CLIENTS_QUERY = `
-  query SmsCronClients($first: Int!, $after: String) {
-    clients(first: $first, after: $after) {
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      edges {
-        node {
-          id
-          firstName
-          lastName
-          email
-          mobilePhone
-          active
-          primaryLocation {
-            id
-            name
-          }
-        }
-      }
-    }
-  }
-`;
 
 function isCronAuthorized(request) {
   const secret = String(process.env.CRON_SECRET || '').trim();
@@ -57,58 +30,14 @@ function parseEnabledFlag() {
 
 function parseTargetLocationIds() {
   const raw = String(process.env.SMS_CRON_LOCATIONS || '').trim();
-  if (!raw) return new Set();
-  return new Set(
-    raw
-      .split(',')
-      .map(entry => {
-        const resolved = resolveBoulevardLocationInput(entry);
-        return resolved.canonicalId || resolved.locationId;
-      })
-      .filter(Boolean)
-      .map(id => canonicalizeBoulevardLocationId(id))
-      .filter(Boolean),
-  );
-}
-
-async function fetchBoulevardGraphQL(auth, query, variables) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const response = await fetch(`${auth.apiUrl}`, {
-      method: 'POST',
-      headers: auth.headers,
-      body: JSON.stringify({ query, variables }),
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      return { error: `Boulevard HTTP ${response.status}`, payload };
-    }
-    if (payload?.errors?.length) {
-      return { error: 'Boulevard GraphQL errors', payload };
-    }
-    return { data: payload?.data || null };
-  } catch (error) {
-    return { error: error?.message || 'Boulevard request failed' };
-  } finally {
-    clearTimeout(timeout);
+  if (!raw) return new Map();
+  const result = new Map();
+  for (const entry of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+    const resolved = resolveBoulevardLocationInput(entry);
+    const canonId = resolved.canonicalId || canonicalizeBoulevardLocationId(resolved.locationId || '');
+    if (canonId) result.set(canonId, resolved.locationName || entry);
   }
-}
-
-function toCandidate(node) {
-  const phone = normalizePhone(node?.mobilePhone || '');
-  if (!phone || phone.length < 11) return null;
-  return {
-    clientId: String(node?.id || ''),
-    firstName: String(node?.firstName || '').trim(),
-    lastName: String(node?.lastName || '').trim(),
-    email: String(node?.email || '').trim().toLowerCase(),
-    phone,
-    locationId: String(node?.primaryLocation?.id || '').trim(),
-    locationName: String(node?.primaryLocation?.name || '').trim(),
-  };
+  return result;
 }
 
 export async function GET(request) {
@@ -138,87 +67,78 @@ export async function GET(request) {
     });
   }
 
-  const auth = getBoulevardAuthContext();
-  if (!auth) {
-    return NextResponse.json({ error: 'Boulevard auth is not configured.' }, { status: 500 });
-  }
-
-  const targetLocationIds = parseTargetLocationIds();
-  if (targetLocationIds.size === 0) {
+  const targetLocationMap = parseTargetLocationIds();
+  if (targetLocationMap.size === 0) {
     return NextResponse.json({ error: 'SMS_CRON_LOCATIONS is empty or invalid.' }, { status: 400 });
   }
 
-  const candidates = [];
-  let after = null;
-  let pageCount = 0;
-  let scannedClients = 0;
+  const targetLocationIds = [...targetLocationMap.keys()];
 
-  while (pageCount < MAX_PAGES) {
-    pageCount += 1;
-    const result = await fetchBoulevardGraphQL(auth, CLIENTS_QUERY, {
-      first: PAGE_SIZE,
-      after,
+  // Read from Redis registry (instant)
+  const registryCounts = await getRegistryCounts(targetLocationIds);
+  const registeredMembers = await getRegisteredMembers(targetLocationIds);
+
+  if (registeredMembers.length === 0) {
+    return NextResponse.json({
+      ok: true,
+      skipped: 'registry_empty',
+      registryCounts,
+      hint: 'Run /api/cron/sms-registry-seed to populate the registry from Boulevard.',
     });
-    if (result.error) {
-      return NextResponse.json({
-        error: 'Failed while scanning Boulevard clients.',
-        details: result.error,
-        pageCount,
-      }, { status: 502 });
-    }
-
-    const connection = result.data?.clients;
-    const edges = Array.isArray(connection?.edges) ? connection.edges : [];
-    scannedClients += edges.length;
-
-    for (const edge of edges) {
-      const node = edge?.node;
-      if (!node?.active) continue;
-      const locationCanonicalId = canonicalizeBoulevardLocationId(node?.primaryLocation?.id || '');
-      if (!locationCanonicalId || !targetLocationIds.has(locationCanonicalId)) continue;
-      const candidate = toCandidate(node);
-      if (!candidate) continue;
-      candidates.push(candidate);
-    }
-
-    if (!connection?.pageInfo?.hasNextPage) break;
-    after = connection?.pageInfo?.endCursor || null;
-    if (!after) break;
   }
 
+  const candidates = registeredMembers.map(m => ({
+    clientId: m.clientId || '',
+    firstName: m.firstName || '',
+    lastName: m.lastName || '',
+    email: m.email || '',
+    phone: m.phone || '',
+    locationName: m.locationName || '',
+  }));
+
+  // Call existing pre-appointment endpoint internally
   const endpoint = new URL('/api/sms/automation/pre-appointment', request.url);
   const automationToken = String(process.env.SMS_AUTOMATION_TOKEN || '').trim();
-  const automationResponse = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(automationToken ? { 'x-automation-token': automationToken } : {}),
-    },
-    body: JSON.stringify({
-      dryRun: false,
-      candidates,
-      trigger: 'vercel-cron-sms-upgrade-scan',
-      now: new Date().toISOString(),
-    }),
-    cache: 'no-store',
-  });
+  let automationPayload = {};
 
-  const automationPayload = await automationResponse.json().catch(() => ({}));
-  if (!automationResponse.ok) {
+  try {
+    const automationResponse = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(automationToken ? { 'x-automation-token': automationToken } : {}),
+      },
+      body: JSON.stringify({
+        dryRun: false,
+        candidates,
+        trigger: 'vercel-cron-sms-upgrade-scan',
+        now: new Date().toISOString(),
+      }),
+      cache: 'no-store',
+    });
+    automationPayload = await automationResponse.json().catch(() => ({}));
+
+    if (!automationResponse.ok) {
+      return NextResponse.json({
+        error: 'pre-appointment automation failed',
+        status: automationResponse.status,
+        candidateCount: candidates.length,
+        registryCounts,
+        automationPayload,
+      }, { status: 502 });
+    }
+  } catch (err) {
     return NextResponse.json({
-      error: 'pre-appointment automation invocation failed',
-      status: automationResponse.status,
-      scannedClients,
+      error: `pre-appointment fetch failed: ${err.message}`,
       candidateCount: candidates.length,
-      automationPayload,
+      registryCounts,
     }, { status: 502 });
   }
 
   return NextResponse.json({
     ok: true,
-    scannedClients,
+    registryCounts,
     candidateCount: candidates.length,
-    pageCount,
     automationPayload,
   });
 }
