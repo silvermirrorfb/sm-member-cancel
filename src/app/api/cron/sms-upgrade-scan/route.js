@@ -87,7 +87,7 @@ export async function GET(request) {
     });
   }
 
-  const candidates = registeredMembers.slice(0, 10).map(m => ({
+  const candidates = registeredMembers.slice(0, 50).map(m => ({
     clientId: m.clientId || '',
     firstName: m.firstName || '',
     lastName: m.lastName || '',
