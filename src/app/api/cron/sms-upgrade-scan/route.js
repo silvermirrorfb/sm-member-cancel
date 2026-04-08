@@ -87,6 +87,12 @@ export async function GET(request) {
     });
   }
 
+  // Shuffle so each cron run checks different guests
+  for (let i = registeredMembers.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [registeredMembers[i], registeredMembers[j]] = [registeredMembers[j], registeredMembers[i]];
+  }
+
   const candidates = registeredMembers.slice(0, 50).map(m => ({
     clientId: m.clientId || '',
     firstName: m.firstName || '',
