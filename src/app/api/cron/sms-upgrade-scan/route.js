@@ -115,7 +115,7 @@ export async function GET(request) {
         ...(automationToken ? { 'x-automation-token': automationToken } : {}),
       },
       body: JSON.stringify({
-        dryRun: false,
+        dryRun: false, windowHours: 24,
         candidates,
         trigger: 'vercel-cron-sms-upgrade-scan',
         now: new Date().toISOString(),
