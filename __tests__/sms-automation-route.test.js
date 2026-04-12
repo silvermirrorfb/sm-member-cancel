@@ -669,7 +669,8 @@ describe('sms automation route', () => {
     expect(body.results[0].addOnCode).toBe('antioxidant_peel');
     expect(body.results[0].message).toContain('Antioxidant Peel');
     expect(body.results[0].message).toContain('$50');
-    expect(body.results[0].message).toContain('members save 20%');
+    expect(body.results[0].message).not.toContain('members save 20%');
+    expect(body.results[0].message).toContain('Reply YES to add it or NO to skip.');
   });
 
   it('uses the refined add-on copy for Lip Plump and Scrub', async () => {

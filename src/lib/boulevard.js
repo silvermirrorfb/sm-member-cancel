@@ -4164,7 +4164,7 @@ function formatProfileForPrompt(profile) {
     `Membership Tier: ${profile.tier ? `${profile.tier}-Minute (known)` : 'UNKNOWN — do not state tier'}`,
     `Monthly Rate: ${isFiniteNumber(profile.monthlyRate) && profile.monthlyRate > 0 ? `$${profile.monthlyRate}/month` : 'UNKNOWN — do not state monthly rate'}`,
     `Member Since: ${profile.memberSince || 'UNKNOWN — do not state join date/tenure'}`,
-    `Tenure: ${isFiniteNumber(profile.tenureMonths) ? `${profile.tenureMonths} months` : 'UNKNOWN — do not state tenure'}`,
+    `Tenure: ${isFiniteNumber(profile.tenureMonths) ? (profile.tenureMonths === 0 ? 'Less than 1 month (just joined)' : `${profile.tenureMonths} months`) : 'UNKNOWN — do not state tenure'}`,
     `Next Charge Date: ${profile.nextChargeDate || 'UNKNOWN'}`,
     `Account Status: ${profile.accountStatus || 'UNKNOWN'}`,
     `Appointment Count: ${isFiniteNumber(profile.appointmentCount) ? profile.appointmentCount : 'UNKNOWN'}`,

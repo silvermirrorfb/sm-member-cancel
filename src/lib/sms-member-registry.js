@@ -67,6 +67,37 @@ async function removeMember(canonicalLocationId, clientId) {
   } catch (e) { return false; }
 }
 
+async function removeMemberByPhone(phone) {
+  const redis = getRedis();
+  if (!redis || !phone) return false;
+  const normalizedPhone = String(phone).replace(/\D/g, '');
+  if (normalizedPhone.length < 10) return false;
+
+  let cursor = '0';
+  let removed = 0;
+  do {
+    const [nextCursor, keys] = await redis.scan(cursor, { match: `${REGISTRY_PREFIX}*`, count: 100 });
+    cursor = nextCursor;
+    for (const key of keys) {
+      const hash = await redis.hgetall(key);
+      if (!hash || typeof hash !== 'object') continue;
+      for (const [clientId, raw] of Object.entries(hash)) {
+        try {
+          const member = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          const memberPhone = String(member.phone || '').replace(/\D/g, '');
+          if (memberPhone && (memberPhone === normalizedPhone || memberPhone.endsWith(normalizedPhone) || normalizedPhone.endsWith(memberPhone))) {
+            await redis.hdel(key, clientId);
+            removed += 1;
+          }
+        } catch (e) {}
+      }
+    }
+  } while (cursor !== '0' && cursor !== 0);
+
+  console.log(`[sms-registry] Removed ${removed} entries for phone ${normalizedPhone}`);
+  return removed > 0;
+}
+
 async function getRegistryCounts(canonicalLocationIds) {
   const redis = getRedis();
   if (!redis) return {};
@@ -82,6 +113,7 @@ export {
   getRegisteredMembers,
   registerMember,
   removeMember,
+  removeMemberByPhone,
   getRegistryCounts,
   REGISTRY_PREFIX,
 };

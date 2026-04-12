@@ -1,4 +1,5 @@
 export const maxDuration = 300;
+import { Redis } from '@upstash/redis';
 import { NextResponse } from 'next/server';
 import { createSession, getSession, saveSession } from '../../../../../lib/sessions';
 import { buildSystemPromptWithProfile } from '../../../../../lib/claude';
@@ -68,6 +69,20 @@ const ADDON_CODE_ALIASES = {
   lip_plump_and_scrub: 'lip_plump_and_scrub',
 };
 
+let cachedRedis = null;
+let cachedRedisSignature = '';
+
+function getRedis() {
+  const url = String(process.env.UPSTASH_REDIS_REST_URL || '').trim();
+  const token = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  if (!url || !token) return null;
+  const signature = `${url}|${token}`;
+  if (cachedRedis && cachedRedisSignature === signature) return cachedRedis;
+  cachedRedis = new Redis({ url, token });
+  cachedRedisSignature = signature;
+  return cachedRedis;
+}
+
 function isAuthorized(request) {
   const configured = String(process.env.SMS_AUTOMATION_TOKEN || '').trim();
   if (!configured) return process.env.NODE_ENV !== 'production';
@@ -99,6 +114,14 @@ function normalizeOfferType(value) {
   if (raw === 'addon') return 'addon';
   if (raw === 'auto') return 'auto';
   return 'auto';
+}
+
+function normalizeCooldownPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.startsWith('1') && digits.length === 11) return `+${digits}`;
+  return `+${digits}`;
 }
 
 function normalizeAddonCode(value) {
@@ -189,7 +212,12 @@ function buildAddonOfferMessage(offer, options = {}) {
   if (reminder) {
     return `${greeting} still time to add ${offer.addOnName} to today's facial. Reply YES or NO.`;
   }
-  return `${greeting} we can add ${offer.addOnName} to your facial today for $${price} (members save 20%). Reply YES to add it or NO to skip.`;
+  const isMember = options.isMember === true;
+  if (isMember) {
+    const memberPrice = Math.round(price * 0.8);
+    return `${greeting} we can add ${offer.addOnName} to your facial today for just $${memberPrice} (your member price — $${price - memberPrice} off). Reply YES to add it or NO to skip.`;
+  }
+  return `${greeting} we can add ${offer.addOnName} to your facial today for $${price}. Reply YES to add it or NO to skip.`;
 }
 
 function buildOutboundOfferMessage(offer, options = {}) {
@@ -315,6 +343,7 @@ export async function POST(request) {
 
     const body = await request.json().catch(() => ({}));
     const dryRun = body.dryRun !== false;
+    const redis = getRedis();
     const now = asText(body.now) || null;
     const runNow = now || new Date().toISOString();
     const windowHours = asInt(body.windowHours, null);
@@ -907,10 +936,32 @@ export async function POST(request) {
         continue;
       }
 
+      const cooldownKey = appointmentId && profilePhone
+        ? `sms-cooldown:${normalizeCooldownPhone(profilePhone)}:${appointmentId}`
+        : null;
+      if (offerType === 'initial' && cooldownKey && redis) {
+        const existing = await redis.get(cooldownKey);
+        if (existing) {
+          results.push({
+            candidate: { firstName, lastName, email: email || null, phone: phone || null },
+            profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+            status: 'skipped',
+            reason: 'cooldown_phone_appointment',
+            sessionId: session.id,
+            appointmentId,
+            matchedContact,
+            source: work.source,
+            queueId: work.queueId,
+          });
+          continue;
+        }
+      }
+
       const offerMessage = buildOutboundOfferMessage(selectedOffer, {
         reminder: offerType === 'reminder',
         timeZone: sendTimezone,
         firstName,
+        isMember: selectedOffer.isMember === true,
       });
       if (!offerMessage) {
         results.push({
@@ -980,6 +1031,9 @@ export async function POST(request) {
         if (appointmentId) {
           markUpgradeOfferEvent(profilePhone, appointmentId, offerType === 'reminder' ? 'reminder_sent' : 'initial_sent');
           if (offerType === 'initial') markUpsellInitialSent(profilePhone, appointmentId);
+        }
+        if (offerType === 'initial' && cooldownKey && redis) {
+          await redis.set(cooldownKey, '1', { ex: 21600 });
         }
         const nowIso = new Date().toISOString();
         session.pendingUpgradeOffer = {

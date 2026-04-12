@@ -883,6 +883,7 @@ const REASON_ALERT_ROUTING = {
   voucher_buildup:       ['memberships@silvermirror.com'],
   cost_overwhelming:     ['memberships@silvermirror.com'],
   lost_job:              ['memberships@silvermirror.com'],
+  accidental_signup:     ['memberships@silvermirror.com'],
   medical:               ['memberships@silvermirror.com'],
   inconsistent:          ['memberships@silvermirror.com'],
   parking:               ['memberships@silvermirror.com'],
@@ -906,6 +907,7 @@ const REASON_FRIENDLY_LABELS = {
   voucher_buildup:       'has accumulated unused credits and feels overwhelmed by the buildup',
   cost_overwhelming:     'is finding the monthly cost too much for their budget right now',
   lost_job:              'lost their job and needs to cut expenses',
+  accidental_signup:     'signed up by accident and wants to cancel',
   medical:               'has a medical reason and was advised to pause treatments',
   inconsistent:          'has had inconsistent experiences — some visits were great, others weren\'t',
   parking:               'is having trouble with parking at their location',
@@ -932,6 +934,7 @@ function matchReasonToCategory(reasonPrimary) {
   if (/\bvoucher\b/.test(r) || /\bcredit.*(build|pile|accumulat)/.test(r)) return 'voucher_buildup';
   if (/\bcost\b/.test(r) || /\bexpens/.test(r) || /\bafford/.test(r) || /\bbudget\b/.test(r) || /\bpric/.test(r) || /\btoo much\b/.test(r) || /\bfinancial\b/.test(r) || /\bmoney\b/.test(r) || /\bcan'?t afford\b/.test(r) || /\bcheap\b/.test(r)) return 'cost_overwhelming';
   if (/\b(lost|losing) (my |a )?job\b/.test(r) || /\bjob loss\b/.test(r) || /\bunemploy/.test(r) || /\blaid off\b/.test(r)) return 'lost_job';
+  if (/\baccident/.test(r) || /\bmistake\b/.test(r) || /\bdidn.t mean/.test(r) || /\bsigned up (by|on) (accident|mistake)/.test(r) || /\bunintentional/.test(r)) return 'accidental_signup';
   if (/\bmedical\b/.test(r) || /\bhealth\b/.test(r) || /\bsurgery\b/.test(r) || /\bpregnant\b/.test(r) || /\bpregnancy\b/.test(r)) return 'medical';
   if (/\binconsisten/.test(r) || /\buneven/.test(r) || /\bhit.or.miss\b/.test(r)) return 'inconsistent';
   if (/\bparking\b/.test(r) || /\binconveni/.test(r) || /\blocation\b/.test(r)) return 'parking';
