@@ -1,3 +1,4 @@
+export const maxDuration = 300;
 import { NextResponse } from 'next/server';
 import { createSession, getSession, saveSession } from '../../../../../lib/sessions';
 import { buildSystemPromptWithProfile } from '../../../../../lib/claude';
