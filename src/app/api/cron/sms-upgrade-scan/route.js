@@ -1,4 +1,4 @@
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 import { NextResponse } from 'next/server';
 import {
@@ -12,6 +12,8 @@ const SEND_TIMEZONE = process.env.SMS_SEND_TIMEZONE || 'America/New_York';
 const SEND_START_HOUR = Number(process.env.SMS_CRON_SEND_START_HOUR || 9);
 const SEND_END_HOUR = Number(process.env.SMS_CRON_SEND_END_HOUR || 19);
 const CANDIDATES_PER_RUN = Number(process.env.SMS_CRON_BATCH_SIZE || 50);
+const PARALLEL_BATCH = 10;
+const BATCH_DELAY_MS = 2000;
 
 function isCronAuthorized(request) {
   const secret = String(process.env.CRON_SECRET || '').trim();
@@ -39,6 +41,40 @@ function parseTargetLocationIds() {
     if (canonId) result.set(canonId, resolved.locationName || entry);
   }
   return result;
+}
+
+function checkOneCandidate(candidate, endpoint, automationToken, now) {
+  return fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(automationToken ? { 'x-automation-token': automationToken } : {}),
+    },
+    body: JSON.stringify({
+      dryRun: false,
+      windowHours: 24,
+      candidates: [candidate],
+      trigger: 'vercel-cron-sms-upgrade-scan',
+      now,
+    }),
+    cache: 'no-store',
+  })
+    .then(res => res.json().catch(() => ({})))
+    .then(payload => {
+      const r = payload?.results?.[0] || {};
+      return {
+        candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
+        status: r.status || 'unknown',
+        reason: r.reason || r.offerKind || null,
+        ok: true,
+      };
+    })
+    .catch(err => ({
+      candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
+      status: 'error',
+      reason: err.message,
+      ok: false,
+    }));
 }
 
 export async function GET(request) {
@@ -75,7 +111,6 @@ export async function GET(request) {
 
   const targetLocationIds = [...targetLocationMap.keys()];
 
-  // Read from Redis registry (instant)
   const registryCounts = await getRegistryCounts(targetLocationIds);
   const registeredMembers = await getRegisteredMembers(targetLocationIds);
 
@@ -88,7 +123,7 @@ export async function GET(request) {
     });
   }
 
-  // Shuffle so each cron run checks different guests
+  // Fisher-Yates shuffle
   for (let i = registeredMembers.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [registeredMembers[i], registeredMembers[j]] = [registeredMembers[j], registeredMembers[i]];
@@ -103,65 +138,42 @@ export async function GET(request) {
     locationName: m.locationName || '',
   }));
 
-  // Call pre-appointment ONCE PER CANDIDATE in parallel.
-  // Each fetch spawns a separate serverless function invocation on Vercel,
-  // so 50 candidates run concurrently instead of sequentially.
   const endpoint = new URL('/api/sms/automation/pre-appointment', request.url);
   const automationToken = String(process.env.SMS_AUTOMATION_TOKEN || '').trim();
   const now = new Date().toISOString();
 
-  const settled = await Promise.allSettled(
-    candidates.map(candidate =>
-      fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(automationToken ? { 'x-automation-token': automationToken } : {}),
-        },
-        body: JSON.stringify({
-          dryRun: false,
-          windowHours: 24,
-          candidates: [candidate],
-          trigger: 'vercel-cron-sms-upgrade-scan',
-          now,
-        }),
-        cache: 'no-store',
-      })
-        .then(res => res.json().catch(() => ({})))
-        .then(payload => {
-          const r = payload?.results?.[0] || {};
-          return {
-            candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
-            status: r.status || 'unknown',
-            reason: r.reason || r.offerKind || null,
-            ok: true,
-          };
-        })
-        .catch(err => ({
-          candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
-          status: 'error',
-          reason: err.message,
-          ok: false,
-        }))
-    )
-  );
+  // Process in batches of 10 to avoid Boulevard rate limiting
+  const allResults = [];
+  for (let i = 0; i < candidates.length; i += PARALLEL_BATCH) {
+    const batch = candidates.slice(i, i + PARALLEL_BATCH);
+    const batchSettled = await Promise.allSettled(
+      batch.map(c => checkOneCandidate(c, endpoint, automationToken, now))
+    );
+    for (const r of batchSettled) {
+      allResults.push(
+        r.status === 'fulfilled'
+          ? r.value
+          : { candidate: '?', status: 'error', reason: r.reason?.message || 'rejected', ok: false }
+      );
+    }
+    // Pause between batches to let Boulevard recover
+    if (i + PARALLEL_BATCH < candidates.length) {
+      await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+    }
+  }
 
-  const summary = { total: settled.length, sent: 0, skipped: 0, errors: 0 };
-  const results = settled.map(r => {
-    const val = r.status === 'fulfilled'
-      ? r.value
-      : { candidate: '?', status: 'error', reason: r.reason?.message || 'rejected', ok: false };
+  const summary = { total: allResults.length, sent: 0, skipped: 0, errors: 0 };
+  for (const val of allResults) {
     if (val.status === 'sent') summary.sent++;
     else if (val.status === 'error' || !val.ok) summary.errors++;
     else summary.skipped++;
-    return val;
-  });
+  }
 
   return NextResponse.json({
     ok: true,
     registryCounts,
     candidateCount: candidates.length,
     summary,
-    results,
+    results: allResults,
   });
 }
