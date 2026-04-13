@@ -93,7 +93,7 @@ export async function GET(request) {
     [registeredMembers[i], registeredMembers[j]] = [registeredMembers[j], registeredMembers[i]];
   }
 
-  const candidates = registeredMembers.slice(0, 20).map(m => ({
+  const candidates = registeredMembers.slice(0, 5).map(m => ({
     clientId: m.clientId || '',
     firstName: m.firstName || '',
     lastName: m.lastName || '',
