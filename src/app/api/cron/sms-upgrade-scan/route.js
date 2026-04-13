@@ -1,4 +1,4 @@
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 import { NextResponse } from 'next/server';
 import {
@@ -11,6 +11,7 @@ import { isWithinSendWindow, getNextWindowStartIso } from '../../../../lib/sms-w
 const SEND_TIMEZONE = process.env.SMS_SEND_TIMEZONE || 'America/New_York';
 const SEND_START_HOUR = Number(process.env.SMS_CRON_SEND_START_HOUR || 9);
 const SEND_END_HOUR = Number(process.env.SMS_CRON_SEND_END_HOUR || 19);
+const CANDIDATES_PER_RUN = Number(process.env.SMS_CRON_BATCH_SIZE || 50);
 
 function isCronAuthorized(request) {
   const secret = String(process.env.CRON_SECRET || '').trim();
@@ -93,7 +94,7 @@ export async function GET(request) {
     [registeredMembers[i], registeredMembers[j]] = [registeredMembers[j], registeredMembers[i]];
   }
 
-  const candidates = registeredMembers.slice(0, 5).map(m => ({
+  const candidates = registeredMembers.slice(0, CANDIDATES_PER_RUN).map(m => ({
     clientId: m.clientId || '',
     firstName: m.firstName || '',
     lastName: m.lastName || '',
@@ -102,49 +103,65 @@ export async function GET(request) {
     locationName: m.locationName || '',
   }));
 
-  // Call existing pre-appointment endpoint internally
+  // Call pre-appointment ONCE PER CANDIDATE in parallel.
+  // Each fetch spawns a separate serverless function invocation on Vercel,
+  // so 50 candidates run concurrently instead of sequentially.
   const endpoint = new URL('/api/sms/automation/pre-appointment', request.url);
   const automationToken = String(process.env.SMS_AUTOMATION_TOKEN || '').trim();
-  let automationPayload = {};
+  const now = new Date().toISOString();
 
-  try {
-    const automationResponse = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(automationToken ? { 'x-automation-token': automationToken } : {}),
-      },
-      body: JSON.stringify({
-        dryRun: false, windowHours: 24,
-        candidates,
-        trigger: 'vercel-cron-sms-upgrade-scan',
-        now: new Date().toISOString(),
-      }),
-      cache: 'no-store',
-    });
-    automationPayload = await automationResponse.json().catch(() => ({}));
+  const settled = await Promise.allSettled(
+    candidates.map(candidate =>
+      fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(automationToken ? { 'x-automation-token': automationToken } : {}),
+        },
+        body: JSON.stringify({
+          dryRun: false,
+          windowHours: 24,
+          candidates: [candidate],
+          trigger: 'vercel-cron-sms-upgrade-scan',
+          now,
+        }),
+        cache: 'no-store',
+      })
+        .then(res => res.json().catch(() => ({})))
+        .then(payload => {
+          const r = payload?.results?.[0] || {};
+          return {
+            candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
+            status: r.status || 'unknown',
+            reason: r.reason || r.offerKind || null,
+            ok: true,
+          };
+        })
+        .catch(err => ({
+          candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
+          status: 'error',
+          reason: err.message,
+          ok: false,
+        }))
+    )
+  );
 
-    if (!automationResponse.ok) {
-      return NextResponse.json({
-        error: 'pre-appointment automation failed',
-        status: automationResponse.status,
-        candidateCount: candidates.length,
-        registryCounts,
-        automationPayload,
-      }, { status: 502 });
-    }
-  } catch (err) {
-    return NextResponse.json({
-      error: `pre-appointment fetch failed: ${err.message}`,
-      candidateCount: candidates.length,
-      registryCounts,
-    }, { status: 502 });
-  }
+  const summary = { total: settled.length, sent: 0, skipped: 0, errors: 0 };
+  const results = settled.map(r => {
+    const val = r.status === 'fulfilled'
+      ? r.value
+      : { candidate: '?', status: 'error', reason: r.reason?.message || 'rejected', ok: false };
+    if (val.status === 'sent') summary.sent++;
+    else if (val.status === 'error' || !val.ok) summary.errors++;
+    else summary.skipped++;
+    return val;
+  });
 
   return NextResponse.json({
     ok: true,
     registryCounts,
     candidateCount: candidates.length,
-    automationPayload,
+    summary,
+    results,
   });
 }
