@@ -12,8 +12,8 @@ const SEND_TIMEZONE = process.env.SMS_SEND_TIMEZONE || 'America/New_York';
 const SEND_START_HOUR = Number(process.env.SMS_CRON_SEND_START_HOUR || 9);
 const SEND_END_HOUR = Number(process.env.SMS_CRON_SEND_END_HOUR || 19);
 const CANDIDATES_PER_RUN = Number(process.env.SMS_CRON_BATCH_SIZE || 50);
-const PARALLEL_BATCH = 10;
-const BATCH_DELAY_MS = 2000;
+const PARALLEL_BATCH = 5;
+const BATCH_DELAY_MS = 5000;
 
 function isCronAuthorized(request) {
   const secret = String(process.env.CRON_SECRET || '').trim();
