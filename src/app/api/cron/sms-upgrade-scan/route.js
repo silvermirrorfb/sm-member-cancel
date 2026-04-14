@@ -1,4 +1,4 @@
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 import { NextResponse } from 'next/server';
 import {
@@ -11,7 +11,7 @@ import { isWithinSendWindow, getNextWindowStartIso } from '../../../../lib/sms-w
 const SEND_TIMEZONE = process.env.SMS_SEND_TIMEZONE || 'America/New_York';
 const SEND_START_HOUR = Number(process.env.SMS_CRON_SEND_START_HOUR || 9);
 const SEND_END_HOUR = Number(process.env.SMS_CRON_SEND_END_HOUR || 19);
-const CANDIDATES_PER_RUN = Number(process.env.SMS_CRON_BATCH_SIZE || 50);
+const CANDIDATES_PER_RUN = Number(process.env.SMS_CRON_BATCH_SIZE || 30);
 const PARALLEL_BATCH = 5;
 const BATCH_DELAY_MS = 5000;
 
