@@ -61,7 +61,7 @@ function getAnthropicClient() {
     throw new Error('ANTHROPIC_API_KEY not set');
   }
   if (cachedClient && cachedClientKey === apiKey) return cachedClient;
-  cachedClient = new Anthropic({ apiKey });
+  cachedClient = new Anthropic({ apiKey, timeout: 30000 });
   cachedClientKey = apiKey;
   return cachedClient;
 }
