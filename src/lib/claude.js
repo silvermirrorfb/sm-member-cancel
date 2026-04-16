@@ -52,16 +52,25 @@ function buildSystemPromptWithProfile(profileText) {
   return base + '\n\n<member_profile>\n' + profileText + '\n</member_profile>';
 }
 
-/**
- * Send a message to Claude and get a response.
- */
-async function sendMessage(systemPrompt, messages) {
+let cachedClient = null;
+let cachedClientKey = '';
+
+function getAnthropicClient() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error('ANTHROPIC_API_KEY not set');
   }
+  if (cachedClient && cachedClientKey === apiKey) return cachedClient;
+  cachedClient = new Anthropic({ apiKey });
+  cachedClientKey = apiKey;
+  return cachedClient;
+}
 
-  const client = new Anthropic({ apiKey });
+/**
+ * Send a message to Claude and get a response.
+ */
+async function sendMessage(systemPrompt, messages) {
+  const client = getAnthropicClient();
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
