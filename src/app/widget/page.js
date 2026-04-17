@@ -177,6 +177,8 @@ const styles = {
 
 function shouldAutoFocusInput() {
     if (typeof window === 'undefined') return false;
+    // Never autofocus when embedded in an iframe — it causes the parent page to scroll
+    try { if (window.self !== window.top) return false; } catch (e) { return false; }
     if (window.matchMedia?.('(pointer: coarse)').matches) return false;
     if (window.innerWidth <= 768) return false;
     return true;
@@ -214,9 +216,19 @@ export default function ChatWidget() {
     const messagesEndRef = useRef(null);
     const inputRef = useRef(null);
     const didInitRef = useRef(false);
+    const messagesContainerRef = useRef(null);
+    const isFirstRenderRef = useRef(true);
 
   const scrollToBottom = useCallback(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        // Use instant scroll on first render to avoid triggering parent iframe scroll
+        if (isFirstRenderRef.current) {
+          el.scrollTop = el.scrollHeight;
+          isFirstRenderRef.current = false;
+        } else {
+          el.scrollTop = el.scrollHeight;
+        }
   }, []);
 
   useEffect(() => {
@@ -267,7 +279,7 @@ export default function ChatWidget() {
 
   useEffect(() => {
         if (phase === 'chat' && inputRef.current && shouldAutoFocusInput()) {
-                inputRef.current.focus();
+                inputRef.current.focus({ preventScroll: true });
         }
   }, [phase]);
 
@@ -499,7 +511,7 @@ export default function ChatWidget() {
 </div>
 
 {/* Messages */}
-      <div style={styles.messages}>
+      <div ref={messagesContainerRef} style={styles.messages}>
       {messages.map((msg, i) => (
                   <div
                                 key={i}
