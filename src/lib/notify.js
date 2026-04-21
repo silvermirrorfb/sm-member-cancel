@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { buildMemberDraft, renderDraftForAlert, renderDraftForHtml } from './member-draft.js';
 
 const DEFAULT_SUPPORT_INCIDENT_SHEET_ID = '15Wame-TJbihEAKEnlL51rhSWRsiVpehz7RO1Gsa9s4c';
 const CHATLOG_SHEET_TITLE = 'Sheet1';
@@ -298,6 +299,8 @@ function buildSubjectLine(summary) {
 function buildEmailBody(summary, transcript) {
   const walkinSavingsText = toCurrencyCell(summary.walkin_savings) || 'N/A';
   const rateLockSavingsText = toCurrencyCell(summary.rate_lock_savings_annual, '/year') || 'Rate matches current';
+  const memberDraft = buildMemberDraft(summary);
+  const draftBlock = renderDraftForAlert(memberDraft);
 
   return `
 ======================================
@@ -343,7 +346,7 @@ ${summary.action_required}
 
 COST TO SILVER MIRROR: ${summary.cost_to_company}
 MEMBER SENTIMENT: ${summary.member_sentiment}
-
+${draftBlock}
 ======================================
 FULL TRANSCRIPT
 ======================================
@@ -436,6 +439,8 @@ function buildEmailHtml(summary, transcript) {
       <tr><td class="label">Member Sentiment</td><td>${esc(summary.member_sentiment)}</td></tr>
     </table>
   </div>
+
+  ${renderDraftForHtml(buildMemberDraft(summary))}
 
   <div class="section">
     <h3>Full Transcript</h3>
