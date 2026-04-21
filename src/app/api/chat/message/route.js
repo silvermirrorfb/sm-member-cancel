@@ -61,6 +61,7 @@ function formatMoney(value) {
 }
 
 function pluralizeMonths(months) {
+    if (months === 0) return 'less than a month';
     return `${months} month${months === 1 ? '' : 's'}`;
 }
 
@@ -383,11 +384,19 @@ function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
 
     const memberSince = formatMonthYear(profile?.memberSince);
     if (memberSince && typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
-          sentences.push(`You joined in ${memberSince}, so you've been with us about ${pluralizeMonths(profile.tenureMonths)}.`);
+          if (profile.tenureMonths === 0) {
+                  sentences.push(`You joined in ${memberSince}, so you just signed up recently.`);
+          } else {
+                  sentences.push(`You joined in ${memberSince}, so you've been with us about ${pluralizeMonths(profile.tenureMonths)}.`);
+          }
     } else if (memberSince) {
           sentences.push(`You joined in ${memberSince}.`);
     } else if (typeof profile?.tenureMonths === 'number' && Number.isFinite(profile.tenureMonths)) {
-          sentences.push(`You've been with us about ${pluralizeMonths(profile.tenureMonths)}.`);
+          if (profile.tenureMonths === 0) {
+                  sentences.push(`You just signed up recently.`);
+          } else {
+                  sentences.push(`You've been with us about ${pluralizeMonths(profile.tenureMonths)}.`);
+          }
     }
 
     const computed = profile?.computed || {};
