@@ -155,6 +155,96 @@ async function checkKlaviyoSmsOptIn(input = {}) {
   }
 }
 
+async function unsubscribeKlaviyoSms(input = {}) {
+  const config = getConfig();
+  if (!config.configured) {
+    return { ok: false, reason: 'klaviyo_not_configured' };
+  }
+
+  const selection = buildFilter(input.phone, input.email);
+  if (!selection) {
+    return { ok: false, reason: 'no_phone_or_email' };
+  }
+
+  // Find the profile first so we get the ID
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LOOKUP_TIMEOUT_MS);
+  let profileId = null;
+  try {
+    const { response, payload } = await fetchProfileByFilter(config, selection.filter);
+    if (!response.ok) {
+      return { ok: false, reason: 'lookup_failed', status: response.status };
+    }
+    const first = Array.isArray(payload?.data) ? payload.data[0] : null;
+    profileId = first?.id || null;
+    if (!profileId) {
+      // No profile exists in Klaviyo for this phone, nothing to unsubscribe.
+      // This is fine; treat as success so the STOP flow continues.
+      return { ok: true, reason: 'no_profile_found', matchedBy: selection.matchedBy };
+    }
+  } catch (err) {
+    clearTimeout(timeout);
+    return { ok: false, reason: 'lookup_error', error: String(err?.message || err) };
+  }
+  clearTimeout(timeout);
+
+  // Unsubscribe via profile-subscription-bulk-delete-jobs.
+  // This is Klaviyo's canonical endpoint for honoring an opt-out.
+  const unsubPayload = {
+    data: {
+      type: 'profile-subscription-bulk-delete-job',
+      attributes: {
+        profiles: {
+          data: [
+            {
+              type: 'profile',
+              id: profileId,
+              attributes: {
+                ...(selection.matchedBy === 'phone' ? { phone_number: selection.value } : {}),
+                ...(selection.matchedBy === 'email' ? { email: selection.value } : {}),
+                subscriptions: {
+                  ...(selection.matchedBy === 'phone'
+                    ? { sms: { marketing: { consent: 'UNSUBSCRIBED' }, transactional: { consent: 'UNSUBSCRIBED' } } }
+                    : {}),
+                  ...(selection.matchedBy === 'email'
+                    ? { email: { marketing: { consent: 'UNSUBSCRIBED' } } }
+                    : {}),
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  const controller2 = new AbortController();
+  const timeout2 = setTimeout(() => controller2.abort(), LOOKUP_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${config.baseUrl}/profile-subscription-bulk-delete-jobs/`, {
+      method: 'POST',
+      headers: {
+        ...createHeaders(config),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(unsubPayload),
+      signal: controller2.signal,
+    });
+    if (!response.ok && response.status !== 202) {
+      const text = await response.text().catch(() => '');
+      console.warn(`[klaviyo-unsub] Unsubscribe failed for profile ${profileId}:`, response.status, text.slice(0, 200));
+      return { ok: false, reason: 'unsubscribe_failed', status: response.status, profileId };
+    }
+    console.log(`[klaviyo-unsub] Unsubscribed profile ${profileId} via ${selection.matchedBy}`);
+    return { ok: true, reason: 'unsubscribed', profileId, matchedBy: selection.matchedBy };
+  } catch (err) {
+    return { ok: false, reason: 'unsubscribe_error', error: String(err?.message || err), profileId };
+  } finally {
+    clearTimeout(timeout2);
+  }
+}
+
 export {
   checkKlaviyoSmsOptIn,
+  unsubscribeKlaviyoSms,
 };

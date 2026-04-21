@@ -36,6 +36,7 @@ const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const STOP_KEYWORDS = /^\s*(stop|unsubscribe|cancel|end|quit)\s*$/i;
+const START_KEYWORDS = /^\s*(start|unstop|subscribe|yes\s+resubscribe)\s*$/i;
 const YES_NO_PENDING_MANUAL_REPLY = 'Thanks for replying YES. We received your request and our team will confirm it before your appointment.';
 const ALLOWED_ADDON_NAME_SET = new Set([
   'antioxidant peel',
@@ -329,13 +330,35 @@ export async function POST(request) {
     if (STOP_KEYWORDS.test(body)) {
       console.log(`[sms-webhook] STOP received from ${from} — opting out`);
 
+      // Remove from Redis registry so pre-appointment scan won't re-queue them
+      // AND add to the authoritative STOP set so outbound sends are blocked
+      // immediately regardless of Klaviyo propagation timing.
       try {
-        const { removeMemberByPhone } = await import('../../../../../lib/sms-member-registry');
-        if (typeof removeMemberByPhone === 'function') {
-          await removeMemberByPhone(from);
+        const registry = await import('../../../../../lib/sms-member-registry');
+        if (typeof registry.removeMemberByPhone === 'function') {
+          await registry.removeMemberByPhone(from);
+        }
+        if (typeof registry.addToStopSet === 'function') {
+          await registry.addToStopSet(from);
         }
       } catch (e) {
-        console.warn('[sms-webhook] Could not remove from registry:', e.message);
+        console.warn('[sms-webhook] Could not update registry/stop-set:', e.message);
+      }
+
+      // Propagate unsubscribe to Klaviyo so pre-appointment Klaviyo gate
+      // will also block future outbound sends. Without this, a STOP only
+      // protects inbound replies, not outbound marketing.
+      // TCPA compliance: unsubscribe must be honored across all channels.
+      try {
+        const { unsubscribeKlaviyoSms } = await import('../../../../../lib/klaviyo');
+        if (typeof unsubscribeKlaviyoSms === 'function') {
+          const result = await unsubscribeKlaviyoSms({ phone: from });
+          if (!result.ok) {
+            console.warn(`[sms-webhook] Klaviyo unsubscribe returned ${result.reason}`);
+          }
+        }
+      } catch (e) {
+        console.warn('[sms-webhook] Could not propagate unsubscribe to Klaviyo:', e.message);
       }
 
       try {
@@ -350,6 +373,33 @@ export async function POST(request) {
       } catch (e) {}
 
       const twiml = buildTwimlMessage('You have been unsubscribed and will not receive further messages from Silver Mirror. Reply START to resubscribe.');
+      return new NextResponse(twiml, {
+        status: 200,
+        headers: buildTwimlHeaders(rateLimit),
+      });
+    }
+
+    if (START_KEYWORDS.test(body)) {
+      console.log(`[sms-webhook] START received from ${from}, removing from stop set`);
+      try {
+        const { removeFromStopSet } = await import('../../../../../lib/sms-member-registry');
+        if (typeof removeFromStopSet === 'function') {
+          await removeFromStopSet(from);
+        }
+      } catch (e) {
+        console.warn('[sms-webhook] Could not remove from stop set:', e.message);
+      }
+      try {
+        await logSmsChatMessages([{
+          sessionId: `start-${Date.now()}`,
+          direction: 'inbound',
+          phone: from,
+          content: body,
+          offerType: 'resubscribe',
+          outcome: 'start_received',
+        }]);
+      } catch (e) {}
+      const twiml = buildTwimlMessage('You have been resubscribed to Silver Mirror messages. Reply STOP to unsubscribe at any time.');
       return new NextResponse(twiml, {
         status: 200,
         headers: buildTwimlHeaders(rateLimit),

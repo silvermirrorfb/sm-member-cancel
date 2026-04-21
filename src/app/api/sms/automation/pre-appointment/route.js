@@ -821,6 +821,33 @@ export async function POST(request) {
         continue;
       }
 
+      // Authoritative local STOP-set check. Runs BEFORE the Klaviyo gate
+      // because Klaviyo sync can lag by minutes and we must honor STOP
+      // immediately per TCPA. If the phone is on the stop set, skip this
+      // send no matter what Klaviyo says.
+      let onStopSet = false;
+      try {
+        const { isOnStopSet } = await import('../../../../../lib/sms-member-registry');
+        if (typeof isOnStopSet === 'function') {
+          onStopSet = await isOnStopSet(profilePhone);
+        }
+      } catch (e) {
+        // Fail open: don't block a legitimate send if Redis flaps.
+        console.warn('[pre-appointment] stop-set check error:', e.message);
+      }
+      if (onStopSet) {
+        results.push({
+          candidate: { firstName, lastName, email: email || null, phone: phone || null },
+          profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+          status: 'skipped',
+          reason: 'opted_out_stop_set',
+          matchedContact,
+          source: work.source,
+          queueId: work.queueId,
+        });
+        continue;
+      }
+
       let klaviyoGate = {
         allowed: true,
         reason: null,

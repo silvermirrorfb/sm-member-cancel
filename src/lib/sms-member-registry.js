@@ -109,6 +109,80 @@ async function getRegistryCounts(canonicalLocationIds) {
   return counts;
 }
 
+// -----------------------------------------------------------------------------
+// STOP set: phone numbers that have opted out via SMS reply.
+// This is the authoritative local suppression list. It is checked on EVERY
+// outbound send as a belt-and-suspenders safety net, independent of Klaviyo,
+// so Klaviyo propagation delay (minutes) cannot cause a send to an opted-out
+// number. TCPA compliance requires honoring STOP immediately.
+// -----------------------------------------------------------------------------
+
+const STOP_SET_KEY = 'sms-stop-set';
+
+function normalizeStopPhone(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length < 10) return null;
+  // Match the registry's storage format: E.164 without leading 1 for US
+  // We store multiple forms to make lookups forgiving.
+  return digits;
+}
+
+async function addToStopSet(phone) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const norm = normalizeStopPhone(phone);
+  if (!norm) return false;
+  // Store last 10 digits (US) AND the full normalized string to handle
+  // variations like +1 prefix, formatting, etc.
+  const entries = new Set([norm, norm.slice(-10)]);
+  try {
+    for (const e of entries) {
+      await redis.sadd(STOP_SET_KEY, e);
+    }
+    console.log(`[stop-set] Added ${norm.slice(-10)} to suppression set`);
+    return true;
+  } catch (e) {
+    console.warn('[stop-set] Failed to add:', e.message);
+    return false;
+  }
+}
+
+async function isOnStopSet(phone) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const norm = normalizeStopPhone(phone);
+  if (!norm) return false;
+  const candidates = [norm, norm.slice(-10)];
+  try {
+    for (const c of candidates) {
+      const hit = await redis.sismember(STOP_SET_KEY, c);
+      if (hit) return true;
+    }
+    return false;
+  } catch (e) {
+    console.warn('[stop-set] Failed to check:', e.message);
+    // Fail closed: on Redis error, treat as NOT on stop set (sender will
+    // still have the Klaviyo check as backup). Returning true here would
+    // block legitimate sends if Redis flaps.
+    return false;
+  }
+}
+
+async function removeFromStopSet(phone) {
+  // Used for START reply handling, allows a user to resubscribe
+  const redis = getRedis();
+  if (!redis) return false;
+  const norm = normalizeStopPhone(phone);
+  if (!norm) return false;
+  try {
+    await redis.srem(STOP_SET_KEY, norm);
+    await redis.srem(STOP_SET_KEY, norm.slice(-10));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 export {
   getRegisteredMembers,
   registerMember,
@@ -116,4 +190,8 @@ export {
   removeMemberByPhone,
   getRegistryCounts,
   REGISTRY_PREFIX,
+  addToStopSet,
+  isOnStopSet,
+  removeFromStopSet,
+  STOP_SET_KEY,
 };
