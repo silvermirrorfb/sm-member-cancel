@@ -575,6 +575,7 @@ export default function ChatWidget() {
               onChange={(e) => setInputVal(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Type your message..."
+              aria-label="Type your message"
               style={styles.input}
               rows={1}
               disabled={loading}
