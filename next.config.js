@@ -33,6 +33,13 @@ const nextConfig = {
         ],
       },
       {
+        // Short TTL so loader updates propagate quickly
+        source: '/embed.js',
+        headers: [
+          { key: 'Cache-Control', value: 'public, max-age=300, s-maxage=300, stale-while-revalidate=3600' },
+        ],
+      },
+      {
         // CORS for API routes
         source: '/api/:path*',
         headers: [
