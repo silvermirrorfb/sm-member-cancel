@@ -213,7 +213,6 @@ export default function ChatWidget() {
     const [messages, setMessages] = useState([]);
     const [inputVal, setInputVal] = useState('');
     const [loading, setLoading] = useState(false);
-    const messagesEndRef = useRef(null);
     const inputRef = useRef(null);
     const didInitRef = useRef(false);
     const messagesContainerRef = useRef(null);
@@ -527,7 +526,6 @@ export default function ChatWidget() {
             <TypingDots />
   </div>
          )}
-        <div ref={messagesEndRef} />
           </div>
 
 {/* Input or Ended */}
