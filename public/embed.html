@@ -17,7 +17,7 @@
     height: 60px;
     border-radius: 50%;
     background: #ffffff;
-    border: 2px solid #e2e8f0;
+    border: none;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
     cursor: pointer;
     z-index: 99999;
@@ -32,8 +32,8 @@
     box-shadow: 0 6px 28px rgba(0, 0, 0, 0.18);
   }
   #sm-chat-icon img {
-    width: 44px;
-    height: 44px;
+    width: 60px;
+    height: 60px;
     border-radius: 50%;
     object-fit: cover;
   }
@@ -124,8 +124,8 @@
       height: 54px;
     }
     #sm-chat-icon img {
-      width: 38px;
-      height: 38px;
+      width: 54px;
+      height: 54px;
     }
     #sm-chat-popup {
       bottom: 0;
@@ -151,7 +151,7 @@
 
 <!-- Floating Icon -->
 <div id="sm-chat-icon" onclick="smToggleChat()" aria-label="Open chat" role="button" tabindex="0">
-  <img src="WIDGET_ORIGIN/chat-launcher-icon.svg" alt="Silver Mirror" />
+  <img src="WIDGET_ORIGIN/chat-launcher-icon.png" alt="Silver Mirror" />
 </div>
 
 <!-- Chat Popup -->
@@ -169,7 +169,7 @@
   // Update logo src
   var icon = document.getElementById('sm-chat-icon');
   var img = icon.querySelector('img');
-  img.src = WIDGET_ORIGIN + '/chat-launcher-icon.svg';
+  img.src = WIDGET_ORIGIN + '/chat-launcher-icon.png';
 
   var popup = document.getElementById('sm-chat-popup');
   var iframe = document.getElementById('sm-chat-iframe');
