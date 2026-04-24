@@ -4,6 +4,11 @@
 import crypto from 'crypto';
 
 const GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
+const GA4_DEBUG_ENDPOINT = 'https://www.google-analytics.com/debug/mp/collect';
+
+function isDebugMode() {
+  return String(process.env.GA4_DEBUG_MODE || '').trim().toLowerCase() === 'true';
+}
 
 function hashPhone(phoneE164) {
   if (!phoneE164) return null;
@@ -91,7 +96,8 @@ async function fireGa4Event(eventName, inputParams) {
     events: [{ name, params: { ...params, session_id: getSessionId() } }],
   };
 
-  const url = `${GA4_ENDPOINT}?measurement_id=${encodeURIComponent(GA4_MEASUREMENT_ID)}&api_secret=${encodeURIComponent(GA4_API_SECRET)}`;
+  const endpoint = isDebugMode() ? GA4_DEBUG_ENDPOINT : GA4_ENDPOINT;
+  const url = `${endpoint}?measurement_id=${encodeURIComponent(GA4_MEASUREMENT_ID)}&api_secret=${encodeURIComponent(GA4_API_SECRET)}`;
 
   try {
     const response = await fetch(url, {
@@ -100,6 +106,19 @@ async function fireGa4Event(eventName, inputParams) {
       body: JSON.stringify(body),
     });
 
+    if (isDebugMode()) {
+      try {
+        const debugPayload = await response.clone().json();
+        const warnings = debugPayload?.validationMessages || [];
+        if (Array.isArray(warnings) && warnings.length > 0) {
+          console.warn('[ga4] debug validation warnings:', JSON.stringify(warnings));
+        }
+      } catch (err) {
+        // Debug endpoint didn't return JSON; ignore.
+      }
+    }
+
+    // GA4 returns 204 on success for production, 200 for debug.
     if (!response.ok && response.status !== 204) {
       const text = await response.text().catch(() => '');
       console.error('[ga4] event failed:', response.status, text.slice(0, 200));
