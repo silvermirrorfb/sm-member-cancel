@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Chat icon">
-  <circle cx="256" cy="256" r="252" fill="#5fa0cf"/>
-  <path fill="#e3e3e3" d="M256 114c-92.8 0-168 69.8-168 156.1 0 42.6 18.3 81.2 47.9 109.3V440l96.4-14.9c7.8.8 15.7 1.2 23.7 1.2 92.8 0 168-69.8 168-156.1S348.8 114 256 114z"/>
-  <circle cx="208" cy="278" r="10" fill="#5fa0cf"/>
-  <circle cx="256" cy="278" r="10" fill="#5fa0cf"/>
-  <circle cx="304" cy="278" r="10" fill="#5fa0cf"/>
+  <circle cx="256" cy="256" r="254" fill="#5DA6D9"/>
+  <path fill="#FFFFFF" d="M256 110c-80 0-145 57-145 128 0 37 18 70 47 93 2 2 3 5 3 8l0 62c0 5 6 8 10 5l58-39c2-1 5-2 8-2 6 1 13 1 19 1 80 0 145-57 145-128S336 110 256 110z"/>
+  <circle cx="208" cy="238" r="12" fill="#5DA6D9"/>
+  <circle cx="256" cy="238" r="12" fill="#5DA6D9"/>
+  <circle cx="304" cy="238" r="12" fill="#5DA6D9"/>
 </svg>
