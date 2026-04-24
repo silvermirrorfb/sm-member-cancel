@@ -1,9 +1,14 @@
 import { Redis } from '@upstash/redis';
-import { normalizePhone } from './sms-sessions';
+import { isOnStopSet } from './sms-member-registry';
+import { createMissedCallSession, normalizePhone } from './sms-sessions';
 import { fireGa4Event } from './ga4';
 
 const DISPATCH_DEDUPE_PREFIX = 'missed-call-dispatched-callsid:';
 const COOLDOWN_PREFIX = 'missed-call-cooldown:';
+
+const DAY_INDEX = Object.freeze({
+  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+});
 
 let cachedRedis = null;
 let cachedRedisSignature = '';
@@ -25,8 +30,112 @@ function getDedupeTtlSeconds() {
   return Math.floor(raw);
 }
 
-// Gates 1-5 land in the next commit.
-async function dispatchMissedCallAutotext(payload /* , { now = new Date() } = {} */) {
+function getCooldownSeconds() {
+  const minutes = Number(process.env.MISSED_CALL_COOLDOWN_MINUTES);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 10 * 60;
+  return Math.floor(minutes * 60);
+}
+
+function parseAllowlist() {
+  const raw = String(process.env.MISSED_CALL_PILOT_LOCATIONS || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map(s => String(s).trim().toLowerCase()).filter(Boolean);
+  } catch (err) {
+    console.warn('[missed-call-dispatcher] MISSED_CALL_PILOT_LOCATIONS is not valid JSON, treating as empty allowlist:', err?.message || err);
+  }
+  return [];
+}
+
+function parseDayRange(range) {
+  const parts = String(range || '').split('-').map(s => s.trim());
+  if (parts.length === 1) {
+    const idx = DAY_INDEX[parts[0]];
+    if (idx === undefined) throw new Error(`Unknown day "${parts[0]}"`);
+    return [idx];
+  }
+  const start = DAY_INDEX[parts[0]];
+  const end = DAY_INDEX[parts[1]];
+  if (start === undefined || end === undefined) {
+    throw new Error(`Unknown day in range "${range}"`);
+  }
+  const days = [];
+  if (start <= end) {
+    for (let d = start; d <= end; d++) days.push(d);
+  } else {
+    for (let d = start; d <= 6; d++) days.push(d);
+    for (let d = 0; d <= end; d++) days.push(d);
+  }
+  return days;
+}
+
+function parseTimeRange(range) {
+  const [startStr, endStr] = String(range || '').split('-').map(s => s.trim());
+  const [startH, startM] = startStr.split(':').map(Number);
+  const [endH, endM] = endStr.split(':').map(Number);
+  if ([startH, startM, endH, endM].some(n => !Number.isFinite(n))) {
+    throw new Error(`Invalid time range "${range}"`);
+  }
+  return { startMinutes: startH * 60 + startM, endMinutes: endH * 60 + endM };
+}
+
+function parseSendWindow(envString) {
+  const value = String(envString || '').trim();
+  if (!value) return [];
+  return value.split(',').map(segment => {
+    const trimmed = segment.trim();
+    const match = trimmed.match(/^(\S+)\s+(\S+)\s+(\S+)$/);
+    if (!match) throw new Error(`Invalid send-window segment "${trimmed}"`);
+    const [, dayRange, timeRange, tz] = match;
+    return {
+      days: parseDayRange(dayRange),
+      ...parseTimeRange(timeRange),
+      timezone: tz,
+    };
+  });
+}
+
+function computeZonedDayAndMinute(currentInstant, timezone) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    timeZone: String(timezone),
+  });
+  const parts = fmt.formatToParts(currentInstant instanceof Date ? currentInstant : new Date(currentInstant));
+  const weekday = parts.find(p => p.type === 'weekday')?.value;
+  const hour = Number(parts.find(p => p.type === 'hour')?.value);
+  const minute = Number(parts.find(p => p.type === 'minute')?.value);
+  const dow = weekday ? DAY_INDEX[weekday] : undefined;
+  if (dow === undefined || !Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return { dow, minuteOfDay: hour * 60 + minute };
+}
+
+function isWithinSendWindow(envString, currentInstant = new Date()) {
+  const segments = parseSendWindow(envString);
+  if (segments.length === 0) return false;
+  for (const segment of segments) {
+    const zoned = computeZonedDayAndMinute(currentInstant, segment.timezone);
+    if (!zoned) continue;
+    if (!segment.days.includes(zoned.dow)) continue;
+    if (segment.endMinutes > segment.startMinutes) {
+      if (zoned.minuteOfDay >= segment.startMinutes && zoned.minuteOfDay < segment.endMinutes) return true;
+    } else if (segment.endMinutes < segment.startMinutes) {
+      if (zoned.minuteOfDay >= segment.startMinutes || zoned.minuteOfDay < segment.endMinutes) return true;
+    }
+  }
+  return false;
+}
+
+function sendWindowEnvForLocation(locationSlug) {
+  const upper = String(locationSlug || '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  if (!upper) return '';
+  return String(process.env[`MISSED_CALL_SEND_WINDOW_${upper}`] || '').trim();
+}
+
+async function dispatchMissedCallAutotext(payload, { now = new Date() } = {}) {
   if (!payload || typeof payload !== 'object') {
     return { sent: false, reason: 'invalid_payload' };
   }
@@ -54,11 +163,95 @@ async function dispatchMissedCallAutotext(payload /* , { now = new Date() } = {}
     console.warn('[missed-call-dispatcher] Redis not configured; Gate 0 dedupe disabled');
   }
 
-  return { sent: false, reason: 'awaiting_gates_1_5' };
+  // Gate 1 — master kill switch.
+  if (String(process.env.MISSED_CALL_AUTOTEXT_ENABLED || '').trim() !== 'true') {
+    fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'kill_switch' }).catch(() => {});
+    return { sent: false, reason: 'kill_switch' };
+  }
+
+  // Gate 2 — pilot allowlist.
+  const allowlist = parseAllowlist();
+  if (!allowlist.includes(locationCalled)) {
+    fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'not_in_allowlist' }).catch(() => {});
+    return { sent: false, reason: 'not_in_allowlist' };
+  }
+
+  // Gate 3 — SMS STOP set.
+  try {
+    if (await isOnStopSet(callerPhoneE164)) {
+      fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'on_stop_set' }).catch(() => {});
+      return { sent: false, reason: 'on_stop_set' };
+    }
+  } catch (err) {
+    console.warn('[missed-call-dispatcher] stop-set check failed, failing closed:', err?.message || err);
+    fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'on_stop_set' }).catch(() => {});
+    return { sent: false, reason: 'on_stop_set' };
+  }
+
+  // Gate 4 — cooldown.
+  if (redis) {
+    try {
+      const cooldownHit = await redis.get(`${COOLDOWN_PREFIX}${callerPhoneE164}`);
+      if (cooldownHit) {
+        fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'cooldown' }).catch(() => {});
+        return { sent: false, reason: 'cooldown' };
+      }
+    } catch (err) {
+      console.warn('[missed-call-dispatcher] cooldown check failed, failing closed:', err?.message || err);
+      fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'cooldown' }).catch(() => {});
+      return { sent: false, reason: 'cooldown' };
+    }
+  }
+
+  // Gate 5 — send window (per-location, timezone-aware).
+  const windowEnv = sendWindowEnvForLocation(locationCalled);
+  if (!windowEnv) {
+    fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'outside_send_window' }).catch(() => {});
+    return { sent: false, reason: 'outside_send_window' };
+  }
+  let inWindow = false;
+  try {
+    inWindow = isWithinSendWindow(windowEnv, now);
+  } catch (err) {
+    console.error('[missed-call-dispatcher] send-window parse failed, failing closed:', err?.message || err);
+    inWindow = false;
+  }
+  if (!inWindow) {
+    fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'outside_send_window' }).catch(() => {});
+    return { sent: false, reason: 'outside_send_window' };
+  }
+
+  // All gates passed. Set cooldown, boot session, fire GA4 "would send" event.
+  // VC-4 will add the actual Twilio SMS send here.
+  if (redis) {
+    try {
+      await redis.set(`${COOLDOWN_PREFIX}${callerPhoneE164}`, '1', { ex: getCooldownSeconds() });
+    } catch (err) {
+      console.warn('[missed-call-dispatcher] cooldown set failed:', err?.message || err);
+    }
+  }
+
+  let sessionId = null;
+  try {
+    sessionId = await createMissedCallSession({
+      callSid,
+      callerPhone: callerPhoneE164,
+      locationCalled,
+      timestamp: payload.timestamp || now.toISOString(),
+    });
+  } catch (err) {
+    console.error('[missed-call-dispatcher] createMissedCallSession failed:', err?.message || err);
+  }
+
+  fireGa4Event('auto_text_would_send', { ...ga4Base, sessionId }).catch(() => {});
+
+  return { sent: false, reason: 'awaiting_vc4_send_implementation', sessionId };
 }
 
 export {
   dispatchMissedCallAutotext,
+  parseSendWindow,
+  isWithinSendWindow,
   DISPATCH_DEDUPE_PREFIX,
   COOLDOWN_PREFIX,
 };
