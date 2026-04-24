@@ -146,7 +146,7 @@ async function saveSession(session) {
   return session;
 }
 
-async function createSession(memberId, memberProfile, existingId) {
+async function createSession(memberId, memberProfile, existingId, options = {}) {
   const sessionId = existingId || uuidv4();
   const session = {
     id: sessionId,
@@ -163,6 +163,8 @@ async function createSession(memberId, memberProfile, existingId) {
     createdAt: new Date(),
     lastActivity: new Date(),
     status: 'active', // active | completed | abandoned | error
+    session_mode: options.session_mode || 'general', // general | membership | missed_call
+    origin: options.origin || 'widget', // widget | sms_inbound | missed_call_trigger
   };
   await saveSession(session);
   return session;
