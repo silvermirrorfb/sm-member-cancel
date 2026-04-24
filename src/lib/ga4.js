@@ -1,5 +1,51 @@
-// GA4 Measurement Protocol client — core implementation + PII-safe
-// client_id derivation.
+// GA4 Measurement Protocol client for the missed-call autotext pilot and
+// the membership / voice surfaces.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// EVENT SCHEMA (canonical — this file normalizes camelCase input to match)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Every event that fires during the missed-call pilot carries, where
+// relevant:
+//   - location_name        (string, e.g. "brickell")
+//   - caller_phone_hash    (SHA-256 hex of E.164, auto-derived from
+//                           `caller_phone` / `callerPhone` input)
+//   - time_of_day          (0-23, auto-added)
+//   - day_of_week          (0=Sun..6=Sat, auto-added)
+//
+// Event-specific params:
+//
+//   call_received          + call_sid
+//   call_answered          + call_sid, call_duration (seconds)
+//   call_missed            + call_sid, dial_call_status (no-answer|busy|failed)
+//   auto_text_sent         + call_sid, message_sid, autotext_version
+//   auto_text_reply        + call_sid, reply_length, reply_contains_callback_intent
+//   auto_text_suppressed   + call_sid, suppression_reason
+//                            (kill_switch|not_in_allowlist|on_stop_set|
+//                             cooldown|outside_send_window|dedupe)
+//   callback_requested     + requested_via
+//                            (CALLBACK_keyword|natural_language|AI_inferred)
+//
+// VC-3 currently emits `auto_text_would_send` as a placeholder for
+// `auto_text_sent`; VC-4 will replace the placeholder when the real
+// Twilio send is wired up.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// PARAMETER NORMALIZATION
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Existing callers pass camelCase / short names (location, callSid,
+// callerPhone, reason). This module aliases them to the snake_case schema
+// above so callers don't need to change:
+//
+//   location, locationName,
+//   locationCalled             → location_name
+//   callSid                    → call_sid
+//   messageSid                 → message_sid
+//   dialCallStatus             → dial_call_status
+//   callerPhone, caller_phone  → SHA-256 hashed into caller_phone_hash
+//                                (raw phone is stripped before send)
+//   reason (on auto_text_suppressed) → suppression_reason
 
 import crypto from 'crypto';
 
@@ -28,8 +74,7 @@ function getSessionId() {
 function normalizeParams(eventName, inputParams) {
   const params = inputParams && typeof inputParams === 'object' ? { ...inputParams } : {};
 
-  // Phone → hash. Strip raw phone in all input spellings so we never
-  // put E.164 on the wire.
+  // Phone → hash. Strip raw phone in all its input spellings.
   const rawPhone = params.caller_phone || params.callerPhone || null;
   delete params.caller_phone;
   delete params.callerPhone;
@@ -67,11 +112,13 @@ function normalizeParams(eventName, inputParams) {
   }
   delete params.dialCallStatus;
 
+  // reason → suppression_reason only for the suppressed event.
   if (eventName === 'auto_text_suppressed' && params.reason !== undefined && params.suppression_reason === undefined) {
     params.suppression_reason = params.reason;
     delete params.reason;
   }
 
+  // Auto-added time context, evaluated at send time.
   const now = new Date();
   if (params.time_of_day === undefined) params.time_of_day = now.getHours();
   if (params.day_of_week === undefined) params.day_of_week = now.getDay();
