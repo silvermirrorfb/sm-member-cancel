@@ -1,8 +1,38 @@
+import { Redis } from '@upstash/redis';
+import { createSession, getSession, saveSession } from './sessions';
+
 const PHONE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_SID_TTL_MS = 24 * 60 * 60 * 1000;
 const UPGRADE_OFFER_STATE_TTL_MS = 48 * 60 * 60 * 1000;
 const UPSELL_COOLDOWN_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
 const UPSELL_COOLDOWN_TTL_MS = 35 * 24 * 60 * 60 * 1000;
+
+const PHONE_SESSION_INDEX_PREFIX = 'sms-session-phone:';
+const MISSED_CALL_SESSION_TTL_SECONDS = 48 * 60 * 60;
+
+let cachedRedis = null;
+let cachedRedisSignature = '';
+
+function getRedis() {
+  const url = String(process.env.UPSTASH_REDIS_REST_URL || '').trim();
+  const token = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  if (!url || !token) return null;
+  const signature = `${url}|${token}`;
+  if (cachedRedis && cachedRedisSignature === signature) return cachedRedis;
+  cachedRedis = new Redis({ url, token });
+  cachedRedisSignature = signature;
+  return cachedRedis;
+}
+
+function phoneIndexKey(last10) {
+  return `${PHONE_SESSION_INDEX_PREFIX}${last10}`;
+}
+
+function extractLast10(phoneE164) {
+  const digits = String(phoneE164 || '').replace(/\D/g, '');
+  if (digits.length < 10) return '';
+  return digits.slice(-10);
+}
 
 const phoneToSession = new Map();
 const sidToReply = new Map();
@@ -155,6 +185,71 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+async function setSessionByPhone(phoneE164, sessionId, ttlSeconds = MISSED_CALL_SESSION_TTL_SECONDS) {
+  const last10 = extractLast10(phoneE164);
+  if (!last10 || !sessionId) return false;
+  const redis = getRedis();
+  if (!redis) return false;
+  const ttl = Number.isFinite(ttlSeconds) && ttlSeconds > 0
+    ? Math.floor(ttlSeconds)
+    : MISSED_CALL_SESSION_TTL_SECONDS;
+  try {
+    await redis.set(phoneIndexKey(last10), String(sessionId), { ex: ttl });
+    return true;
+  } catch (err) {
+    console.warn('[sms-sessions] setSessionByPhone failed:', err?.message || err);
+    return false;
+  }
+}
+
+async function getSessionByPhone(phoneE164) {
+  const last10 = extractLast10(phoneE164);
+  if (!last10) return null;
+  const redis = getRedis();
+  if (!redis) return null;
+
+  let sessionId = null;
+  try {
+    sessionId = await redis.get(phoneIndexKey(last10));
+  } catch (err) {
+    console.warn('[sms-sessions] getSessionByPhone index read failed:', err?.message || err);
+    return null;
+  }
+  if (!sessionId) return null;
+
+  const session = await getSession(String(sessionId));
+  if (!session) return null;
+  return session;
+}
+
+async function createMissedCallSession(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('createMissedCallSession: payload is required');
+  }
+  const callerPhone = normalizePhone(payload.callerPhone);
+  const callSid = String(payload.callSid || '').trim();
+  const locationCalled = String(payload.locationCalled || '').trim();
+  if (!callerPhone || !callSid || !locationCalled) {
+    throw new Error('createMissedCallSession: callerPhone, callSid, and locationCalled are required');
+  }
+
+  const session = await createSession(null, null, null, {
+    session_mode: 'missed_call',
+    origin: 'missed_call_trigger',
+  });
+
+  session.location_called = locationCalled;
+  session.caller_phone = callerPhone;
+  session.callSid = callSid;
+  session.outbound_autotext_sid = String(payload.outbound_autotext_sid || '').trim() || null;
+  if (payload.timestamp) session.missed_call_triggered_at = String(payload.timestamp);
+  await saveSession(session);
+
+  await setSessionByPhone(callerPhone, session.id, MISSED_CALL_SESSION_TTL_SECONDS);
+
+  return session.id;
+}
+
 export {
   normalizePhone,
   bindPhoneToSession,
@@ -165,4 +260,8 @@ export {
   markUpgradeOfferEvent,
   getUpsellCooldown,
   markUpsellInitialSent,
+  getSessionByPhone,
+  setSessionByPhone,
+  createMissedCallSession,
+  PHONE_SESSION_INDEX_PREFIX,
 };
