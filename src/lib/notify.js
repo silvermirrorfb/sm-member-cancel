@@ -1141,6 +1141,32 @@ async function sendReasonAlert(summary, transcript) {
 // Sheet: GOOGLE_CHATLOG_SHEET_ID → "CallbackQueue" tab
 // ══════════════════════════════════════════════════════════════
 
+function maskCallerPhone(e164) {
+  const digits = String(e164 || '').replace(/\D/g, '');
+  if (digits.length < 4) return 'N/A';
+  const last4 = digits.slice(-4);
+  return `(XXX) XXX-${last4}`;
+}
+
+function formatLocalTimestamp(date, timeZone = CALLBACK_QUEUE_TIMEZONE) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'short',
+    }).format(date);
+  } catch (err) {
+    console.warn('[callback-queue] timezone format failed, falling back to ISO:', err?.message || err);
+    return date.toISOString();
+  }
+}
+
 async function ensureCallbackQueueLayout(sheets, spreadsheetId, sheetMeta) {
   const headerRange = `${sheetMeta.title}!A1:K1`;
   const currentHeader = await sheets.spreadsheets.values.get({
@@ -1315,6 +1341,61 @@ async function ensureCallbackQueueTab() {
   }
 }
 
+async function logCallbackRequest(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('logCallbackRequest: payload is required');
+  }
+  const callerPhone = String(payload.callerPhone || '').trim();
+  const location = String(payload.location || '').trim();
+  const originalAutotextSid = String(payload.originalAutotextSid || '').trim();
+  const requestedVia = String(payload.requestedVia || '').trim() || 'natural_language';
+
+  if (!callerPhone || !location) {
+    throw new Error('logCallbackRequest: callerPhone and location are required');
+  }
+
+  const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
+  if (!sheetId) {
+    throw new Error('logCallbackRequest: GOOGLE_CHATLOG_SHEET_ID not configured');
+  }
+
+  const sheets = await getSheetsClient();
+  if (!sheets) {
+    throw new Error('logCallbackRequest: Google credentials not configured');
+  }
+
+  // Guarantee tab + schema exist before writing. Idempotent.
+  const sheetMeta = await getOrCreateSheetMeta(sheets, sheetId, CALLBACK_QUEUE_SHEET_TITLE);
+  await ensureCallbackQueueLayout(sheets, sheetId, sheetMeta);
+
+  const now = new Date();
+  const row = [
+    now.toISOString(),                                   // A: timestamp_iso
+    formatLocalTimestamp(now),                           // B: timestamp_local
+    callerPhone,                                         // C: caller_phone
+    maskCallerPhone(callerPhone),                        // D: caller_phone_masked
+    location,                                            // E: location_called
+    originalAutotextSid,                                 // F: original_autotext_sid
+    requestedVia,                                        // G: callback_requested_via
+    'pending',                                           // H: status
+    '',                                                  // I: closed_at
+    '',                                                  // J: closed_by
+    '',                                                  // K: closure_notes
+  ];
+
+  const appendResult = await sheets.spreadsheets.values.append({
+    spreadsheetId: sheetId,
+    range: `${sheetMeta.title}!A:K`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [row] },
+  });
+
+  const updatedRange = appendResult?.data?.updates?.updatedRange || '';
+  const rowMatch = updatedRange.match(/!?[A-Z]+(\d+):/);
+  const rowNumber = rowMatch ? Number(rowMatch[1]) : null;
+  return { ok: true, rowNumber, updatedRange };
+}
+
 // Fire-and-forget module-load hook. Ensures the tab exists on cold start
 // so the first inbound CALLBACK doesn't race tab creation. Errors are
 // logged but never thrown — a missing env shouldn't crash module import.
@@ -1356,6 +1437,8 @@ export {
   logSupportIncident,
   processConversationEnd,
   ensureCallbackQueueTab,
+  logCallbackRequest,
+  maskCallerPhone,
   CALLBACK_QUEUE_SHEET_TITLE,
   CALLBACK_QUEUE_HEADERS,
 };
