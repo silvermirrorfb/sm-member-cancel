@@ -30,6 +30,25 @@ const WIDGET_OPEN_HEADERS = [
   'Source',
 ];
 
+// CallbackQueue — one row per inbound CALLBACK request from a missed-call
+// autotext session. Ops monitors this tab to close the loop with the caller.
+const CALLBACK_QUEUE_SHEET_TITLE = 'CallbackQueue';
+const CALLBACK_QUEUE_HEADERS = [
+  'timestamp_iso',
+  'timestamp_local',
+  'caller_phone',
+  'caller_phone_masked',
+  'location_called',
+  'original_autotext_sid',
+  'callback_requested_via',
+  'status',
+  'closed_at',
+  'closed_by',
+  'closure_notes',
+];
+const CALLBACK_QUEUE_STATUS_VALUES = ['pending', 'called_back', 'resolved', 'stale'];
+const CALLBACK_QUEUE_TIMEZONE = process.env.CALLBACK_QUEUE_TIMEZONE || 'America/New_York';
+
 function isNilLike(value) {
   if (value === null || value === undefined) return true;
   if (typeof value !== 'string') return false;
@@ -1117,6 +1136,200 @@ async function sendReasonAlert(summary, transcript) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// GOOGLE SHEETS — CallbackQueue (missed-call autotext pilot)
+// Sheet: GOOGLE_CHATLOG_SHEET_ID → "CallbackQueue" tab
+// ══════════════════════════════════════════════════════════════
+
+async function ensureCallbackQueueLayout(sheets, spreadsheetId, sheetMeta) {
+  const headerRange = `${sheetMeta.title}!A1:K1`;
+  const currentHeader = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: headerRange,
+  });
+  const currentRow = currentHeader?.data?.values?.[0] || [];
+  const hasHeader = CALLBACK_QUEUE_HEADERS.every(
+    (value, index) => String(currentRow[index] || '').trim() === value,
+  );
+
+  if (!hasHeader) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: headerRange,
+      valueInputOption: 'RAW',
+      requestBody: { values: [CALLBACK_QUEUE_HEADERS] },
+    });
+  }
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: {
+              sheetId: sheetMeta.sheetId,
+              gridProperties: { frozenRowCount: 1 },
+            },
+            fields: 'gridProperties.frozenRowCount',
+          },
+        },
+        {
+          repeatCell: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: CALLBACK_QUEUE_HEADERS.length,
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.09, green: 0.21, blue: 0.36 },
+                textFormat: {
+                  bold: true,
+                  foregroundColor: { red: 1, green: 1, blue: 1 },
+                  fontSize: 10,
+                },
+                horizontalAlignment: 'CENTER',
+                verticalAlignment: 'MIDDLE',
+              },
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)',
+          },
+        },
+        {
+          // Bold the caller_phone_masked column for quick visual scanning.
+          repeatCell: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 3,
+              endColumnIndex: 4,
+            },
+            cell: {
+              userEnteredFormat: { textFormat: { bold: true } },
+            },
+            fields: 'userEnteredFormat.textFormat.bold',
+          },
+        },
+        {
+          // timestamp_iso column — datetime format (ISO 8601).
+          repeatCell: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: 1,
+            },
+            cell: {
+              userEnteredFormat: {
+                numberFormat: { type: 'DATE_TIME', pattern: 'yyyy-mm-dd"T"hh:mm:ss' },
+              },
+            },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        },
+        {
+          // closed_at column — same datetime format.
+          repeatCell: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 8,
+              endColumnIndex: 9,
+            },
+            cell: {
+              userEnteredFormat: {
+                numberFormat: { type: 'DATE_TIME', pattern: 'yyyy-mm-dd"T"hh:mm:ss' },
+              },
+            },
+            fields: 'userEnteredFormat.numberFormat',
+          },
+        },
+        {
+          // status column — dropdown validator.
+          setDataValidation: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              startRowIndex: 1,
+              startColumnIndex: 7,
+              endColumnIndex: 8,
+            },
+            rule: {
+              condition: {
+                type: 'ONE_OF_LIST',
+                values: CALLBACK_QUEUE_STATUS_VALUES.map(v => ({ userEnteredValue: v })),
+              },
+              strict: true,
+              showCustomUi: true,
+            },
+          },
+        },
+        {
+          // Reasonable default column widths for readability.
+          updateDimensionProperties: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              dimension: 'COLUMNS',
+              startIndex: 0,
+              endIndex: CALLBACK_QUEUE_HEADERS.length,
+            },
+            properties: { pixelSize: 160 },
+            fields: 'pixelSize',
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: {
+              sheetId: sheetMeta.sheetId,
+              dimension: 'COLUMNS',
+              startIndex: 10,
+              endIndex: 11,
+            },
+            properties: { pixelSize: 320 },
+            fields: 'pixelSize',
+          },
+        },
+      ],
+    },
+  });
+}
+
+async function ensureCallbackQueueTab() {
+  const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
+  if (!sheetId) {
+    return { ok: false, reason: 'GOOGLE_CHATLOG_SHEET_ID not configured' };
+  }
+  const sheets = await getSheetsClient();
+  if (!sheets) {
+    return { ok: false, reason: 'Google credentials not configured' };
+  }
+  try {
+    const sheetMeta = await getOrCreateSheetMeta(sheets, sheetId, CALLBACK_QUEUE_SHEET_TITLE);
+    await ensureCallbackQueueLayout(sheets, sheetId, sheetMeta);
+    return { ok: true, sheetId: sheetMeta.sheetId, title: sheetMeta.title };
+  } catch (err) {
+    console.error('[callback-queue] ensureCallbackQueueTab failed:', err?.message || err);
+    return { ok: false, reason: err?.message || String(err) };
+  }
+}
+
+// Fire-and-forget module-load hook. Ensures the tab exists on cold start
+// so the first inbound CALLBACK doesn't race tab creation. Errors are
+// logged but never thrown — a missing env shouldn't crash module import.
+if (process.env.ENSURE_CALLBACK_QUEUE_ON_LOAD !== 'false' && process.env.NODE_ENV !== 'test') {
+  ensureCallbackQueueTab()
+    .then(result => {
+      if (!result?.ok) {
+        console.warn('[callback-queue] module-load ensure skipped:', result?.reason || 'unknown');
+      }
+    })
+    .catch(err => {
+      console.warn('[callback-queue] module-load ensure failed:', err?.message || err);
+    });
+}
+
 async function processConversationEnd(summary, transcript) {
   const [emailResult, sheetResult, alertResult] = await Promise.allSettled([
     sendSummaryEmail(summary, transcript),
@@ -1142,4 +1355,7 @@ export {
   logSmsChatMessages,
   logSupportIncident,
   processConversationEnd,
+  ensureCallbackQueueTab,
+  CALLBACK_QUEUE_SHEET_TITLE,
+  CALLBACK_QUEUE_HEADERS,
 };
