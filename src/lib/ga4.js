@@ -1,18 +1,36 @@
-// GA4 Measurement Protocol client — core implementation.
-// VC-8 scope: replace the VC-1 console.log skeleton with a real
-// Measurement Protocol send. Phone-based client_id derivation (caller
-// cohorts) and debug-mode validation land in the next two commits.
+// GA4 Measurement Protocol client — core implementation + PII-safe
+// client_id derivation.
+
+import crypto from 'crypto';
 
 const GA4_ENDPOINT = 'https://www.google-analytics.com/mp/collect';
+
+function hashPhone(phoneE164) {
+  if (!phoneE164) return null;
+  return crypto.createHash('sha256').update(String(phoneE164)).digest('hex');
+}
+
+function getClientId(phoneE164) {
+  if (!phoneE164) return 'anonymous';
+  const full = hashPhone(phoneE164);
+  return `${full.substring(0, 16)}.${full.substring(16, 32)}`;
+}
+
+function getSessionId() {
+  return Math.floor(Date.now() / 1000).toString();
+}
 
 function normalizeParams(eventName, inputParams) {
   const params = inputParams && typeof inputParams === 'object' ? { ...inputParams } : {};
 
-  // Strip raw phone from payload. This commit does not yet emit a hash —
-  // Measurement Protocol will therefore see events without a per-user
-  // key until the next commit lands. Raw PII must never ship.
+  // Phone → hash. Strip raw phone in all input spellings so we never
+  // put E.164 on the wire.
+  const rawPhone = params.caller_phone || params.callerPhone || null;
   delete params.caller_phone;
   delete params.callerPhone;
+  if (rawPhone && !params.caller_phone_hash) {
+    params.caller_phone_hash = hashPhone(rawPhone);
+  }
 
   // camelCase / short name aliases → canonical snake_case.
   if (params.location !== undefined && params.location_name === undefined) {
@@ -53,7 +71,7 @@ function normalizeParams(eventName, inputParams) {
   if (params.time_of_day === undefined) params.time_of_day = now.getHours();
   if (params.day_of_week === undefined) params.day_of_week = now.getDay();
 
-  return params;
+  return { params, clientIdPhone: rawPhone };
 }
 
 async function fireGa4Event(eventName, inputParams) {
@@ -66,11 +84,11 @@ async function fireGa4Event(eventName, inputParams) {
     return { ok: false, reason: 'credentials_missing' };
   }
 
-  const params = normalizeParams(name, inputParams);
+  const { params, clientIdPhone } = normalizeParams(name, inputParams);
 
   const body = {
-    client_id: 'anonymous',
-    events: [{ name, params }],
+    client_id: getClientId(clientIdPhone),
+    events: [{ name, params: { ...params, session_id: getSessionId() } }],
   };
 
   const url = `${GA4_ENDPOINT}?measurement_id=${encodeURIComponent(GA4_MEASUREMENT_ID)}&api_secret=${encodeURIComponent(GA4_API_SECRET)}`;
@@ -95,4 +113,4 @@ async function fireGa4Event(eventName, inputParams) {
   }
 }
 
-export { fireGa4Event };
+export { fireGa4Event, hashPhone, normalizeParams, getClientId };
