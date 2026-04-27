@@ -66,6 +66,21 @@ function pickTemplate(summary) {
 
   const isRetained = outcome === 'RETAINED';
   const isCancelled = outcome === 'CANCELLED';
+
+  // When the member cancels, never send a retention/save email. Route to a
+  // reason-specific cancellation template if one exists, else generic-cancelled.
+  // Why: pre-fix, pickTemplate ignored outcome and fell through to the reason's
+  // retention default (e.g. "cost" → 29-cost-pause), so Fernanda would receive
+  // a "pause confirmed" draft for a member who explicitly cancelled.
+  if (isCancelled) {
+    if (/reloc|moving|moved/.test(reason)) return tmplRelocationCancel(summary);
+    if (/dermatolog/.test(reason)) return tmplDermCancel(summary);
+    if (/new.?provider|another.?spa|different.?spa/.test(reason)) return tmplNewProviderCancel(summary);
+    if (/lost.?job|unemploy|laid.?off|job loss/.test(reason)) return tmplLostJobCancel(summary);
+    if (/parking|transit|commute|far/.test(reason)) return tmplLocationCancel(summary);
+    return tmplGenericCancelled(summary);
+  }
+
   const isPause = /pause/.test(offerAccepted);
   const isDowngrade = /downgrade/.test(offerAccepted);
   const isBimonthly = /bi.?monthly|bimonthly/.test(offerAccepted);
