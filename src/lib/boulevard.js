@@ -1608,7 +1608,29 @@ function pickQueryContextArgValue(argName, context) {
   if (!argName) return null;
   if (argName === 'locationId') return normalizeBoulevardLocationId(context?.locationId || '') || null;
   if (argName === 'clientId') return String(context?.clientId || '').trim() || null;
+  if (argName === 'query') return context?.query ? String(context.query).trim() || null : null;
   return null;
+}
+
+// Boulevard's QueryString grammar is SQL-like with single-quoted string literals
+// (e.g. `startAt >= '2026-04-27' AND startAt < '2026-04-29'`). Without this filter,
+// the appointments query paginates oldest-first and the MAX_PAGES cap (8000 rows)
+// is reached long before today's appointments — so callers wanting upcoming
+// appointments must narrow the result set at the API.
+function buildAppointmentWindowQuery(context = {}) {
+  const toDateString = (raw) => {
+    if (raw === null || raw === undefined || raw === '') return null;
+    const d = raw instanceof Date ? raw : new Date(raw);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString().slice(0, 10);
+  };
+  const start = toDateString(context?.windowStart);
+  const end = toDateString(context?.windowEnd);
+  if (!start && !end) return null;
+  const clauses = [];
+  if (start) clauses.push(`startAt >= '${start}'`);
+  if (end) clauses.push(`startAt < '${end}'`);
+  return clauses.join(' AND ');
 }
 
 function buildRootQueryArgBindings(rootFieldDetail, context = {}) {
@@ -1744,6 +1766,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
   const locationIdForScan = normalizeBoulevardLocationId(context?.locationId || '') || null;
   const locationCanonicalIdForScan = canonicalizeBoulevardLocationId(locationIdForScan || '') || null;
   const clientIdForScan = String(context?.clientId || '').trim() || null;
+  const windowQueryString = buildAppointmentWindowQuery(context);
   const diagnostics = {
     typeIntrospection: null,
     queryIntrospection: null,
@@ -1751,6 +1774,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
     locationId: locationIdForScan,
     locationCanonicalId: locationCanonicalIdForScan,
     clientId: clientIdForScan,
+    windowQuery: windowQueryString,
     queryRootTried: [],
     queryAttempts: [],
     queryErrors: [],
@@ -1874,6 +1898,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
     const rootBindings = buildRootQueryArgBindings(rootFieldDetail, {
       locationId: locationIdForScan,
       clientId: clientIdForScan,
+      query: windowQueryString,
     });
     if (rootBindings.missingRequiredArgs.length > 0) {
       const missingArgsError = {
@@ -2212,9 +2237,18 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   );
   const profileLocationId = resolveBoulevardLocationInput(locationInput).locationId || null;
 
+  // Narrow Boulevard's appointments query to the window we actually evaluate.
+  // Without this, the global query paginates oldest-first and our MAX_PAGES cap
+  // prevents reaching today's appointments at high-volume locations.
+  const windowHours = Math.max(1, Number(options?.windowHours) || 24);
+  const windowStart = new Date(Date.now() - 30 * 60 * 1000); // 30min slack for in-progress lookups
+  const windowEnd = new Date(Date.now() + (windowHours + 24) * 60 * 60 * 1000); // pad past evaluation window
+
   const scan = await scanAppointments(auth.apiUrl, auth.headers, {
     locationId: profileLocationId,
     clientId: profile?.clientId || null,
+    windowStart,
+    windowEnd,
   });
   let appointments = scan?.appointments || null;
   let fallbackScanUsed = false;
@@ -2225,6 +2259,8 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
     const fallbackScan = await scanAppointments(auth.apiUrl, auth.headers, {
       locationId: null,
       clientId: profile?.clientId || null,
+      windowStart,
+      windowEnd,
     });
     if (Array.isArray(fallbackScan?.appointments)) {
       appointments = fallbackScan.appointments;
@@ -4245,6 +4281,7 @@ export {
   getBoulevardAuthContext,
   lookupMember,
   scanAppointments,
+  buildAppointmentWindowQuery,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
   probeCancelRebookCapabilities,

@@ -412,6 +412,8 @@ export async function POST(request) {
         const location = resolveBoulevardLocationInput(rawLocation);
         const scan = await scanAppointments(auth.apiUrl, auth.headers, {
           locationId: location.locationId || rawLocation,
+          windowStart: new Date(nowMs - 5 * 60 * 1000), // 5min slack
+          windowEnd: new Date(cutoffMs),
         });
         const appointments = Array.isArray(scan?.appointments) ? scan.appointments : [];
         for (const appointment of appointments) {
