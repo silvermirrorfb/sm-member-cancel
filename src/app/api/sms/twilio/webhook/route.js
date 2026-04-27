@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import {
+  completeSession,
   createSession,
   getAllActiveSessions,
   getSession,
@@ -8,6 +9,7 @@ import {
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../../lib/rate-limit';
 import {
   bindPhoneToSession,
+  getSessionByPhone,
   getSessionIdForPhone,
   getReplyForMessageSid,
   normalizePhone,
@@ -17,7 +19,10 @@ import {
   buildTwimlMessage,
   isValidTwilioSignature,
   parseTwilioFormBody,
+  sendTwilioSms,
 } from '../../../../../lib/twilio';
+import { detectCallbackIntent, getCallbackRequestedVia } from '../../../../../lib/callback-detection';
+import { fireGa4Event } from '../../../../../lib/ga4';
 import {
   buildSmsUpgradePendingReply,
   isSmsUpgradeLive,
@@ -27,7 +32,11 @@ import {
   lookupMember,
   reverifyAndApplyUpgradeForProfile,
 } from '../../../../../lib/boulevard';
-import { logSmsChatMessages, logSupportIncident } from '../../../../../lib/notify';
+import {
+  logCallbackRequest,
+  logSmsChatMessages,
+  logSupportIncident,
+} from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
@@ -47,6 +56,71 @@ const ALLOWED_ADDON_NAME_SET = new Set([
 
 function buildSmsWebHandoffReply() {
   return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
+}
+
+const LOCATION_DISPLAY_NAMES = {
+  brickell: 'Brickell',
+};
+
+function formatLocationName(slug) {
+  const key = String(slug || '').trim().toLowerCase();
+  if (!key) return 'the salon';
+  return LOCATION_DISPLAY_NAMES[key] || key.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function buildCallbackConfirmation(locationSlug) {
+  return `Got it, I've flagged this for a teammate at ${formatLocationName(locationSlug)}. Someone will call you back shortly during business hours.`;
+}
+
+async function handleMissedCallCallback({ session, from, body, rateLimit, messageSid }) {
+  const requestedVia = getCallbackRequestedVia(body);
+  const callerPhone = session.caller_phone || normalizePhone(from);
+  const location = session.location_called || null;
+
+  try {
+    await logCallbackRequest({
+      callerPhone,
+      location,
+      originalAutotextSid: session.outbound_autotext_sid || null,
+      requestedVia,
+      messageBody: body,
+    });
+  } catch (err) {
+    console.error('[missed-call-callback] Sheet write failed:', err?.message || err);
+  }
+
+  fireGa4Event('callback_requested', {
+    location_name: location,
+    callerPhone,
+    requested_via: requestedVia,
+  }).catch(err => {
+    console.warn('[missed-call-callback] GA4 emit failed:', err?.message || err);
+  });
+
+  const confirmationBody = buildCallbackConfirmation(location);
+  try {
+    await sendTwilioSms({ to: callerPhone, body: confirmationBody });
+  } catch (err) {
+    console.error('[missed-call-callback] confirmation SMS send failed:', err?.message || err);
+  }
+
+  try {
+    await completeSession(session.id, 'callback_requested', {
+      caller_phone: callerPhone,
+      location_called: location,
+      callback_requested_via: requestedVia,
+      closed_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.warn('[missed-call-callback] completeSession failed:', err?.message || err);
+  }
+
+  const twiml = buildTwimlMessage(confirmationBody);
+  if (messageSid) storeReplyForMessageSid(messageSid, twiml);
+  return new NextResponse(twiml, {
+    status: 200,
+    headers: buildTwimlHeaders(rateLimit),
+  });
 }
 
 function isAffirmative(text) {
@@ -414,6 +488,28 @@ export async function POST(request) {
           headers: buildTwimlHeaders(rateLimit),
         });
       }
+    }
+
+    // Missed-call pilot: if the caller's last session is a missed_call session
+    // and their reply is a clear callback request, handle it inline (log to
+    // CallbackQueue, fire GA4, send confirmation, close session) before we
+    // pay for a Claude turn. Non-callback replies on a missed_call session
+    // fall through to the general handler — full conversation routing is VC-7.
+    try {
+      const phoneSession = await getSessionByPhone(from);
+      if (phoneSession?.session_mode === 'missed_call'
+          && phoneSession.status === 'active'
+          && detectCallbackIntent(body)) {
+        return await handleMissedCallCallback({
+          session: phoneSession,
+          from,
+          body,
+          rateLimit,
+          messageSid,
+        });
+      }
+    } catch (err) {
+      console.warn('[sms-webhook] missed-call preamble failed, falling through:', err?.message || err);
     }
 
     const sessionId = await resolveSessionIdForPhone(from);
