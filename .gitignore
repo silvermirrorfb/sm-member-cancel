@@ -7,3 +7,4 @@ node_modules/
 ai_takeover_export_*/
 ai_takeover_export_*.tar.gz
 .env*.local
+.gstack/
