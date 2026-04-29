@@ -83,6 +83,8 @@ function pickTemplate(summary) {
 
   const isPause = /pause/.test(offerAccepted);
   const isDowngrade = /downgrade/.test(offerAccepted);
+  // TODO(policy): Confirm whether bi-monthly memberships are still offered.
+  // If yes, add/retain bi-monthly membership language in relevant templates.
   const isBimonthly = /bi.?monthly|bimonthly/.test(offerAccepted);
   const isTransfer = /transfer|location/.test(offerAccepted);
   const isCallback = /manager|callback/.test(offerAccepted);
@@ -105,7 +107,7 @@ function pickTemplate(summary) {
     return tmplTravelPause(summary);
   }
   if (/reloc|moving|moved/.test(reason)) {
-    if (isTransfer) return tmplRelocationTransfer(summary);
+    if (isTransfer) return tmplRelocationAnyLocation(summary);
     return tmplRelocationCancel(summary);
   }
   if (/dermatolog/.test(reason)) {
@@ -177,31 +179,31 @@ Thanks so much for letting us know about your upcoming travel. I've gone ahead a
 Here's what that means for you:
 • Your billing is paused — no charges during the pause period
 • Your locked-in member rate of $${s.monthly_rate}/month stays locked for when you come back
-• Any existing credits (${s.unused_credits || 0}) in your account are preserved
+• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
+• Please keep in mind that our maximum allowed pause period is two months.
 • A 3-billing-cycle commitment applies when your membership resumes
-
-If your travel plans shift and you need to extend the pause, just reply to this email and I'll take care of it.
 
 Safe travels, and we can't wait to see you when you're back!${SIGNATURE}`,
   };
 }
 
-function tmplRelocationTransfer(s) {
+function tmplRelocationAnyLocation(s) {
   const fn = firstName(s.client_name);
   return {
-    id: '03-relocation-transfer',
-    subject: 'Your Silver Mirror location transfer is confirmed',
+    id: 'relocation-any-location',
+    subject: 'Your membership works at any Silver Mirror location',
     body: `Hi ${fn},
 
-Congrats on the move! I've transferred your ${s.membership_tier}-minute membership to your new home location.
+Congrats on the move! Your ${s.membership_tier}-minute membership can be used at any Silver Mirror location.
 
 Here's what stays the same:
 • Your locked-in rate of $${s.monthly_rate}/month
 • Your existing credits (${s.unused_credits || 0}) carry forward
 • Your milestone perks and loyalty points
-• Everything you'd expect as a member, just at a new home
+• Everything you'd expect as a member, no formal transfer required
 
-If there's anything you want to coordinate before your first visit at the new location — a particular esthetician, a specific service — just let me know and I'll get it set up.
+If you'd like, I can update your preferred/home location on your account so your profile reflects where you'll visit most often.
 
 Welcome home to your new Silver Mirror!${SIGNATURE}`,
   };
@@ -218,7 +220,8 @@ Thanks for letting us know about your move. I've processed your cancellation —
 
 A few things to know:
 • Your existing credits (${s.unused_credits || 0}) are usable for 90 days from your last charge date
-• If you'd like to redeem any loyalty points before they expire, just reply and I can help
+• You may use any remaining credits toward product purchases, service upgrades, or add-ons in-store.
+• Any loyalty points will be forfeited once your membership is fully cancelled.
 • If you ever return to a city with a Silver Mirror location, we'd love to welcome you back
 
 Wishing you the best in the next chapter!${SIGNATURE}`,
@@ -279,10 +282,12 @@ I'm sorry to hear you're dealing with something health-related. I've paused your
 Here's how it works:
 • No charges during your pause
 • Your rate of $${s.monthly_rate}/month stays locked
-• Your existing credits (${s.unused_credits || 0}) are preserved
+• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
+• Membership pauses may be extended up to a maximum of two months.
 • No 3-billing-cycle commitment applies here — your health comes first
 
-When you're ready to come back, just reply to this email and I'll reactivate. If you need more time, we can extend the pause — no pressure either way.
+When you're ready to come back, just reply to this email and I'll reactivate.
 
 Wishing you a speedy recovery.${SIGNATURE}`,
   };
@@ -290,18 +295,21 @@ Wishing you a speedy recovery.${SIGNATURE}`,
 
 function tmplMedicalExtended(s) {
   const fn = firstName(s.client_name);
+  const extensionDate = addDays(60);
   return {
     id: '34-medical-extended',
     subject: 'Your Silver Mirror membership pause is extended',
     body: `Hi ${fn},
 
-I've extended your pause with no end date. Your membership is on hold until you're ready to reactivate, and no charges will be made in the meantime.
+I've extended your membership pause. Your membership is on hold with no charges during the pause period.
 
-When you feel ready to come back — whether that's in a month or in a year — just reply to this email and I'll take care of it.
+Pause details:
+• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
+• Membership pauses may be extended up to a maximum of two months (through ${extensionDate}).
+• No 3-billing-cycle commitment applies here — your health comes first
 
-In the meantime: your locked-in rate of $${s.monthly_rate}/month stays locked, your existing credits (${s.unused_credits || 0}) are preserved, and there's no 3-billing-cycle commitment when you resume.
-
-Take all the time you need. We're here when you're ready.${SIGNATURE}`,
+When you're ready to come back, reply and I'll take care of the reactivation.${SIGNATURE}`,
   };
 }
 
@@ -316,10 +324,12 @@ I'm sorry you're going through this. I've paused your ${s.membership_tier}-minut
 
 A few things:
 • Your rate of $${s.monthly_rate}/month stays locked
-• Your existing credits (${s.unused_credits || 0}) are preserved
+• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
+• Membership pauses may be extended up to a maximum of two months.
 • No 3-billing-cycle commitment applies here
 
-If you need to extend the pause as you get back on your feet, just reply and I'll take care of it — no questions asked.
+If you need to extend your pause, we can do that up to a total maximum of two months.
 
 Wishing you the best through this transition.${SIGNATURE}`,
   };
@@ -394,7 +404,9 @@ I've paused your ${s.membership_tier}-minute membership, effective today. No cha
 
 While you're paused:
 • Your rate of $${s.monthly_rate}/month stays locked
-• Your existing credits (${s.unused_credits || 0}) are preserved
+• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
+• Membership pauses may be extended up to a maximum of two months.
 • A 3-billing-cycle commitment applies when you resume
 
 Whenever you're ready to come back, just reply and I'll reactivate.${SIGNATURE}`,
@@ -413,7 +425,9 @@ Totally understand — life gets busy. I've paused your ${s.membership_tier}-min
 While you're paused:
 • No charges until you reactivate
 • Your rate of $${s.monthly_rate}/month stays locked
-• Your existing credits (${s.unused_credits || 0}) are preserved
+• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
+• Membership pauses may be extended up to a maximum of two months.
 • A 3-billing-cycle commitment applies when you resume
 
 When you're ready to come back, reply and I'll reactivate. Want me to send a reminder in a month to check in? Just say the word.${SIGNATURE}`,
@@ -658,7 +672,8 @@ function tmplVoucherPause(s) {
 
 I've paused your ${s.membership_tier}-minute membership so you can catch up on your existing credits (${s.unused_credits || 0}) before accumulating more.
 
-While paused: no charges, your rate of $${s.monthly_rate}/month stays locked, and a 3-billing-cycle commitment applies when you resume.
+While paused: no charges, your rate of $${s.monthly_rate}/month stays locked, any existing credits will expire or roll over 90 days from the accrual date, you won't have access to membership perks (including discounts on add-ons or products), and a 3-billing-cycle commitment applies when you resume.
+Membership pauses may be extended up to a maximum of two months.
 
 Reply when you've used your credits and I'll reactivate. Or let me know if you want help picking which services to book with them.${SIGNATURE}`,
   };
