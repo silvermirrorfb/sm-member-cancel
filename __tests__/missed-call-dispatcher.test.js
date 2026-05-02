@@ -39,6 +39,37 @@ class FakeRedis {
 
 vi.mock('@upstash/redis', () => ({ Redis: FakeRedis }));
 
+// Mock the actual Twilio HTTP send so tests run without TWILIO_* env
+// vars and without hitting the network. The dispatcher's contract with
+// twilio.js is: returns the parsed JSON from Twilio's Messages API on
+// success, throws on failure.
+const twilioSendCalls = [];
+let twilioSendShouldThrow = null;
+vi.mock('../src/lib/twilio', async () => {
+  const actual = await vi.importActual('../src/lib/twilio');
+  return {
+    ...actual,
+    sendTwilioSms: vi.fn(async ({ to, body }) => {
+      twilioSendCalls.push({ to, body });
+      if (twilioSendShouldThrow) {
+        const err = twilioSendShouldThrow;
+        twilioSendShouldThrow = null;
+        throw err;
+      }
+      return { sid: `SM_test_${twilioSendCalls.length}`, status: 'queued' };
+    }),
+  };
+});
+
+// Mock Google Sheets logging so tests don't try to authenticate with
+// Google. The dispatcher's logSmsChatMessages call must not block the
+// success path.
+vi.mock('../src/lib/notify', async () => ({
+  logSmsChatMessages: vi.fn(async () => ({ logged: true })),
+  logCallbackQueueEntry: vi.fn(async () => ({ logged: true })),
+  logMissedCallEvent: vi.fn(async () => ({ logged: true })),
+}));
+
 const DEFAULT_WINDOW = 'Mon-Sat 09:00-20:00 America/New_York,Sun 10:00-19:00 America/New_York';
 // 2026-04-24 is a Friday. 15:00 UTC = 11:00 ET (Mon-Sat 09:00-20:00 ET — within).
 const IN_WINDOW = new Date('2026-04-24T15:00:00Z');
@@ -86,6 +117,8 @@ describe('missed-call dispatcher gates', () => {
   beforeEach(() => {
     fakeRedisStore.clear();
     fakeRedisSet.clear();
+    twilioSendCalls.length = 0;
+    twilioSendShouldThrow = null;
     setPassThroughEnv();
   });
 
@@ -97,7 +130,8 @@ describe('missed-call dispatcher gates', () => {
     const dispatcher = await load();
     const payload = validPayload();
     const first = await dispatcher.dispatchMissedCallAutotext(payload, { now: IN_WINDOW });
-    expect(first.reason).toBe('awaiting_vc4_send_implementation');
+    expect(first.sent).toBe(true);
+    expect(first.messageSid).toMatch(/^SM_test_/);
 
     const second = await dispatcher.dispatchMissedCallAutotext(payload, { now: IN_WINDOW });
     expect(second).toEqual({ sent: false, reason: 'dedupe' });
@@ -146,8 +180,9 @@ describe('missed-call dispatcher gates', () => {
   it('Gate 5: Sunday at noon ET is within window', async () => {
     const dispatcher = await load();
     const result = await dispatcher.dispatchMissedCallAutotext(validPayload(), { now: SUNDAY_NOON });
-    expect(result.reason).toBe('awaiting_vc4_send_implementation');
+    expect(result.sent).toBe(true);
     expect(result.sessionId).toBeTruthy();
+    expect(result.messageSid).toMatch(/^SM_test_/);
   });
 
   it('Gate 5: Saturday at 22:30 ET is outside window (Mon-Sat ends at 20:00)', async () => {
@@ -161,16 +196,23 @@ describe('missed-call dispatcher gates', () => {
     // IN_WINDOW = 15:00 UTC Friday = 11:00 ET (within 09-20) = 00:00 local HST-10 etc.
     // Test runs in whatever TZ — helper must use America/New_York per env string.
     const result = await dispatcher.dispatchMissedCallAutotext(validPayload(), { now: IN_WINDOW });
-    expect(result.reason).toBe('awaiting_vc4_send_implementation');
+    expect(result.sent).toBe(true);
   });
 
-  it('All gates pass: cooldown is set, session is created, returns awaiting_vc4_send_implementation', async () => {
+  it('All gates pass: SMS is sent, cooldown is set, session is created', async () => {
     const dispatcher = await load();
     const payload = validPayload();
     const result = await dispatcher.dispatchMissedCallAutotext(payload, { now: IN_WINDOW });
-    expect(result.sent).toBe(false);
-    expect(result.reason).toBe('awaiting_vc4_send_implementation');
+    expect(result.sent).toBe(true);
+    expect(result.messageSid).toBeTruthy();
     expect(result.sessionId).toBeTruthy();
+
+    // Twilio was called with the expected body containing the location name
+    expect(twilioSendCalls).toHaveLength(1);
+    expect(twilioSendCalls[0].to).toBe('+19175551234');
+    expect(twilioSendCalls[0].body).toContain('Brickell');
+    expect(twilioSendCalls[0].body).toContain('CALLBACK');
+    expect(twilioSendCalls[0].body).toContain('STOP');
 
     // Cooldown key present
     expect(fakeRedisStore.has('missed-call-cooldown:+19175551234')).toBe(true);
@@ -178,6 +220,22 @@ describe('missed-call dispatcher gates', () => {
     expect(fakeRedisStore.has(`missed-call-dispatched-callsid:${payload.callSid}`)).toBe(true);
     // Phone->session index written
     expect(fakeRedisStore.get('sms-session-phone:9175551234')).toBe(result.sessionId);
+  });
+
+  it('Twilio send failure returns send_failed reason and does not boot a session', async () => {
+    const dispatcher = await load();
+    twilioSendShouldThrow = new Error('Twilio 21610: unsubscribed');
+    const payload = validPayload();
+    const result = await dispatcher.dispatchMissedCallAutotext(payload, { now: IN_WINDOW });
+    expect(result.sent).toBe(false);
+    expect(result.reason).toBe('send_failed');
+    expect(result.error).toContain('Twilio 21610');
+
+    // Cooldown should still be set (we set it BEFORE the send to avoid
+    // rapid retries on a transient failure).
+    expect(fakeRedisStore.has('missed-call-cooldown:+19175551234')).toBe(true);
+    // No session, no phone index.
+    expect(fakeRedisStore.has('sms-session-phone:9175551234')).toBe(false);
   });
 
   it('invalid payload returns invalid_payload reason', async () => {

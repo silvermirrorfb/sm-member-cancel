@@ -4,12 +4,14 @@ import path from 'path';
 import { WALKIN_PRICES, CURRENT_RATES } from './boulevard.js';
 
 const SYSTEM_PROMPT_PATH = path.join(process.cwd(), 'src', 'lib', 'system-prompt.txt');
+const MISSED_CALL_PROMPT_PATH = path.join(process.cwd(), 'src', 'lib', 'system-prompt-missed-call.txt');
 const MEMBER_LOOKUP_TAG_RE = /<member_lookup>\s*([\s\S]*?)\s*<\/member_lookup>/;
 const MEMBER_LOOKUP_TAG_RE_GLOBAL = /<member_lookup>[\s\S]*?<\/member_lookup>/g;
 const SESSION_SUMMARY_TAG_RE = /<session_summary>\s*([\s\S]*?)\s*<\/session_summary>/;
 const SESSION_SUMMARY_TAG_RE_GLOBAL = /<session_summary>[\s\S]*?<\/session_summary>/g;
 
 let cachedSystemPrompt = null;
+let cachedMissedCallPrompt = null;
 
 function applyPricingTokens(promptText) {
   const tokenValues = {
@@ -50,6 +52,112 @@ function buildSystemPromptWithProfile(profileText) {
   const base = loadSystemPrompt();
   // Append the member profile block so Claude enters Membership Mode
   return base + '\n\n<member_profile>\n' + profileText + '\n</member_profile>';
+}
+
+/**
+ * Load the missed-call mode system prompt with pricing tokens applied.
+ * The location-specific tokens ({{LOCATION_NAME}}, {{CALLER_PHONE_MASKED}},
+ * {{CALL_TIME_LOCAL}}) are NOT applied here; they need session context and
+ * are interpolated by buildMissedCallSystemPrompt below.
+ */
+function loadMissedCallPrompt() {
+  if (!cachedMissedCallPrompt) {
+    const raw = fs.readFileSync(MISSED_CALL_PROMPT_PATH, 'utf-8');
+    cachedMissedCallPrompt = applyPricingTokens(raw);
+  }
+  return cachedMissedCallPrompt;
+}
+
+const MISSED_CALL_LOCATION_LABELS = {
+  brickell: 'Brickell',
+  coral_gables: 'Coral Gables',
+  upper_east_side: 'Upper East Side',
+  flatiron: 'Flatiron',
+  bryant_park: 'Bryant Park',
+  manhattan_west: 'Manhattan West',
+  upper_west_side: 'Upper West Side',
+  dupont_circle: 'Dupont Circle',
+  navy_yard: 'Navy Yard',
+  penn_quarter: 'Penn Quarter',
+};
+
+const MISSED_CALL_LOCATION_TZ = {
+  brickell: 'America/New_York',
+  coral_gables: 'America/New_York',
+  upper_east_side: 'America/New_York',
+  flatiron: 'America/New_York',
+  bryant_park: 'America/New_York',
+  manhattan_west: 'America/New_York',
+  upper_west_side: 'America/New_York',
+  dupont_circle: 'America/New_York',
+  navy_yard: 'America/New_York',
+  penn_quarter: 'America/New_York',
+};
+
+function formatMissedCallLocationName(slug) {
+  const key = String(slug || '').trim().toLowerCase();
+  return MISSED_CALL_LOCATION_LABELS[key] || (key
+    ? key.split(/[_\s-]+/).map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ')
+    : 'Silver Mirror');
+}
+
+function maskMissedCallPhone(e164) {
+  const digits = String(e164 || '').replace(/\D+/g, '');
+  if (digits.length < 4) return '****';
+  const last4 = digits.slice(-4);
+  return `(***) ***-${last4}`;
+}
+
+function formatMissedCallTime(timestamp, locationSlug) {
+  if (!timestamp) return 'just now';
+  const dt = new Date(timestamp);
+  if (Number.isNaN(dt.getTime())) return 'just now';
+  const tz = MISSED_CALL_LOCATION_TZ[String(locationSlug || '').trim().toLowerCase()] || 'America/New_York';
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+      timeZone: tz,
+    }).format(dt);
+  } catch {
+    return dt.toISOString();
+  }
+}
+
+/**
+ * Build the missed-call system prompt for a given session, interpolating
+ * {{LOCATION_NAME}}, {{CALLER_PHONE_MASKED}}, {{CALL_TIME_LOCAL}}.
+ */
+function buildMissedCallSystemPrompt(session) {
+  const base = loadMissedCallPrompt();
+  const locationSlug = session?.location_called || '';
+  const locationName = formatMissedCallLocationName(locationSlug);
+  const callerPhoneMasked = maskMissedCallPhone(session?.caller_phone);
+  const callTimeLocal = formatMissedCallTime(
+    session?.missed_call_triggered_at || session?.lastActivity || session?.createdAt,
+    locationSlug,
+  );
+  return base
+    .replaceAll('{{LOCATION_NAME}}', locationName)
+    .replaceAll('{{CALLER_PHONE_MASKED}}', callerPhoneMasked)
+    .replaceAll('{{CALL_TIME_LOCAL}}', callTimeLocal);
+}
+
+/**
+ * Pick the right system prompt for a session.
+ *   - missed_call sessions → missed-call prompt with placeholders interpolated
+ *   - sessions with a saved systemPrompt (membership mode etc.) → that
+ *   - everything else → the general system prompt
+ */
+function getSystemPromptForSession(session) {
+  if (session?.session_mode === 'missed_call') {
+    return buildMissedCallSystemPrompt(session);
+  }
+  if (session?.systemPrompt) {
+    return session.systemPrompt;
+  }
+  return loadSystemPrompt();
 }
 
 let cachedClient = null;
@@ -157,6 +265,12 @@ export {
   loadSystemPrompt,
   getSystemPrompt,
   buildSystemPromptWithProfile,
+  loadMissedCallPrompt,
+  buildMissedCallSystemPrompt,
+  getSystemPromptForSession,
+  formatMissedCallLocationName,
+  maskMissedCallPhone,
+  formatMissedCallTime,
   sendMessage,
   parseMemberLookup,
   stripMemberLookup,

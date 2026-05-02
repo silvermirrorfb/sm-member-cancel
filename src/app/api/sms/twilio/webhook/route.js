@@ -416,6 +416,103 @@ export async function POST(request) {
       }
     }
 
+    // Missed-call session routing. If this phone has an active missed-call
+    // session, route this reply through the missed-call prompt instead of
+    // the general flow. The chat/message route reads session.session_mode
+    // and selects system-prompt-missed-call.txt automatically.
+    try {
+      const { getSessionByPhone } = await import('../../../../../lib/sms-sessions');
+      const missedCallSession = await getSessionByPhone(from);
+      if (missedCallSession?.session_mode === 'missed_call') {
+        // Hard kill switch: if reply handling is disabled, send a static
+        // fallback and do NOT invoke Claude. Session is preserved for
+        // observability per spec §1.10.
+        if (process.env.MISSED_CALL_REPLY_HANDLING_ENABLED === 'false') {
+          const fallbackTwiml = buildTwimlMessage('Thanks, a teammate will follow up soon.');
+          if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
+          return new NextResponse(fallbackTwiml, {
+            status: 200,
+            headers: buildTwimlHeaders(rateLimit),
+          });
+        }
+
+        // Detect CALLBACK keyword: confirm in one message, log to
+        // CallbackQueue Sheet, do NOT invoke Claude.
+        if (/^\s*callback\s*\.?\s*$/i.test(body)) {
+          const locationName = missedCallSession.location_called || 'the location';
+          const callbackReply = `Got it, I've flagged this for a teammate at ${locationName}. Someone will call you back shortly during business hours.`;
+          try {
+            const notify = await import('../../../../../lib/notify');
+            if (typeof notify.logCallbackQueueEntry === 'function') {
+              await notify.logCallbackQueueEntry({
+                callerPhone: from,
+                location: missedCallSession.location_called || null,
+                originalAutotextTime: missedCallSession.missed_call_triggered_at || null,
+                status: 'pending',
+              });
+            }
+          } catch (err) {
+            console.warn('[sms-webhook] callback queue logging failed:', err?.message || err);
+          }
+          try {
+            const { fireGa4Event } = await import('../../../../../lib/ga4');
+            await fireGa4Event('auto_text_reply', {
+              location: missedCallSession.location_called || null,
+              reply_kind: 'callback_request',
+            });
+          } catch {}
+          await logSmsChatMessages([{
+            sessionId: missedCallSession.id,
+            timestamp: new Date().toISOString(),
+            direction: 'inbound',
+            phone: from,
+            content: body,
+            offerType: 'missed_call_callback',
+            outcome: 'callback_requested',
+            location: missedCallSession.location_called || null,
+          }]).catch(() => {});
+          const callbackTwiml = buildTwimlMessage(callbackReply);
+          if (messageSid) storeReplyForMessageSid(messageSid, callbackTwiml);
+          return new NextResponse(callbackTwiml, {
+            status: 200,
+            headers: buildTwimlHeaders(rateLimit),
+          });
+        }
+
+        // Log inbound for observability, then route to Claude with the
+        // missed-call prompt. The chat route reads session.session_mode
+        // and selects the right prompt automatically.
+        await logSmsChatMessages([{
+          sessionId: missedCallSession.id,
+          timestamp: new Date().toISOString(),
+          direction: 'inbound',
+          phone: from,
+          content: body,
+          offerType: 'missed_call_reply',
+          outcome: 'message_received',
+          location: missedCallSession.location_called || null,
+        }]).catch(() => {});
+
+        try {
+          const { fireGa4Event } = await import('../../../../../lib/ga4');
+          await fireGa4Event('auto_text_reply', {
+            location: missedCallSession.location_called || null,
+            reply_kind: 'general',
+          });
+        } catch {}
+
+        const reply = await runChatMessageForSms(missedCallSession.id, body, from);
+        const twiml = buildTwimlMessage(reply || GENERIC_FAILURE_REPLY);
+        if (messageSid) storeReplyForMessageSid(messageSid, twiml);
+        return new NextResponse(twiml, {
+          status: 200,
+          headers: buildTwimlHeaders(rateLimit),
+        });
+      }
+    } catch (err) {
+      console.warn('[sms-webhook] missed-call routing failed, falling through to general:', err?.message || err);
+    }
+
     const sessionId = await resolveSessionIdForPhone(from);
     const activeSession = await getSession(sessionId);
     await logSmsChatMessages([{

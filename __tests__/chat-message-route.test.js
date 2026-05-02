@@ -30,6 +30,8 @@ vi.mock('../src/lib/rate-limit.js', () => ({
 
 vi.mock('../src/lib/claude.js', () => ({
   getSystemPrompt: (...args) => mockGetSystemPrompt(...args),
+  getSystemPromptForSession: (session) =>
+    session?.systemPrompt || mockGetSystemPrompt(),
   buildSystemPromptWithProfile: vi.fn(),
   sendMessage: (...args) => mockSendMessage(...args),
   parseMemberLookup: vi.fn(),

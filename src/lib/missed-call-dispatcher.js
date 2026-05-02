@@ -2,6 +2,35 @@ import { Redis } from '@upstash/redis';
 import { isOnStopSet } from './sms-member-registry';
 import { createMissedCallSession, normalizePhone } from './sms-sessions';
 import { fireGa4Event } from './ga4';
+import { sendTwilioSms } from './twilio';
+import { logSmsChatMessages } from './notify';
+
+const MISSED_CALL_AUTOTEXT_TEMPLATE =
+  "Hi, we're sorry we missed your call at Silver Mirror {{LOCATION_NAME}}. Our teammate is on the other line. Can our text team help you in the meantime? Reply CALLBACK to request a callback. Reply STOP to opt out.";
+
+const LOCATION_DISPLAY_NAMES = {
+  brickell: 'Brickell',
+  coral_gables: 'Coral Gables',
+  upper_east_side: 'Upper East Side',
+  flatiron: 'Flatiron',
+  bryant_park: 'Bryant Park',
+  manhattan_west: 'Manhattan West',
+  upper_west_side: 'Upper West Side',
+  dupont_circle: 'Dupont Circle',
+  navy_yard: 'Navy Yard',
+  penn_quarter: 'Penn Quarter',
+};
+
+function formatLocationName(slug) {
+  const key = String(slug || '').trim().toLowerCase();
+  if (LOCATION_DISPLAY_NAMES[key]) return LOCATION_DISPLAY_NAMES[key];
+  if (!key) return 'Silver Mirror';
+  return key
+    .split(/[_\s-]+/)
+    .map((p) => (p ? p.charAt(0).toUpperCase() + p.slice(1) : ''))
+    .join(' ')
+    .trim() || 'Silver Mirror';
+}
 
 const DISPATCH_DEDUPE_PREFIX = 'missed-call-dispatched-callsid:';
 const COOLDOWN_PREFIX = 'missed-call-cooldown:';
@@ -221,8 +250,10 @@ async function dispatchMissedCallAutotext(payload, { now = new Date() } = {}) {
     return { sent: false, reason: 'outside_send_window' };
   }
 
-  // All gates passed. Set cooldown, boot session, fire GA4 "would send" event.
-  // VC-4 will add the actual Twilio SMS send here.
+  // All gates passed. Set cooldown FIRST so a transient send-failure does
+  // not allow rapid re-attempts. Then send the autotext via Twilio. Boot
+  // the missed-call session only after the SMS is on the wire (so a
+  // failed send does not leave a session pointing at nothing).
   if (redis) {
     try {
       await redis.set(`${COOLDOWN_PREFIX}${callerPhoneE164}`, '1', { ex: getCooldownSeconds() });
@@ -231,21 +262,53 @@ async function dispatchMissedCallAutotext(payload, { now = new Date() } = {}) {
     }
   }
 
+  const body = MISSED_CALL_AUTOTEXT_TEMPLATE.replace(
+    '{{LOCATION_NAME}}',
+    formatLocationName(locationCalled),
+  );
+
+  let messageSid = null;
+  try {
+    const sendResult = await sendTwilioSms({ to: callerPhoneE164, body });
+    messageSid = sendResult?.sid || null;
+  } catch (err) {
+    console.error('[missed-call-dispatcher] sendTwilioSms failed:', err?.message || err);
+    fireGa4Event('auto_text_suppressed', { ...ga4Base, reason: 'send_failed' }).catch(() => {});
+    return { sent: false, reason: 'send_failed', error: err?.message || String(err) };
+  }
+
   let sessionId = null;
   try {
     sessionId = await createMissedCallSession({
       callSid,
       callerPhone: callerPhoneE164,
       locationCalled,
+      outbound_autotext_sid: messageSid,
       timestamp: payload.timestamp || now.toISOString(),
     });
   } catch (err) {
     console.error('[missed-call-dispatcher] createMissedCallSession failed:', err?.message || err);
   }
 
-  fireGa4Event('auto_text_would_send', { ...ga4Base, sessionId }).catch(() => {});
+  // Sheets logging matches the existing outbound logging shape.
+  try {
+    await logSmsChatMessages([{
+      sessionId,
+      timestamp: now.toISOString(),
+      direction: 'outbound',
+      phone: callerPhoneE164,
+      content: body,
+      offerType: 'missed_call_autotext',
+      outcome: 'sent',
+      location: locationCalled,
+    }]);
+  } catch (err) {
+    console.warn('[missed-call-dispatcher] sheets log failed:', err?.message || err);
+  }
 
-  return { sent: false, reason: 'awaiting_vc4_send_implementation', sessionId };
+  fireGa4Event('auto_text_sent', { ...ga4Base, sessionId, messageSid }).catch(() => {});
+
+  return { sent: true, sessionId, messageSid };
 }
 
 export {

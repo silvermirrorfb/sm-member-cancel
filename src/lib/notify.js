@@ -29,6 +29,26 @@ const WIDGET_OPEN_HEADERS = [
   'Logged At',
   'Source',
 ];
+const CALLBACK_QUEUE_SHEET_TITLE = 'CallbackQueue';
+const CALLBACK_QUEUE_HEADERS = [
+  'Timestamp',
+  'Caller Phone',
+  'Location',
+  'Original Autotext Time',
+  'Status',
+];
+const MISSED_CALLS_SHEET_TITLE = 'MissedCalls';
+const MISSED_CALLS_HEADERS = [
+  'Timestamp',
+  'Location',
+  'Caller Phone (masked)',
+  'Call Status',
+  'Autotext Sent',
+  'Suppression Reason',
+  'Reply Received',
+  'Callback Requested',
+  'Session Closed Reason',
+];
 
 function isNilLike(value) {
   if (value === null || value === undefined) return true;
@@ -634,6 +654,108 @@ async function logSmsChatMessages(entries) {
   }
 }
 
+function maskPhoneForSheet(value) {
+  const digits = String(value || '').replace(/\D+/g, '');
+  if (digits.length < 4) return '****';
+  return `(***) ***-${digits.slice(-4)}`;
+}
+
+/**
+ * Append a row to the CallbackQueue tab. Used when a missed-call session
+ * receives a CALLBACK request (or other clear callback intent) so the
+ * monitoring team has a single place to call people back from.
+ *
+ * Spec: missed-call-integration-spec §1.9 CallbackQueue tab.
+ */
+async function logCallbackQueueEntry(entry) {
+  const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
+  if (!sheetId) {
+    console.warn('GOOGLE_CHATLOG_SHEET_ID not configured — skipping CallbackQueue log');
+    return { logged: false, reason: 'Not configured' };
+  }
+  if (!entry || typeof entry !== 'object') {
+    return { logged: false, reason: 'No entry' };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
+    const sheetMeta = await getOrCreateSheetMeta(sheets, sheetId, CALLBACK_QUEUE_SHEET_TITLE);
+    await ensureSimpleSheetHeaders(sheets, sheetId, sheetMeta, CALLBACK_QUEUE_HEADERS);
+
+    const now = new Date().toISOString();
+    const row = [
+      toSheetValue(entry.timestamp || now),
+      toSheetValue(entry.callerPhone),
+      toSheetValue(entry.location),
+      toSheetValue(entry.originalAutotextTime),
+      toSheetValue(entry.status || 'pending'),
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: `${sheetMeta.title}!A:E`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [row] },
+    });
+
+    return { logged: true };
+  } catch (err) {
+    console.error('CallbackQueue logging failed:', err);
+    return { logged: false, reason: err.message };
+  }
+}
+
+/**
+ * Append a row to the MissedCalls tab. One row per missed-call decision
+ * (sent, suppressed, reply received, etc.) so the pilot dashboard has
+ * a single source of truth.
+ *
+ * Spec: missed-call-integration-spec §1.9 MissedCalls tab.
+ */
+async function logMissedCallEvent(entry) {
+  const sheetId = process.env.GOOGLE_CHATLOG_SHEET_ID;
+  if (!sheetId) {
+    console.warn('GOOGLE_CHATLOG_SHEET_ID not configured — skipping MissedCalls log');
+    return { logged: false, reason: 'Not configured' };
+  }
+  if (!entry || typeof entry !== 'object') {
+    return { logged: false, reason: 'No entry' };
+  }
+
+  try {
+    const sheets = await getSheetsClient();
+    if (!sheets) return { logged: false, reason: 'Google credentials not configured' };
+    const sheetMeta = await getOrCreateSheetMeta(sheets, sheetId, MISSED_CALLS_SHEET_TITLE);
+    await ensureSimpleSheetHeaders(sheets, sheetId, sheetMeta, MISSED_CALLS_HEADERS);
+
+    const now = new Date().toISOString();
+    const row = [
+      toSheetValue(entry.timestamp || now),
+      toSheetValue(entry.location),
+      toSheetValue(maskPhoneForSheet(entry.callerPhone)),
+      toSheetValue(entry.callStatus),
+      toSheetValue(entry.autotextSent === true ? 'yes' : entry.autotextSent === false ? 'no' : ''),
+      toSheetValue(entry.suppressionReason),
+      toSheetValue(entry.replyReceived === true ? 'yes' : entry.replyReceived === false ? 'no' : ''),
+      toSheetValue(entry.callbackRequested === true ? 'yes' : entry.callbackRequested === false ? 'no' : ''),
+      toSheetValue(entry.sessionClosedReason),
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: `${sheetMeta.title}!A:I`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [row] },
+    });
+
+    return { logged: true };
+  } catch (err) {
+    console.error('MissedCalls logging failed:', err);
+    return { logged: false, reason: err.message };
+  }
+}
+
 async function logSupportIncidentToGoogleSheets(incident) {
   const sheetId = process.env.GOOGLE_SUPPORT_INCIDENT_SHEET_ID || DEFAULT_SUPPORT_INCIDENT_SHEET_ID;
   if (!sheetId) {
@@ -1141,5 +1263,7 @@ export {
   logChatWidgetOpen,
   logSmsChatMessages,
   logSupportIncident,
+  logCallbackQueueEntry,
+  logMissedCallEvent,
   processConversationEnd,
 };

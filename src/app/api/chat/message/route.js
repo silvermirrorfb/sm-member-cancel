@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSession, addMessage, createSession, updateActivity, saveSession } from '../../../../lib/sessions';
 import {
     getSystemPrompt,
+    getSystemPromptForSession,
     buildSystemPromptWithProfile,
     sendMessage,
     parseMemberLookup,
@@ -938,8 +939,10 @@ export async function POST(request) {
             }
       }
 
-      // Determine which system prompt to use
-      const baseSystemPrompt = session.systemPrompt || getSystemPrompt();
+      // Determine which system prompt to use. getSystemPromptForSession
+      // handles missed_call sessions (interpolates location, masked phone,
+      // call time) and falls back to the general prompt otherwise.
+      const baseSystemPrompt = getSystemPromptForSession(session) || getSystemPrompt();
       const systemPrompt = channel === 'sms'
         ? `${baseSystemPrompt || ''}${SMS_SYSTEM_PROMPT_SUFFIX}`
         : baseSystemPrompt;

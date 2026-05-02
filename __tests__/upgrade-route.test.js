@@ -30,6 +30,7 @@ vi.mock('../src/lib/sessions.js', () => ({
 
 vi.mock('../src/lib/claude.js', () => ({
   getSystemPrompt: () => 'SYSTEM_PROMPT',
+  getSystemPromptForSession: (session) => session?.systemPrompt || 'SYSTEM_PROMPT',
   buildSystemPromptWithProfile: () => 'MEMBER_PROMPT',
   sendMessage: (...args) => mockSendMessage(...args),
   parseMemberLookup: () => null,
