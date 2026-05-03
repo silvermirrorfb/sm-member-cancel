@@ -1868,9 +1868,15 @@ async function scanAppointments(apiUrl, headers, context = {}) {
   }
 
   const selectedFields = ['id', startField, endField];
+  // Select BOTH the scalar clientId AND the nested client object when both exist on
+  // Boulevard's Appointment type. Selecting only the scalar leaves clientFirstName/
+  // Email/Phone null on every returned appointment, which makes the discovery code
+  // path (locations[] mode in pre-appointment) drop every candidate at the
+  // "missing firstName/email/phone" filter and silently produce zero outbound texts.
   if (clientIdField) selectedFields.push(clientIdField);
-  else if (clientObjectField) {
-    selectedFields.push(`${clientObjectField} { id firstName lastName email phone phoneNumber mobilePhone }`);
+  if (clientObjectField) {
+    // Boulevard's Client type exposes mobilePhone (not phone or phoneNumber).
+    selectedFields.push(`${clientObjectField} { id firstName lastName email mobilePhone }`);
   }
   if (providerIdField) selectedFields.push(providerIdField);
   else if (providerObjectField) selectedFields.push(`${providerObjectField} { id }`);
