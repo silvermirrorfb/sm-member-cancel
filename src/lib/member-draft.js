@@ -93,6 +93,23 @@ function pickTemplate(summary) {
   const isCredit = /credit|convert/.test(offerAccepted);
   const isAIScan = /skin.?scan|ai/.test(offerAccepted);
 
+  if (isRetained) {
+    if (isPause) {
+      if (/travel|vacation|trip/.test(reason)) return tmplTravelPause(summary);
+      if (/medical|health|surgery|pregnan/.test(reason)) return tmplMedicalPause(summary);
+      if (/lost.?job|unemploy|laid.?off|job loss/.test(reason)) return tmplLostJobPause(summary);
+      if (/forgot|didn.?t use|haven.?t used|not using/.test(reason)) return tmplForgotPause(summary);
+      if (/voucher|credit.?build|unused.?credit/.test(reason)) return tmplVoucherPause(summary);
+      return tmplCostPause(summary);
+    }
+    if (isDowngrade) {
+      if (/forgot|didn.?t use|haven.?t used|not using/.test(reason)) return tmplForgotDowngrade(summary);
+      return tmplCostDowngrade(summary);
+    }
+    if (isBimonthly) return tmplCostBimonthly(summary);
+    if (isTransfer) return tmplRelocationAnyLocation(summary);
+  }
+
   // Reason matching (order matters — more specific first)
   if (/\breaction\b|\ballergy\b|\bbreakout\b|\birritation\b/.test(reason)) {
     return isCallback ? tmplReactionCallback(summary) : tmplReactionFreeCalming(summary);
