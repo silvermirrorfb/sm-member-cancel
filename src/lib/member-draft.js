@@ -9,6 +9,11 @@
 
 const SIGNATURE = `\nWarmly,\nFernanda\nMemberships Team\nSilver Mirror\nmemberships@silvermirror.com\n(888) 677-0055`;
 
+const CURRENT_BIMONTHLY_PRICING = {
+  THIRTY_MINUTE: 99,
+  FIFTY_MINUTE: 169,
+};
+
 const LOCATION_LEADS = {
   'upper east side': { lead: 'PJ', manager: 'PJ' },
   'flatiron': { lead: 'Vanessa', manager: 'Vanessa' },
@@ -52,6 +57,19 @@ function formatTenure(months) {
   const rem = n % 12;
   if (rem === 0) return `${years} year${years === 1 ? '' : 's'}`;
   return `${years} year${years === 1 ? '' : 's'}, ${rem} month${rem === 1 ? '' : 's'}`;
+}
+
+function getCurrentBimonthlyPrice(membershipTier) {
+  const tier = String(membershipTier || '').toLowerCase();
+  if (/\b30\b/.test(tier)) return CURRENT_BIMONTHLY_PRICING.THIRTY_MINUTE;
+  if (/\b50\b/.test(tier)) return CURRENT_BIMONTHLY_PRICING.FIFTY_MINUTE;
+  return null;
+}
+
+function formatCurrentBimonthlyPricing(membershipTier) {
+  const price = getCurrentBimonthlyPrice(membershipTier);
+  if (price) return `$${price}`;
+  return `$${CURRENT_BIMONTHLY_PRICING.THIRTY_MINUTE} for 30-minute facials or $${CURRENT_BIMONTHLY_PRICING.FIFTY_MINUTE} for 50-minute facials`;
 }
 
 // --- TEMPLATE MATCHER -------------------------------------------------------
@@ -393,15 +411,20 @@ Many members tell us the 30-minute facial is actually the right fit for ongoing 
 
 function tmplCostBimonthly(s) {
   const fn = firstName(s.client_name);
+  const price = getCurrentBimonthlyPrice(s.membership_tier);
+  const pricingText = formatCurrentBimonthlyPricing(s.membership_tier);
+  const billingLine = price
+    ? `You're billed $${price} every other month instead of monthly`
+    : `Current bi-monthly pricing is ${pricingText}`;
   return {
     id: '30-cost-bimonthly',
     subject: 'Your Silver Mirror bi-monthly billing is confirmed',
     body: `Hi ${fn},
 
-I've switched you to bi-monthly billing, effective your next billing cycle. Same rate of $${s.monthly_rate}, same perks, just billed every other month instead.
+I've switched you to bi-monthly billing at our current pricing, effective your next billing cycle.
 
 Here's how it works:
-• You're billed $${s.monthly_rate} every other month instead of monthly
+• ${billingLine}
 • All member perks stay exactly the same
 • Your credits accumulate the same way
 • A 3-billing-cycle commitment applies
