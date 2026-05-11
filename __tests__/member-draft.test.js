@@ -74,6 +74,40 @@ describe('buildMemberDraft — outcome routing', () => {
     expect(draft.templateId).toBe('29-cost-pause');
   });
 
+  it('routes RETAINED + Inconsistent Usage + Pause accepted to the pause template, Emily case', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      client_name: 'Emily Merghart',
+      outcome: 'RETAINED',
+      reason_primary: 'Inconsistent Usage',
+      offer_accepted: 'Pause for 1 month',
+    });
+
+    expect(draft.templateId).toBe('29-cost-pause');
+  });
+
+  it('routes RETAINED + Inconsistent Usage + no offer accepted to the inconsistent lead template', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Inconsistent Usage',
+      offer_accepted: 'None',
+    });
+
+    expect(draft.templateId).toBe('35-inconsistent-lead');
+  });
+
+  it('routes RETAINED + Cost + Bi-monthly accepted to the bi-monthly template', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Cost Overwhelming',
+      offer_accepted: 'Bi-monthly billing',
+    });
+
+    expect(draft.templateId).toBe('30-cost-bimonthly');
+  });
+
   it('still routes RETAINED + Travel + Pause accepted to the travel-pause template', () => {
     const draft = buildMemberDraft({
       ...baseSummary,
