@@ -108,6 +108,22 @@ describe('buildMemberDraft — outcome routing', () => {
     expect(draft.templateId).toBe('30-cost-bimonthly');
   });
 
+  it('routes REFERRED + milestone inquiry to manual review without cancellation copy, Zoe Dickinson case', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      client_name: 'Zoe Dickinson',
+      outcome: 'REFERRED',
+      reason_primary: 'Missing milestone rewards due to multiple account transitions',
+      offers_presented: 'None',
+      offer_accepted: 'None',
+    });
+
+    expect(draft.templateId).toBe('43-referred-manual-review');
+    expect(draft.subject).toBe('Your Silver Mirror membership inquiry');
+    expect(draft.templateId).not.toBe('39-location-cancel');
+    expect(draft.subject).not.toMatch(/cancellation is confirmed|Your Silver Mirror membership cancellation/i);
+  });
+
   it('offers a 30-minute member bi-monthly at $99, not their grandfathered monthly price', () => {
     const draft = buildMemberDraft({
       ...baseSummary,
