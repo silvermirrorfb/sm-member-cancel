@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  getSystemPrompt,
   parseMemberLookup,
   parseSessionSummary,
   stripAllSystemTags,
@@ -103,5 +104,15 @@ describe('stripAllSystemTags', () => {
       '<session_summary>{"outcome":"RETAINED","client_name":"Z","reason_primary":"Q"}</session_summary>',
     ].join(' ');
     expect(stripAllSystemTags(input)).toBe('Before  middle   after');
+  });
+});
+
+describe('membership prompt bi-monthly pricing', () => {
+  it('instructs bi-monthly offers to use current pricing', () => {
+    const prompt = getSystemPrompt();
+
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).not.toContain('Bi-monthly: "Every-other-month billing');
+    expect(prompt).not.toContain('same rate, keeps membership active');
   });
 });

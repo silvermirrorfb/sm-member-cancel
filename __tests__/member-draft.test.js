@@ -108,6 +108,62 @@ describe('buildMemberDraft — outcome routing', () => {
     expect(draft.templateId).toBe('30-cost-bimonthly');
   });
 
+  it('offers a 30-minute member bi-monthly at $99, not their grandfathered monthly price', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      membership_tier: '30-Minute',
+      monthly_rate: '79',
+      outcome: 'RETAINED',
+      reason_primary: 'Cost Overwhelming',
+      offer_accepted: 'Bi-monthly billing',
+    });
+
+    expect(draft.body).toContain('$99');
+    expect(draft.body).not.toContain('$79');
+  });
+
+  it('offers a 50-minute member bi-monthly at $169, not their grandfathered monthly price', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      membership_tier: '50-Minute',
+      monthly_rate: '139',
+      outcome: 'RETAINED',
+      reason_primary: 'Cost Overwhelming',
+      offer_accepted: 'Bi-monthly billing',
+    });
+
+    expect(draft.body).toContain('$169');
+    expect(draft.body).not.toContain('$139');
+  });
+
+  it('shows both current bi-monthly prices when membership duration is unknown', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      membership_tier: 'Unknown',
+      monthly_rate: '79',
+      outcome: 'RETAINED',
+      reason_primary: 'Cost Overwhelming',
+      offer_accepted: 'Bi-monthly billing',
+    });
+
+    expect(draft.body).toContain('$99 for 30-minute facials');
+    expect(draft.body).toContain('$169 for 50-minute facials');
+    expect(draft.body).not.toContain('$79');
+  });
+
+  it('does not describe the generated bi-monthly offer as grandfathered or current rate', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      membership_tier: '30-Minute',
+      monthly_rate: '79',
+      outcome: 'RETAINED',
+      reason_primary: 'Cost Overwhelming',
+      offer_accepted: 'Bi-monthly billing',
+    });
+
+    expect(draft.body).not.toMatch(/grandfathered|current rate/i);
+  });
+
   it('still routes RETAINED + Travel + Pause accepted to the travel-pause template', () => {
     const draft = buildMemberDraft({
       ...baseSummary,
