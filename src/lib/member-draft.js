@@ -84,6 +84,11 @@ function pickTemplate(summary) {
 
   const isRetained = outcome === 'RETAINED';
   const isCancelled = outcome === 'CANCELLED';
+  const isReferred = outcome === 'REFERRED';
+
+  if (isReferred) {
+    return tmplReferredManualReview(summary);
+  }
 
   // When the member cancels, never send a retention/save email. Route to a
   // reason-specific cancellation template if one exists, else generic-cancelled.
@@ -853,6 +858,19 @@ function tmplLackValueFreeHydra(s) {
     body: `Hi ${fn},
 
 Let me show you the upside of your membership. I've added a complimentary HydraDerma add-on to your next visit — one of our most impactful treatments — so you can feel the difference membership makes.${SIGNATURE}`,
+  };
+}
+
+function tmplReferredManualReview(s) {
+  const fn = firstName(s.client_name);
+  return {
+    id: '43-referred-manual-review',
+    subject: 'Your Silver Mirror membership inquiry',
+    body: `Hi ${fn},
+
+Thanks for reaching out about your membership. Our team is reviewing the details you shared and will follow up with you within 48 hours.
+
+We appreciate your patience.${SIGNATURE}`,
   };
 }
 
