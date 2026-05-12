@@ -140,7 +140,22 @@ Some of these (#2 telemetry, #5 tier resolution) are good ideas as standalone PR
 
 **The fix:** `src/app/api/cron/sms-upgrade-scan/route.js` now builds candidates by scanning appointments per location (`scanAppointments({ locationId, windowStart, windowEnd })`) for a rotating subset of the target locations each run, mirroring pre-appointment's discovery filter (drop appointments missing name/email/phone), deduping by client, capping at `SMS_CRON_MAX_CANDIDATES` (default 40), then feeding them through the existing parallel-batch-of-5 sender. Knobs: `SMS_CRON_DISCOVERY_WINDOW_HOURS` (default 24), `SMS_CRON_LOCATIONS_PER_RUN` (default 2 - every location covered roughly every ~50 min), `SMS_CRON_MAX_CANDIDATES` (default 40). Also added `summary.skippedByReason` and a `console.log('[sms-upgrade-scan]', ...)` so the run shows up in Vercel logs. Test: `__tests__/sms-upgrade-scan-route.test.js`.
 
-**Post-deploy verification (still TODO):** between 9 AM and 7 PM ET, `vercel logs sm-member-cancel.vercel.app --scope silver-mirror-projects` and look for `[sms-upgrade-scan]` lines - `summary.sent > 0` on any in-window run means it's sending. Or re-run the read-only Redis check: `SCAN 0 MATCH sms-cooldown:* COUNT 1000` against Upstash - any keys = a real send in the last 6h. If `summary.sent` stays 0 across many in-window runs and `summary.skippedByReason` is dominated by `member_not_found` (~36% of Bryant Park appt-holders couldn't be matched) or `klaviyo_sms_not_subscribed`, that's a data/consent issue, not this fix - open a new QA_ISSUES item. Once a real send is confirmed, change status to VERIFIED FIXED.
+Spin-off: the `member_not_found` rate observed in the funnel (~36%) got its own issue once Cowork confirmed it persisted. See outbound-sms #9.
+
+---
+
+### outbound-sms #9
+**Status:** FIXED IN CODE 2026-05-12 (PR `fix/sms-resolve-candidate-by-clientId`), pending production verification of the new lookup path
+**Severity:** lost outbound volume + misleading skip reasons
+**Discovered:** 2026-05-12 (Cowork dig into the funnel from #8)
+
+About a third of the appointment-holders the discovery scan turns into candidates come back `member_not_found` and get dropped before the Klaviyo gate or eligibility check run. Cowork looked up four of them in Boulevard + Klaviyo: each has a real client record, but their appointments aren't attached to the record you find by name/email (Boulevard has duplicate/fragmented client records; the appointment's `clientId` points at a different duplicate). Three of the four are also genuinely `NEVER_SUBSCRIBED` for SMS in Klaviyo, so even if `lookupMember` had found them they'd be skipped at the consent gate; the fourth (Rachel Martell) IS SMS-subscribed but her appointment is at a different location than the scan slice was covering (rotation, not a bug).
+
+Root cause: discovery candidates already carry a verified `clientId` from the scanned appointment, but `/api/sms/automation/pre-appointment` threw it away and re-ran `lookupMember(name, email)` (a fuzzy name+email lookup that misses on duplicates / email mismatches).
+
+**Fix:** added `getClientById(clientId)` to `src/lib/boulevard.js` (`client(id: $id)` query, `silentErrors`, returns null on any failure or id-mismatch, inert for non-`urn:blvd:Client:` ids). `/api/sms/automation/pre-appointment` now resolves a candidate by `clientId` first and only falls back to `lookupMember` when there's no clientId or the direct fetch comes up empty. Net effect: the genuinely-opted-out candidates now correctly read `klaviyo_sms_not_subscribed` instead of `member_not_found`, and anyone genuinely eligible who was being dropped by a flaky name match now gets their text. No regression risk: if the `client(id:)` query is unsupported or fails, every call falls back to today's behavior. Tests: `__tests__/sms-automation-route.test.js` (resolves-by-clientId; falls-back-when-null).
+
+**Verify post-deploy:** watch the `[sms-upgrade-scan]` log lines for a few in-window runs - `summary.skippedByReason.member_not_found` should drop sharply (mostly migrating into `klaviyo_sms_not_subscribed`), and `summary.sent` should tick up slightly. If `member_not_found` doesn't move at all, the `client(id:)` query may be unsupported and every call is silently falling back - then we'd need to try `clients(first:1, ids: [$id])` instead. Once confirmed, change status to VERIFIED FIXED.
 
 ---
 

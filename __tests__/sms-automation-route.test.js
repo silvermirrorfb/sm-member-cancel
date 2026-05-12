@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockLookupMember = vi.fn();
+const mockGetClientById = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockResolveBoulevardLocationInput = vi.fn();
 const mockGetBoulevardAuthContext = vi.fn();
@@ -25,6 +26,7 @@ const mockLogSmsChatMessages = vi.fn();
 
 vi.mock('../src/lib/boulevard.js', () => ({
   lookupMember: (...args) => mockLookupMember(...args),
+  getClientById: (...args) => mockGetClientById(...args),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
   formatProfileForPrompt: (...args) => mockFormatProfileForPrompt(...args),
   resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
@@ -77,6 +79,7 @@ describe('sms automation route', () => {
     process.env.SMS_AUTOMATION_TOKEN = 'token';
     process.env.SMS_UPGRADE_STATUS = 'live';
     vi.clearAllMocks();
+    mockGetClientById.mockResolvedValue(null);
     mockGetSessionIdForPhone.mockReturnValue(null);
     mockSaveSession.mockImplementation(async (session) => session);
     mockFormatProfileForPrompt.mockReturnValue('profile');
@@ -724,5 +727,89 @@ describe('sms automation route', () => {
     expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].message).toContain('we can add Lip Plump and Scrub');
     expect(body.results[0].message).toContain('Reply YES to add it or NO to skip.');
+  });
+
+  it('resolves a discovery candidate by clientId and skips the name lookup', async () => {
+    mockGetClientById.mockResolvedValue({
+      clientId: 'urn:blvd:Client:abc123',
+      phone: '+19175551234',
+      tier: '50',
+      firstName: 'Rachel',
+      name: 'Rachel Martell',
+      email: 'rachel@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({ eligible: false, reason: 'no_appointments_available', diagnostics: null });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Rachel',
+            lastName: 'Martell',
+            email: 'rachel@example.com',
+            phone: '+1 (917) 555-1234',
+            clientId: 'urn:blvd:Client:abc123',
+            appointmentId: 'urn:blvd:Appointment:xyz789',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:abc123');
+    expect(mockLookupMember).not.toHaveBeenCalled();
+    expect(mockEvaluateUpgradeOpportunityForProfile).toHaveBeenCalled();
+    expect(body.results[0].reason).not.toBe('member_not_found');
+  });
+
+  it('falls back to lookupMember when getClientById returns null', async () => {
+    mockGetClientById.mockResolvedValue(null);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'urn:blvd:Client:abc123',
+      phone: '+19175551234',
+      tier: '30',
+      firstName: 'Rachel',
+      name: 'Rachel Martell',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({ eligible: false, reason: 'no_appointments_available', diagnostics: null });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Rachel',
+            lastName: 'Martell',
+            email: 'rachel@example.com',
+            phone: '+1 (917) 555-1234',
+            clientId: 'urn:blvd:Client:abc123',
+          },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:abc123');
+    expect(mockLookupMember).toHaveBeenCalled();
+    expect(body.results[0].reason).not.toBe('member_not_found');
   });
 });
