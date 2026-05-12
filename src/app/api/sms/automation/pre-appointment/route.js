@@ -7,6 +7,7 @@ import {
   evaluateUpgradeOpportunityForProfile,
   formatProfileForPrompt,
   getBoulevardAuthContext,
+  getClientById,
   lookupMember,
   resolveBoulevardLocationInput,
   scanAppointments,
@@ -709,13 +710,27 @@ export async function POST(request) {
 
       let profile = null;
       let matchedContact = null;
-      for (const contact of contacts) {
-        profile = await lookupMember(fullName, contact, {
-          preferLocationId: effectiveFallbackLocationId || undefined,
-        });
+      // Discovery candidates carry a verified clientId from the scanned
+      // appointment; resolve directly by id instead of a fuzzy name+email
+      // lookup (which misses on Boulevard's duplicate/fragmented client
+      // records). Falls back to lookupMember when there's no clientId or the
+      // direct fetch comes up empty.
+      const candidateClientId = asText(candidate?.clientId);
+      if (candidateClientId) {
+        profile = await getClientById(candidateClientId);
         if (profile) {
-          matchedContact = contact;
-          break;
+          matchedContact = profile.phone || profile.email || candidateClientId;
+        }
+      }
+      if (!profile) {
+        for (const contact of contacts) {
+          profile = await lookupMember(fullName, contact, {
+            preferLocationId: effectiveFallbackLocationId || undefined,
+          });
+          if (profile) {
+            matchedContact = contact;
+            break;
+          }
         }
       }
       if (!profile) {

@@ -4067,6 +4067,78 @@ async function lookupMember(name, emailOrPhone, options = {}) {
   } catch (err) { console.error('Boulevard API error:', err.message || err); return null; }
 }
 
+// Resolve a member profile directly from a Boulevard client id, returning the
+// same shape as lookupMember. The SMS discovery path builds candidates from
+// scanned appointments, which already carry a verified clientId; resolving by
+// that id avoids re-running a fuzzy name+email lookup, which misses on
+// Boulevard's duplicate/fragmented client records (the cause of the high
+// member_not_found rate). Returns null on ANY failure so callers fall back to
+// lookupMember; never throws. Inert/null for ids that are not Boulevard client
+// URNs (so unit-test fixtures with fake ids fall through unchanged).
+async function getClientById(clientId) {
+  const id = String(clientId || '').trim();
+  if (!id || !/^urn:blvd:Client:/i.test(id)) return null;
+  const auth = getBoulevardAuthContext();
+  if (!auth) return null;
+  try {
+    const query = `
+      query GetClientById($id: ID!) {
+        client(id: $id) {
+          id
+          firstName
+          lastName
+          email
+          mobilePhone
+          createdAt
+          appointmentCount
+          active
+          primaryLocation { id name }
+        }
+      }
+    `;
+    const data = await fetchBoulevardGraphQL(
+      auth.apiUrl,
+      auth.headers,
+      query,
+      { id },
+      { silentErrors: true, returnErrors: true },
+    );
+    if (!data || data.__error) return null;
+    const node = data?.data?.client || null;
+    // Guard against the query ignoring the filter and returning some other client.
+    if (!node || String(node.id || '') !== id) return null;
+    const membership = await findMembershipForClient(auth.apiUrl, auth.headers, node.id);
+    const commerce = await fetchClientCommerceMetrics(auth.apiUrl, auth.headers, node);
+    const preferMembershipLocation = membership && !isInactiveMembershipStatus(membership.status);
+    const resolvedLocationName = preferMembershipLocation
+      ? (membership?.location?.name || node?.primaryLocation?.name || null)
+      : (node?.primaryLocation?.name || membership?.location?.name || null);
+    const resolvedLocationId = preferMembershipLocation
+      ? (membership?.location?.id || node?.primaryLocation?.id || null)
+      : (node?.primaryLocation?.id || membership?.location?.id || null);
+    const source = membership ? {
+      ...node,
+      ...(commerce || {}),
+      membershipName: membership.name,
+      membershipStartDate: membership.startOn,
+      membershipStatus: membership.status,
+      membershipTermNumber: membership.termNumber,
+      nextChargeDate: membership.nextChargeDate,
+      unitPrice: membership.unitPrice,
+      location: resolvedLocationName,
+      locationId: resolvedLocationId,
+      lookupStrategy: 'client_by_id',
+    } : {
+      ...node,
+      ...(commerce || {}),
+      lookupStrategy: 'client_by_id',
+    };
+    return buildProfile(source);
+  } catch (err) {
+    return null;
+  }
+}
+
 function buildProfile(d) {
   const clientSince = toIsoDate(d.createdAt);
   const memberSince = toIsoDate(d.membershipStartDate || d.startOn);
@@ -4286,6 +4358,7 @@ function __resetBoulevardCachesForTests() {
 export {
   getBoulevardAuthContext,
   lookupMember,
+  getClientById,
   scanAppointments,
   buildAppointmentWindowQuery,
   evaluateUpgradeOpportunityForProfile,
