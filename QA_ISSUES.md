@@ -145,9 +145,11 @@ Spin-off: the `member_not_found` rate observed in the funnel (~36%) got its own 
 ---
 
 ### outbound-sms #9
-**Status:** FIXED IN CODE 2026-05-12 (PR `fix/sms-resolve-candidate-by-clientId`), pending production verification of the new lookup path
+**Status:** VERIFIED FIXED 2026-05-12 (PR #15 `fix/sms-resolve-candidate-by-clientId`, merged to main `fc74d9c`)
 **Severity:** lost outbound volume + misleading skip reasons
 **Discovered:** 2026-05-12 (Cowork dig into the funnel from #8)
+
+**Verification (2026-05-12, post-deploy cron trigger):** `{ candidateCount: 15, summary: { total: 15, sent: 3, skipped: 12, errors: 0, skippedByReason: { klaviyo_sms_not_subscribed: 4, no_appointments_available: 4, no_upcoming_appointment_in_window: 1, addon_already_on_booking: 1, no_upgrade_target_for_duration: 2 } } }`. `member_not_found` is gone from the skip reasons (was 3 of 23 in the pre-fix probe), the genuinely-opted-out folks now correctly read `klaviyo_sms_not_subscribed`, and 3 real texts went out with 0 errors. So Boulevard's `client(id:)` query IS supported and the by-id resolution works.
 
 About a third of the appointment-holders the discovery scan turns into candidates come back `member_not_found` and get dropped before the Klaviyo gate or eligibility check run. Cowork looked up four of them in Boulevard + Klaviyo: each has a real client record, but their appointments aren't attached to the record you find by name/email (Boulevard has duplicate/fragmented client records; the appointment's `clientId` points at a different duplicate). Three of the four are also genuinely `NEVER_SUBSCRIBED` for SMS in Klaviyo, so even if `lookupMember` had found them they'd be skipped at the consent gate; the fourth (Rachel Martell) IS SMS-subscribed but her appointment is at a different location than the scan slice was covering (rotation, not a bug).
 
