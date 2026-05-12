@@ -26,7 +26,7 @@ Issues are numbered per system, in chronological order of discovery. Numbers do 
 
 The five issues most worth knowing about right now, in order of stakes:
 
-1. **outbound-sms #8** - FIXED IN CODE 2026-05-12: the cron now builds candidates from per-location appointment discovery, not random registry sampling (which had a near-zero hit rate). Awaiting post-deploy confirmation of a real `summary.sent > 0`.
+1. **outbound-sms #8** - VERIFIED FIXED 2026-05-12 (PR #9): the cron now builds candidates from per-location appointment discovery, not random registry sampling. Post-deploy trigger sent 2 real texts (23 candidates, 0 errors); Redis cooldown keys confirm. Outbound SMS is back.
 2. **cancel-bot #6** - Bot makes fabricated escalation promises ("I've alerted our QA team") that map to no real system. Trust erosion. Decision 3 with Travis (the prompt-guardrail code portion is plannable now - see `docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Task 3.1).
 3. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decisions 1 and 2 with Travis.
 4. **cancel-bot #12** - Identity verification is name + email only. Privacy and bad-actor risk. Decision 5 with Travis.
@@ -128,9 +128,11 @@ Some of these (#2 telemetry, #5 tier resolution) are good ideas as standalone PR
 ---
 
 ### outbound-sms #8
-**Status:** FIXED IN CODE 2026-05-12 (PR: `fix/sms-cron-uses-appointment-discovery`), pending post-deploy verification
+**Status:** VERIFIED FIXED 2026-05-12 (PR #9 `fix/sms-cron-uses-appointment-discovery`, merged to main `34eb5ec`)
 **Severity:** was prod-down (near-zero sends)
 **Discovered:** May 5, 2026 (verification never closed) - root cause nailed down 2026-05-12
+
+**Verification (2026-05-12, post-deploy):** triggered the cron once via `CRON_SECRET` and got `{ candidateCount: 23, summary: { total: 23, sent: 2, skipped: 21, errors: 0, skippedByReason: { klaviyo_sms_not_subscribed: 9, addon_already_on_booking: 4, no_appointments_available: 4, no_upcoming_appointment_in_window: 3, no_upgrade_target_for_duration: 1 } } }` - two real texts sent (Martha Horan: addon offer; Stephanie Li Sullivan: duration-upgrade offer), zero errors, all skips legitimate business logic. Redis confirmed: 2 new `sms-cooldown:{phone}:{appointmentId}` keys matching the 2 sends. Outbound SMS upgrade texts are sending in production again. (Funnel note: ~39% of discovered candidates filtered at the Klaviyo SMS-consent gate - that is the TCPA gate working, expected, not a bug.)
 
 **Real root cause (the 2026-05-12 investigation):** the practical cause of the near-zero sends was NOT the PR #3 client-fields bug. PR #3 (`631a0e1`) fixed `scanAppointments`'s client-field selection, but that bug only affected the `locations[]` discovery path in `/api/sms/automation/pre-appointment`. The `sms-upgrade-scan` cron does not use that path - it was switched to random-registry-sampling in commit `3606088` (2026-04-08). Random-sampling 30 of ~6,394 registry members per run means almost no sampled member has an appointment in the next 24h, so `evaluateUpgradeOpportunityForProfile` returns `no_appointments_available` for nearly all of them (probed 6 random members 2026-05-12: all 6 returned that). Config gates were all open the whole time (`SMS_CRON_ENABLED=true`, `SMS_REQUIRE_MANUAL_LIVE_APPROVAL=false`, `SMS_UPGRADE_STATUS=live`, all 10 locations). The Redis registry is healthy (~6,394 members, valid data). `lookupMember` works. A direct `locations[]` discovery probe (Bryant Park, 24h, dryRun) returned 22 appointments with populated client fields (so PR #3 IS working) and 1 would-send addon offer (so the pipeline works end-to-end) - funnel: 8 `member_not_found`, 4 `klaviyo_sms_not_subscribed`, 3 `addon_already_on_booking`, 3 `no_upcoming_appointment_in_window`, 3 `appointment_scan_failed`, 1 would-send.
 
