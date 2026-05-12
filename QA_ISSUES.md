@@ -24,15 +24,16 @@ Issues are numbered per system, in chronological order of discovery. Numbers do 
 
 ## Currently open at the top of the list
 
-The issues most worth knowing about right now, in order of stakes:
+What's actually still open right now, in order of stakes:
 
 1. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. AWAITING Travis Decisions 1 and 2 (how aggressive after a clear refusal; geographic/medical exits).
 2. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
-3. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped 2026-05-12, but whether/how to soften the "48-hour confirmation" promise and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
-4. **cross-cutting #4** - Several integrations silently no-op when an env var is missing instead of failing loudly (was the cause of cancel-bot #4, structural enabler of #6). `src/lib/validate-env.js` exists but is not wired to fail closed everywhere. Recurring root cause.
-5. **cross-cutting #2** - No conversational integration tests. 269 Vitest tests, almost all template/unit; nothing exercises "does the bot honor 'just cancel' after a clear refusal" - the kind of test that would catch cancel-bot #5 before a guest gets hurt.
+3. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped, but whether/how to soften the "48-hour confirmation" promise and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
+4. **cancel-bot #11 / #13 / #14 / #15 / #16 / #17** - the rest of the Travis decisions (perk dollar values; refund/double-billing script; credit visibility; tone; channel-loop rule; commitment language). Code is mostly trivial; the calls aren't ours.
+5. **Sentry DSN not set** - PR #12 wired `@sentry/nextjs` but it's inert until someone creates a Sentry project and runs `vercel env add SENTRY_DSN production`. Cowork task.
+6. **Dedicated staging Vercel project** - the cross-cutting #5 "real gap": `dryRun` + synthetic mode + previews now cover most safe testing (see `docs/STAGING.md`), but a fully-isolated `sm-member-cancel-staging` project with its own env vars is still a provisioning decision for the Vercel-team owner (not done unilaterally - it's billable infra).
 
-**Recently fixed (all 2026-05-12):** outbound-sms #8 (cron now uses per-location appointment discovery, not random registry sampling - verified sending, PR #9); cross-cutting #1 (daily send counter + zero-send alert cron, PRs #10-11); error monitoring wired (Sentry, inert until `SENTRY_DSN` set, PR #12); cancel-bot #6 code portion (no-fabricated-escalation prompt rule, PR #13); cancel-bot #9 adjacent vuln (email-template reason regexes anchored with word boundaries, PR `fix/template-reason-word-boundaries`).
+**Recently fixed (all 2026-05-12):** outbound-sms #8 (cron uses per-location appointment discovery, not random registry sampling - verified sending, PR #9); outbound-sms #9 (discovery candidates resolved by clientId, `member_not_found` eliminated - verified, PR #15); cross-cutting #1 (daily send counter + zero-send alert cron, PRs #10-11); error monitoring wired (Sentry, PR #12); cancel-bot #6 code portion (no-fabricated-escalation prompt rule, PR #13); cancel-bot #9 adjacent vuln (email-template reason regexes anchored, PR #14); cross-cutting #4 (per-subsystem env validation, loud at boot, PR #16); cross-cutting #2 (conversational eval scaffold, skip-by-default) + cross-cutting #5 partial (safe-test paths documented in `docs/STAGING.md`).
 
 ---
 
@@ -407,13 +408,13 @@ No health-check alerting on outbound SMS sends. April-May outage went undetected
 ---
 
 ### cross-cutting #2
-**Status:** NOT BUILT
+**Status:** SCAFFOLDED 2026-05-12 (PR `test/conversation-evals-and-staging-doc`)
 **Severity:** structural test coverage gap
-**Outstanding since:** Ongoing
+**Discovered:** Ongoing
 
-244 Vitest tests exist, but almost all cover email template selection. No integration tests for conversational behavior. "Does the bot honor 'just cancel' after a clear refusal" is the kind of test that would have caught cancel-bot #5 before Emily got hurt.
+The unit suite covers template selection, parsing, etc., but nothing exercises the bot's actual conversational behavior. "Does the bot honor 'just cancel' after a clear refusal" is the kind of check that would have caught cancel-bot #5 before a guest got hurt.
 
-Test architecture would need to be: simulated conversation replay against the live or fixtured Claude API, scoring on rule violations.
+**Built:** `__tests__/conversation-eval.test.js` - plays scripted conversations against the real Claude API and checks responses against the rules behind real incidents: honor "just cancel" after repeated refusals (cancel-bot #5), no fabricated escalation like "alerted our QA team" (cancel-bot #6), the 3-billing-cycle commitment disclosed in the same message as a pause offer (cancel-bot #7). Skipped by default (LLM calls are slow / non-deterministic / billable); run with `RUN_CONVERSATION_EVALS=1 ANTHROPIC_API_KEY=... npx vitest run __tests__/conversation-eval.test.js` when changing `system-prompt.txt`. Assertions are lenient regex checks - a failure is a strong signal, a pass is "no obvious regression." Adding more scenarios as new bot rules land is the ongoing follow-up.
 
 ---
 
@@ -440,11 +441,13 @@ Multiple integrations silently no-op when env vars are missing instead of failin
 ---
 
 ### cross-cutting #5
-**Status:** NOT BUILT
+**Status:** PARTIAL - existing safe-test paths documented 2026-05-12 (PR `test/conversation-evals-and-staging-doc`); a dedicated staging project is still a provisioning decision
 **Severity:** quality gate gap
-**Outstanding since:** Ongoing
+**Discovered:** Ongoing
 
-No staging environment. Every change ships to production and gets tested against real guest data. Synthetic appointments and synthetic members would let behavior changes be verified without risk to real sends or real conversations.
+No fully-isolated staging environment. Every change ships to the one production project and runs against real guest data.
+
+**Documented (`docs/STAGING.md`):** the ways to verify a change without a real send or a real conversation - `dryRun: true` on `/api/sms/automation/pre-appointment` (full pipeline, no Twilio call); synthetic mode on `/api/qa/upgrade-check` (`QA_SYNTHETIC_MODE_TOKEN` + `syntheticProfile`/`syntheticAppointments`/`syntheticCandidates`, zero Boulevard calls); the conversational evals (cross-cutting #2); Vercel preview deployments (with the caveat that they share production env vars). **Still open:** a real `sm-member-cancel-staging` Vercel project with its own env vars (Boulevard sandbox, test Twilio number or `SMS_REQUIRE_MANUAL_LIVE_APPROVAL=true`, separate Redis namespace, separate Sentry project). That requires creating a new billable project and was intentionally not done unilaterally - it's a call for whoever owns the Vercel team. See `docs/STAGING.md` "The real gap."
 
 ---
 
