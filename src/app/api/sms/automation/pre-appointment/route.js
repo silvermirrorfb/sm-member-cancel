@@ -12,6 +12,7 @@ import {
   scanAppointments,
 } from '../../../../../lib/boulevard';
 import { logSmsChatMessages } from '../../../../../lib/notify';
+import { incrementDailySendCount } from '../../../../../lib/sms-metrics';
 import {
   bindPhoneToSession,
   getSessionIdForPhone,
@@ -1091,6 +1092,7 @@ export async function POST(request) {
           outcome: offerType === 'reminder' ? 'reminder_sent' : 'initial_sent',
         }]);
         sentCount += 1;
+        await incrementDailySendCount();
         results.push({
           candidate: { firstName, lastName, email: email || null, phone: phone || null },
           profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
