@@ -142,7 +142,9 @@ Read it in this order:
 4. `summary.sent = 0` with `results[]` showing legitimate reasons (`klaviyo_sms_not_subscribed`, no upcoming appointment, cooldown, or a `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` hold) means the fix works, just no eligible sends in that run. Note `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` can suppress every send by design - if it is on, `sent: 0` is expected and tells you nothing about PR #3.
 5. `summary.errors > 0`, an empty `registryCounts`, or `skipped: 'registry_empty'` means something ELSE is broken (seed cron, Boulevard auth) - dig further.
 
-As of May 12 this verification is still pending (Cowork has it). Until it closes, every claim about "outbound SMS is back" is a hope, not a fact.
+**Config side verified clean 2026-05-12** (via `vercel env pull`): `SMS_CRON_ENABLED` is `true`, `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` is `false`, `SMS_UPGRADE_STATUS` is `live`, `SMS_REQUIRE_KLAVIYO_OPT_IN` is `true`, and `SMS_CRON_LOCATIONS` lists all 10 locations. So nothing in configuration is gating sends - the cron is actively attempting real sends every 10 minutes inside the 9-to-7 ET window. That narrows what remains: a `sent: 0` now points at the PR #3 code path (do candidates come back with `client.firstName/email/phone` populated?) or a genuine absence of eligible appointments + Klaviyo-subscribed guests in that run, not a switch someone forgot to flip. Note the cron route does not log its `summary`, so logs alone won't show `sent` - you need to observe the JSON response directly (auth with `CRON_SECRET`) or check the SMS-send log Sheet.
+
+As of May 12 the send-side verification is still pending (Cowork has it). Until it closes, every claim about "outbound SMS is back" is a hope, not a fact.
 
 ---
 
