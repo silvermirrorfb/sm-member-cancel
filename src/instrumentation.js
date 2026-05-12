@@ -3,6 +3,14 @@
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    // Loud env-var check at boot: prints which subsystems are degraded/disabled
+    // due to missing config (QA_ISSUES cross-cutting #4). Never throws.
+    try {
+      const { validateEnv } = await import('./lib/validate-env');
+      validateEnv();
+    } catch {
+      // validation must never break startup
+    }
     await import('./sentry.server.config');
   } else if (process.env.NEXT_RUNTIME === 'edge') {
     await import('./sentry.edge.config');
