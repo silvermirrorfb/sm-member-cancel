@@ -16,6 +16,7 @@
   "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
+    "@sentry/nextjs": "^10.53.1",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.37.0",
     "googleapis": "^171.4.0",

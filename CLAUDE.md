@@ -182,11 +182,13 @@ Redis: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
 
 Google Sheets: `GOOGLE_SHEET_ID` (the cancellations sheet; `GOOGLE_CANCELLATIONS_SHEET_ID` does not exist), `GOOGLE_CHATLOG_SHEET_ID` (was the silent-failure in Issue 4, cancel bot - confirmed set), `GOOGLE_SERVICE_ACCOUNT_JSON`
 
-Email / notify (`notify.js`): `EMAIL_TO`, `EMAIL_FROM`, `EMAIL_ESCALATION`, `EMAIL_REACTION_ALERTS`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (there is no `MEMBERSHIPS_NOTIFY_EMAIL`)
+Email / notify (`notify.js`): `EMAIL_TO`, `EMAIL_FROM`, `EMAIL_ESCALATION` (also the recipient for the zero-send ops alert), `EMAIL_REACTION_ALERTS`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (there is no `MEMBERSHIPS_NOTIFY_EMAIL`)
+
+SMS monitoring (added 2026-05-12): `SMS_MIN_DAILY_SENDS` (zero-send alert threshold, default 1; the `sms-health-check` cron emails `EMAIL_ESCALATION` if yesterday's send count is below this). The send count lives in Redis at `sms-sent:<YYYY-MM-DD>` (3-day TTL), bumped by `src/lib/sms-metrics.js` on every Twilio send.
 
 Chat widget: `ANTHROPIC_API_KEY`, `ALLOWED_ORIGIN`
 
-Not set, should be: `SENTRY_DSN` or any error-monitoring DSN. There is no runtime error monitoring on this codebase, which is part of why the 3-week outbound SMS outage went undetected.
+Error monitoring: Sentry (`@sentry/nextjs`) is wired (`src/instrumentation.js`, `src/sentry.server.config.js`, `src/sentry.edge.config.js`, `src/instrumentation-client.js`, `next.config.js` `withSentryConfig`) but **inert until a DSN is set**. To activate: create a Sentry project, then `vercel env add SENTRY_DSN production` (server-side; also `preview`/`development`) and optionally `vercel env add NEXT_PUBLIC_SENTRY_DSN production` (browser widget); for source-map upload also add `SENTRY_AUTH_TOKEN` and pass `org`/`project` to `withSentryConfig`. Redeploy after adding env vars (see `MEMORY.md`).
 
 **Production env var audit was last done 2026-05-12.** Any future agent touching `notify.js` or the cron routes should re-verify against `vercel env ls production --scope silver-mirror-projects`. See QA_ISSUES Issue 6 (cancel bot). Note `src/lib/validate-env.js` exists and gives partial env-presence checking; it is not yet wired to fail closed everywhere.
 
