@@ -53,4 +53,12 @@ const nextConfig = {
   },
 };
 
-module.exports = nextConfig;
+const { withSentryConfig } = require('@sentry/nextjs');
+
+// Sentry build-time wiring. Runtime-inert until SENTRY_DSN is set; the
+// org/project/authToken options (needed only for source-map upload) are
+// intentionally omitted until a Sentry project exists.
+module.exports = withSentryConfig(nextConfig, {
+  silent: true,
+  disableLogger: true,
+});
