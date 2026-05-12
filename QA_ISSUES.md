@@ -132,13 +132,17 @@ Some of these (#2 telemetry, #5 tier resolution) are good ideas as standalone PR
 **Severity:** unknown until verified
 **Outstanding since:** May 5, 2026
 
-PR #3 was merged May 5. The verification step is: run `/api/cron/sms-upgrade-scan` and confirm what the result looks like. Three possible outcomes:
+PR #3 was merged May 5. The verification step is: observe a real in-window `/api/cron/sms-upgrade-scan` run and read its response. The actual response shape is `{ ok, registryCounts, candidateCount, summary: { total, sent, skipped, errors }, results: [ { candidate, status, reason } ] }`. There is no `summary.skippedByReason` field (an earlier version of these docs claimed one - that histogram was item #2 in the rejected 5-fix bundle, never merged, see #7); the per-candidate `results[]` array is the only breakdown of why each candidate was or was not sent.
 
-- `summary.sent > 0` means the outage is fully over, fix works, system is sending
-- `summary.sent = 0` with `summary.skippedByReason` showing real filtering (Klaviyo, cooldown, send window) means the fix works, just no eligible sends in that specific run
-- `summary.sent = 0` with errors or empty candidate pool means something ELSE is broken, dig further
+Read it in this order:
 
-As of May 12 this verification is still pending. Until it closes, every claim about "outbound SMS is back" is a hope, not a fact.
+1. If the response is `{ ok: true, skipped: 'SMS_CRON_ENABLED is false' }`, the cron is switched off. Not a bug, but nothing will ever send until that flag is truthy. Check this FIRST.
+2. If the response is `{ ok: true, skipped: 'Outside configured send window', ... }`, you ran it outside 9 AM to 7 PM America/New_York. Re-check during the window.
+3. `summary.sent > 0` means the outage is fully over, fix works, system is sending.
+4. `summary.sent = 0` with `results[]` showing legitimate reasons (`klaviyo_sms_not_subscribed`, no upcoming appointment, cooldown, or a `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` hold) means the fix works, just no eligible sends in that run. Note `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` can suppress every send by design - if it is on, `sent: 0` is expected and tells you nothing about PR #3.
+5. `summary.errors > 0`, an empty `registryCounts`, or `skipped: 'registry_empty'` means something ELSE is broken (seed cron, Boulevard auth) - dig further.
+
+As of May 12 this verification is still pending (Cowork has it). Until it closes, every claim about "outbound SMS is back" is a hope, not a fact.
 
 ---
 

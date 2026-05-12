@@ -6,6 +6,8 @@
 
 **Last updated:** May 11, 2026
 
+> **2026-05-12 note:** Some numbers below are stale. The `sms-upgrade-scan` cron now takes `SMS_CRON_BATCH_SIZE` candidates per run, default 30 (not 5), so the "7.5% daily coverage" math here is out of date. The cron response is `summary: { total, sent, skipped, errors }` plus a per-candidate `results[]` array - there is no `skippedByReason` histogram (that was the rejected bundle item #2, never merged). For current cron parameters and the PR #3 verification procedure, see the root `CLAUDE.md` ("Outbound SMS pipeline") and `QA_ISSUES.md` (outbound-sms #8). The narrative below is still accurate on history and root causes.
+
 ---
 
 ## What the outbound SMS system is supposed to do

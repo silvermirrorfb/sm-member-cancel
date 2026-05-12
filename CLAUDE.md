@@ -92,13 +92,15 @@ When in doubt on a retention or compliance call, the routing is: Matt decides. J
 
 ### Outbound SMS pipeline
 
-Two cron jobs cooperate:
+Three cron jobs are configured in `vercel.json`:
 
-**`/api/cron/sms-registry-seed`** runs daily at 6 AM ET. Pages through Boulevard `clients` GraphQL API, pulls every guest for each of the 10 locations, writes to Upstash Redis under `sms-registry:loc:{locationId}` with 7-day TTL. Registry size around 4,000 to 4,100 guests total. This workaround exists because Boulevard has no "appointments by location" query. See QA_ISSUES Issue 1 (outbound SMS).
+**`/api/cron/sms-registry-seed`** runs `0 10 * * *` (10:00 UTC, around 6 AM ET in summer). Pages through Boulevard `clients` GraphQL API, pulls every guest for each of the 10 locations, writes to Upstash Redis under `sms-registry:loc:{locationId}` with 7-day TTL. Registry size around 4,000 to 4,100 guests total. This workaround exists because Boulevard has no "appointments by location" query. See QA_ISSUES Issue 1 (outbound SMS).
 
-**`/api/cron/sms-upgrade-scan`** runs every 10 minutes during business hours. Fisher-Yates shuffles the registry, picks 5 candidates (5, not 50, not 10, due to Vercel timeout constraints, see Issue 3), calls Boulevard per candidate for upcoming appointments, applies fit and gap and skin-profile rules, hits Klaviyo for subscription status, sends via Twilio if all gates pass, logs to Google Sheet. Current daily coverage of the registry is around 7.5%.
+**`/api/cron/sms-upgrade-scan`** runs `*/10 * * * *` (every 10 minutes, all hours) but no-ops outside the send window. Gate order inside the route: (1) `CRON_SECRET` auth, (2) `SMS_CRON_ENABLED` must be truthy or it returns `{ ok: true, skipped: 'SMS_CRON_ENABLED is false' }`, (3) the 9 AM to 7 PM `America/New_York` send window (`SMS_SEND_TIMEZONE` / `SMS_CRON_SEND_START_HOUR` / `SMS_CRON_SEND_END_HOUR`), (4) `SMS_CRON_LOCATIONS` must be non-empty, (5) registry must be populated. Then it Fisher-Yates shuffles the registry, takes `SMS_CRON_BATCH_SIZE` candidates (default 30, not 5 - the docs that say 5 are stale), processes them in parallel sub-batches of 5 with a 5s pause between, and for each candidate calls `/api/sms/automation/pre-appointment` with `dryRun: false`. That downstream endpoint applies fit/gap/skin-profile rules, the Klaviyo subscription check, the `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` gate, and the actual Twilio send.
 
-A healthy response shape is documented at the bottom of `docs/outbound-sms-system-and-issues.md`. If `summary.sent` is 0 across many consecutive runs AND `summary.skippedByReason` doesn't show meaningful filtering, something is wrong.
+The response shape is `{ ok, registryCounts, candidateCount, summary: { total, sent, skipped, errors }, results: [ { candidate, status, reason } ] }`. There is no `skippedByReason` histogram - the per-candidate `results[]` is the only breakdown. (The skip-reason histogram was item #2 in the rejected 5-fix bundle, never merged. See QA_ISSUES Issue 7, outbound SMS.) If `summary.sent` is 0 across many in-window runs AND `results[]` doesn't show legitimate skip reasons (Klaviyo not subscribed, no upcoming appointment, cooldown), something is wrong. Before concluding a run "failed," confirm `SMS_CRON_ENABLED` is on, you're inside the 9-to-7 ET window, and `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` is not silently holding sends.
+
+**`/api/cron/missed-call-dispatch-drain`** runs `*/1 * * * *` (every minute), draining the missed-call autotext queue. That workload (Brickell pilot) is still in build, so this is mostly draining an empty queue today.
 
 ### Cancellation widget pipeline
 
@@ -156,20 +158,37 @@ sm-member-cancel/
 
 ## Environment variables that matter
 
-The full list is in `.env.example`. The ones that have caused production issues:
+The full list is in `.env.example`. These are the real names as they exist in Vercel production (audited 2026-05-12), grouped by what they do:
 
-- `BOULEVARD_API_URL` - has `/graphql` baked in, do not modify
-- `BOULEVARD_API_TOKEN` - required for everything
-- `KLAVIYO_API_KEY` - required for the SMS consent gate
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` - `+18885127546`
-- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
-- `GOOGLE_CHATLOG_SHEET_ID` - was the silent-failure in Issue 4 (cancel bot)
-- `GOOGLE_CANCELLATIONS_SHEET_ID` - `1zq3a5VrYVKXNu_ITfPcMcX6jZNTJepzNGIcy49c6uTg`
-- `ANTHROPIC_API_KEY` - for the widget conversation
-- `MEMBERSHIPS_NOTIFY_EMAIL` - memberships@silvermirror.com
-- `SENTRY_DSN` or equivalent - not currently set, should be
+Boulevard:
+- `BOULEVARD_API_URL` - has `/graphql` baked in, do NOT modify
+- `BOULEVARD_API_KEY`, `BOULEVARD_API_SECRET`, `BOULEVARD_BUSINESS_ID` - auth (there is no single `BOULEVARD_API_TOKEN`)
+- `BOULEVARD_SERVICE_ID_50MIN`, `BOULEVARD_ENABLE_UPGRADE_MUTATION`, `BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK` - feature flags
 
-**Production env var audit is overdue.** Any future agent touching `notify.js` should verify the production env at the same time. See QA_ISSUES Issue 6 (cancel bot).
+Klaviyo (the TCPA consent gate):
+- `KLAVIYO_PRIVATE_API_KEY` (there is no `KLAVIYO_API_KEY`), `KLAVIYO_API_BASE_URL`, `KLAVIYO_REVISION`, `SMS_REQUIRE_KLAVIYO_OPT_IN`
+
+Twilio:
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` (the var is `_FROM_NUMBER`, value `+18885127546`)
+
+SMS cron controls:
+- `SMS_CRON_ENABLED` - master on/off for `sms-upgrade-scan`. If falsy the cron is a no-op.
+- `SMS_CRON_LOCATIONS` - comma-separated location IDs the scan targets; empty -> 400
+- `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` - downstream send gate; can produce `sent: 0` with no bug
+- `SMS_UPGRADE_STATUS`, `SMS_AUTOMATION_TOKEN`, `CRON_SECRET`
+- `SMS_CRON_BATCH_SIZE` (not currently set; defaults to 30), `SMS_SEND_TIMEZONE`/`SMS_CRON_SEND_START_HOUR`/`SMS_CRON_SEND_END_HOUR` (not set; default 9-19 America/New_York)
+
+Redis: `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`
+
+Google Sheets: `GOOGLE_SHEET_ID` (the cancellations sheet; `GOOGLE_CANCELLATIONS_SHEET_ID` does not exist), `GOOGLE_CHATLOG_SHEET_ID` (was the silent-failure in Issue 4, cancel bot - confirmed set), `GOOGLE_SERVICE_ACCOUNT_JSON`
+
+Email / notify (`notify.js`): `EMAIL_TO`, `EMAIL_FROM`, `EMAIL_ESCALATION`, `EMAIL_REACTION_ALERTS`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (there is no `MEMBERSHIPS_NOTIFY_EMAIL`)
+
+Chat widget: `ANTHROPIC_API_KEY`, `ALLOWED_ORIGIN`
+
+Not set, should be: `SENTRY_DSN` or any error-monitoring DSN. There is no runtime error monitoring on this codebase, which is part of why the 3-week outbound SMS outage went undetected.
+
+**Production env var audit was last done 2026-05-12.** Any future agent touching `notify.js` or the cron routes should re-verify against `vercel env ls production --scope silver-mirror-projects`. See QA_ISSUES Issue 6 (cancel bot). Note `src/lib/validate-env.js` exists and gives partial env-presence checking; it is not yet wired to fail closed everywhere.
 
 ---
 
