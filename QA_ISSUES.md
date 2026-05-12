@@ -24,13 +24,15 @@ Issues are numbered per system, in chronological order of discovery. Numbers do 
 
 ## Currently open at the top of the list
 
-The five issues most worth knowing about right now, in order of stakes:
+The issues most worth knowing about right now, in order of stakes:
 
-1. **outbound-sms #8** - VERIFIED FIXED 2026-05-12 (PR #9): the cron now builds candidates from per-location appointment discovery, not random registry sampling. Post-deploy trigger sent 2 real texts (23 candidates, 0 errors); Redis cooldown keys confirm. Outbound SMS is back.
-2. **cancel-bot #6** - Bot made fabricated escalation promises ("I've alerted our QA team"). PARTIALLY ADDRESSED 2026-05-12: a `HARD RULE - NO FABRICATED ESCALATION` is now in `system-prompt.txt`. The broader "what should the bot promise / 48-hour language / sendBeacon" question stays with Travis (Decision 3).
-3. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decisions 1 and 2 with Travis.
-4. **cancel-bot #12** - Identity verification is name + email only. Privacy and bad-actor risk. Decision 5 with Travis.
-5. **cancel-bot #9 (adjacent vuln)** - Email-template reason matching still uses unanchored regexes for RETAINED/CANCELLED outcomes, so a substring like "transitions" false-matches "transit". Plannable now (`docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Task 3.2). (cross-cutting #1 - zero-send alerting - was BUILT 2026-05-12, PR #11.)
+1. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. AWAITING Travis Decisions 1 and 2 (how aggressive after a clear refusal; geographic/medical exits).
+2. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
+3. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped 2026-05-12, but whether/how to soften the "48-hour confirmation" promise and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
+4. **cross-cutting #4** - Several integrations silently no-op when an env var is missing instead of failing loudly (was the cause of cancel-bot #4, structural enabler of #6). `src/lib/validate-env.js` exists but is not wired to fail closed everywhere. Recurring root cause.
+5. **cross-cutting #2** - No conversational integration tests. 269 Vitest tests, almost all template/unit; nothing exercises "does the bot honor 'just cancel' after a clear refusal" - the kind of test that would catch cancel-bot #5 before a guest gets hurt.
+
+**Recently fixed (all 2026-05-12):** outbound-sms #8 (cron now uses per-location appointment discovery, not random registry sampling - verified sending, PR #9); cross-cutting #1 (daily send counter + zero-send alert cron, PRs #10-11); error monitoring wired (Sentry, inert until `SENTRY_DSN` set, PR #12); cancel-bot #6 code portion (no-fabricated-escalation prompt rule, PR #13); cancel-bot #9 adjacent vuln (email-template reason regexes anchored with word boundaries, PR `fix/template-reason-word-boundaries`).
 
 ---
 
@@ -252,10 +254,10 @@ Fix: template selection keys off outcome first, with reason-based templates only
 ---
 
 ### cancel-bot #9
-**Status:** VERIFIED FIXED for REFERRED outcomes; adjacent vulnerability still open
+**Status:** VERIFIED FIXED - REFERRED routing (PR #8, May 12) + the adjacent substring-matching vuln (PR `fix/template-reason-word-boundaries`, 2026-05-12)
 **Severity:** customer-harm (told a 5-year loyal member her membership was cancelled when it wasn't)
 **Discovered:** May 7, 2026 (Zoe Dickinson case)
-**Resolution:** PR #8 merged May 12
+**Resolution:** PR #8 merged May 12; adjacent vuln fixed 2026-05-12
 
 Zoe Dickinson asked about missing milestone rewards over 4+ years of fragmented account history. Bot correctly flagged session as REFERRED (not a cancellation). Email draft Fernanda received had subject "Your Silver Mirror membership cancellation is confirmed."
 
@@ -266,7 +268,7 @@ Two-layer root cause:
 
 Fix added new template `43-referred-manual-review` and routed REFERRED to it before any reason matching.
 
-**Adjacent vulnerability still OPEN:** Substring matching is still in the priority chain for RETAINED-with-no-save and CANCELLED outcomes. Same coincidence-match risk. Worth a tightly-scoped PR to switch to exact-match or eliminate substring matching entirely.
+**Adjacent vulnerability FIXED 2026-05-12** (PR `fix/template-reason-word-boundaries`): `pickTemplate` in `src/lib/member-draft.js` still ran unanchored reason regexes for RETAINED and CANCELLED outcomes, so `/transit/` matched "transitions", `/far/` matched many words, `/left/` matched "leftover", `/moving/` matched "removing", `/trip/` matched "stripe", `/ai/` matched "retain", etc. Fix: anchored the risky tokens with `\b...\b` word boundaries (`\btransit\b`, `\bfar\b`, `\bleft\b`, `\bmoving\b`/`\bmoved\b`, `\btrip`, `\bai\b`, `\bvalue\b`/`\bworth\b`, `\bboring\b`, `\bturnover`, `\bquit\b`, etc.); deliberate stems (`reloc`, `unemploy`, `dermatolog`, `inconsist`, ...) left intact. Regression tests in `__tests__/member-draft.test.js` (Zoe-style "...TRANSITIONS" no longer picks the transit template; "removing" no longer picks relocation; real "public transit"/"moving" still do).
 
 ---
 

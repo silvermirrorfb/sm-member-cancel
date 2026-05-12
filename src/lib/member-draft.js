@@ -96,11 +96,11 @@ function pickTemplate(summary) {
   // retention default (e.g. "cost" → 29-cost-pause), so Fernanda would receive
   // a "pause confirmed" draft for a member who explicitly cancelled.
   if (isCancelled) {
-    if (/reloc|moving|moved/.test(reason)) return tmplRelocationCancel(summary);
+    if (/\breloc|\bmoving\b|\bmoved\b/.test(reason)) return tmplRelocationCancel(summary);
     if (/dermatolog/.test(reason)) return tmplDermCancel(summary);
     if (/new.?provider|another.?spa|different.?spa/.test(reason)) return tmplNewProviderCancel(summary);
     if (/lost.?job|unemploy|laid.?off|job loss/.test(reason)) return tmplLostJobCancel(summary);
-    if (/parking|transit|commute|far/.test(reason)) return tmplLocationCancel(summary);
+    if (/\bparking\b|\btransit\b|\bcommut|\bfar\b/.test(reason)) return tmplLocationCancel(summary);
     return tmplGenericCancelled(summary);
   }
 
@@ -114,11 +114,11 @@ function pickTemplate(summary) {
   const isFreeAddon = /free.*add.?on|add.?on|peel|hydra/.test(offerAccepted);
   const isLead = /lead|consultation/.test(offerAccepted);
   const isCredit = /credit|convert/.test(offerAccepted);
-  const isAIScan = /skin.?scan|ai/.test(offerAccepted);
+  const isAIScan = /skin.?scan|\bai\b/.test(offerAccepted);
 
   if (isRetained) {
     if (isPause) {
-      if (/travel|vacation|trip/.test(reason)) return tmplTravelPause(summary);
+      if (/\btravel|\bvacation|\btrip/.test(reason)) return tmplTravelPause(summary);
       if (/medical|health|surgery|pregnan/.test(reason)) return tmplMedicalPause(summary);
       if (/lost.?job|unemploy|laid.?off|job loss/.test(reason)) return tmplLostJobPause(summary);
       if (/forgot|didn.?t use|haven.?t used|not using/.test(reason)) return tmplForgotPause(summary);
@@ -143,10 +143,10 @@ function pickTemplate(summary) {
   if (/lost.?job|unemploy|laid.?off|job loss/.test(reason)) {
     return isPause ? tmplLostJobPause(summary) : tmplLostJobCancel(summary);
   }
-  if (/travel|vacation|trip/.test(reason)) {
+  if (/\btravel|\bvacation|\btrip/.test(reason)) {
     return tmplTravelPause(summary);
   }
-  if (/reloc|moving|moved/.test(reason)) {
+  if (/\breloc|\bmoving\b|\bmoved\b/.test(reason)) {
     if (isTransfer) return tmplRelocationAnyLocation(summary);
     return tmplRelocationCancel(summary);
   }
@@ -162,10 +162,10 @@ function pickTemplate(summary) {
   if (/sold to|pushy|sales|pressur/.test(reason)) {
     return isCallback ? tmplSoldToCallback(summary) : tmplSoldToFreeAddon(summary);
   }
-  if (/repetitive|same.?thing|same.?treatment|same.?facial|boring/.test(reason)) {
+  if (/repetitive|same.?thing|same.?treatment|same.?facial|\bboring\b/.test(reason)) {
     return isFreeAddon ? tmplRepetitiveFreeAddon(summary) : tmplRepetitiveLead(summary);
   }
-  if (/turnover|left|departed|quit/.test(reason)) {
+  if (/\bturnover|\bleft\b|\bdeparted\b|\bquit\b/.test(reason)) {
     return isLead ? tmplTurnoverLead(summary) : tmplTurnoverFreeFacial(summary);
   }
   if (/no.?result|not.?working|not.?seeing/.test(reason)) {
@@ -191,13 +191,13 @@ function pickTemplate(summary) {
   if (/inconsist|varies|different.?each/.test(reason)) {
     return isCallback ? tmplInconsistentCallback(summary) : tmplInconsistentLead(summary);
   }
-  if (/parking|transit|commute|far/.test(reason)) {
+  if (/\bparking\b|\btransit\b|\bcommut|\bfar\b/.test(reason)) {
     const loc = String(summary.location || '').toLowerCase();
     if (/brickell/.test(loc)) return tmplParkingBrickell(summary);
     if (isPause || isRetained) return tmplParkingTransit(summary);
     return tmplLocationCancel(summary);
   }
-  if (/value|worth|not.?worth/.test(reason)) {
+  if (/\bvalue\b|\bworth\b/.test(reason)) {
     return isAIScan ? tmplLackValueAI(summary) : tmplLackValueFreeHydra(summary);
   }
 

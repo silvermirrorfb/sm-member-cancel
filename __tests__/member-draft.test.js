@@ -191,3 +191,60 @@ describe('buildMemberDraft — outcome routing', () => {
     expect(draft.templateId).toBe('01-travel-pause');
   });
 });
+
+describe('pickTemplate: reason matching does not catch substrings', () => {
+  it('a CANCELLED milestone-rewards reason ("...account TRANSITIONS") does not pick the location/transit template', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'Missing milestone rewards due to multiple account TRANSITIONS',
+      offer_accepted: 'None',
+    });
+    expect(draft.templateId).not.toBe('39-location-cancel');
+    expect(draft.templateId).not.toBe('38-parking-transit');
+    expect(draft.templateId).toBe('42-generic-cancelled');
+  });
+
+  it('a RETAINED milestone-rewards reason with no offer falls through to the generic template, not transit', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Missing milestone rewards due to multiple account transitions',
+      offer_accepted: 'None',
+    });
+    expect(draft.templateId).not.toBe('39-location-cancel');
+    expect(draft.templateId).not.toBe('38-parking-transit');
+    expect(draft.templateId).toBe('42-generic-cancelled');
+  });
+
+  it('a real transit reason still picks the location-cancel template (positive regression)', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'public transit to this location is unreliable',
+      offer_accepted: 'None',
+    });
+    expect(draft.templateId).toBe('39-location-cancel');
+  });
+
+  it('a real "moving" reason still picks the relocation-cancel template', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: "I'm moving to Denver",
+      offer_accepted: 'None',
+    });
+    expect(draft.templateId).toBe('02-relocation-cancel');
+  });
+
+  it('"removing" does not false-match the relocation regex', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'removing myself from the program',
+      offer_accepted: 'None',
+    });
+    expect(draft.templateId).not.toBe('02-relocation-cancel');
+    expect(draft.templateId).toBe('42-generic-cancelled');
+  });
+});
