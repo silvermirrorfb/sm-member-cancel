@@ -429,13 +429,13 @@ Mitigations in place: handoff docs, PR scope-lock rules, this `QA_ISSUES.md` fil
 ---
 
 ### cross-cutting #4
-**Status:** RECURRING ROOT CAUSE, NOT YET ADDRESSED SYSTEMATICALLY
+**Status:** ADDRESSED 2026-05-12 (PR `chore/env-validation-at-boot`)
 **Severity:** trust-erosion plus silent prod failures
-**Outstanding since:** Ongoing
+**Discovered:** Ongoing
 
 Multiple integrations silently no-op when env vars are missing instead of failing loudly. This pattern caused cancel-bot #4 (Chatlog Sheet) and is the structural enabler of cancel-bot #6 (fabricated escalation promises).
 
-Fix would be: every integration module asserts required env vars on load, fails the deploy or fails closed if any are missing. Not yet implemented across the codebase.
+**Fix:** `src/lib/validate-env.js` now defines a per-subsystem env map (`boulevard`, `email`, `sheets`, `redis`, `twilio`, `klaviyo`, `sms_cron`) and is wired into `src/instrumentation.js` so `validateEnv()` runs once at server boot - on every deploy you now get a loud `[env]` log block listing exactly which subsystems are degraded/disabled and which vars are missing (the observability that was the actual gap; the integration modules themselves already return `{ logged:false, reason:... }` / `{ sent:false, reason:... }` rather than truly silent no-ops). `assertSubsystem(name)` is exported so new integration code can fail closed explicitly. Test: `__tests__/validate-env.test.js`. (Retrofitting `assertSubsystem` into every existing module is a larger, lower-urgency follow-up - the boot-time visibility plus the existing per-call `reason` returns cover the practical risk.)
 
 ---
 
