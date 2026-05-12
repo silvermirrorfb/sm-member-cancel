@@ -27,7 +27,7 @@ Issues are numbered per system, in chronological order of discovery. Numbers do 
 The five issues most worth knowing about right now, in order of stakes:
 
 1. **outbound-sms #8** - VERIFIED FIXED 2026-05-12 (PR #9): the cron now builds candidates from per-location appointment discovery, not random registry sampling. Post-deploy trigger sent 2 real texts (23 candidates, 0 errors); Redis cooldown keys confirm. Outbound SMS is back.
-2. **cancel-bot #6** - Bot makes fabricated escalation promises ("I've alerted our QA team") that map to no real system. Trust erosion. Decision 3 with Travis (the prompt-guardrail code portion is plannable now - see `docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Task 3.1).
+2. **cancel-bot #6** - Bot made fabricated escalation promises ("I've alerted our QA team"). PARTIALLY ADDRESSED 2026-05-12: a `HARD RULE - NO FABRICATED ESCALATION` is now in `system-prompt.txt`. The broader "what should the bot promise / 48-hour language / sendBeacon" question stays with Travis (Decision 3).
 3. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decisions 1 and 2 with Travis.
 4. **cancel-bot #12** - Identity verification is name + email only. Privacy and bad-actor risk. Decision 5 with Travis.
 5. **cancel-bot #9 (adjacent vuln)** - Email-template reason matching still uses unanchored regexes for RETAINED/CANCELLED outcomes, so a substring like "transitions" false-matches "transit". Plannable now (`docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Task 3.2). (cross-cutting #1 - zero-send alerting - was BUILT 2026-05-12, PR #11.)
@@ -201,7 +201,7 @@ Code fix is small (system prompt edit). Business decision is Travis's call: how 
 ---
 
 ### cancel-bot #6
-**Status:** AWAITING DECISION (Travis Decision 3) - HIGHEST PRIORITY OPEN ITEM
+**Status:** PARTIALLY ADDRESSED - prompt guardrail shipped 2026-05-12 (PR `fix/bot-no-fabricated-escalations`); the broader "what should the bot promise / 48-hour language / sendBeacon robustness" question stays AWAITING DECISION (Travis Decision 3)
 **Severity:** trust-erosion
 **Discovered:** Ongoing
 
@@ -214,12 +214,12 @@ Bot says things like:
 
 Audit of `src/lib/notify.js`:
 
-- "Memberships team" claim is partially real. Email to memberships@ fires, Google Sheet logging fires, reason-category alerts fire.
-- "QA team alert" and "flagging as urgent" map to NOTHING. Bot is fabricating these.
+- "Memberships team" claim is partially real. Email to memberships@ fires (env confirmed set 2026-05-12), Google Sheet logging fires, reason-category alerts fire.
+- "QA team alert" and "flagging as urgent" map to NOTHING. Bot is fabricating these (the system prompt never authorized them - the model invented them).
 - "48 hours" depends on memberships team capacity, which varies.
 - All of the above silently no-op if any env var is missing. Bot still tells the member they'll get an email even if the email system is broken.
 
-Recommended fixes: production env var audit, strip fabricated claims from bot prompt, consider client-side `sendBeacon` to make leg-A more robust against tab-close failures. None shipped yet.
+**Shipped 2026-05-12:** added a `HARD RULE - NO FABRICATED ESCALATION` to `src/lib/system-prompt.txt` forbidding the bot from claiming it has "alerted our QA team," "flagged this as urgent," "escalated to engineering," opened a ticket, or notified any team/queue/system that does not exist; it may say only that it is passing the issue to the memberships team. Test: `__tests__/claude.test.js`. Also confirmed the env audit (memberships email infra IS configured). Still open / Travis Decision 3: whether/how to soften the "48 hours" promise, the `sendBeacon` robustness for leg-A, and any wording changes to the handoff language itself.
 
 ---
 

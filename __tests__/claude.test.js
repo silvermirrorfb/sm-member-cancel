@@ -116,3 +116,19 @@ describe('membership prompt bi-monthly pricing', () => {
     expect(prompt).not.toContain('same rate, keeps membership active');
   });
 });
+
+describe('system prompt: no fabricated escalation guardrail', () => {
+  it('includes a hard rule forbidding invented escalation claims', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('NO FABRICATED ESCALATION');
+    expect(prompt).toMatch(/never tell a guest you have/i);
+    // the exact bad-example phrasings the bot must never use
+    expect(prompt.toLowerCase()).toContain('alerted our qa team');
+    expect(prompt.toLowerCase()).toContain('flagged this as urgent');
+  });
+
+  it('still allows the legitimate memberships-team handoff language', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt.toLowerCase()).toContain('memberships team');
+  });
+});
