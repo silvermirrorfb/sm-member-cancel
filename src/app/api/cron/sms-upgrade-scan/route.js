@@ -3,15 +3,19 @@ export const maxDuration = 300;
 import { NextResponse } from 'next/server';
 import {
   canonicalizeBoulevardLocationId,
+  getBoulevardAuthContext,
   resolveBoulevardLocationInput,
+  scanAppointments,
 } from '../../../../lib/boulevard';
-import { getRegisteredMembers, getRegistryCounts } from '../../../../lib/sms-member-registry';
+import { getRegistryCounts } from '../../../../lib/sms-member-registry';
 import { isWithinSendWindow, getNextWindowStartIso } from '../../../../lib/sms-window';
 
 const SEND_TIMEZONE = process.env.SMS_SEND_TIMEZONE || 'America/New_York';
 const SEND_START_HOUR = Number(process.env.SMS_CRON_SEND_START_HOUR || 9);
 const SEND_END_HOUR = Number(process.env.SMS_CRON_SEND_END_HOUR || 19);
-const CANDIDATES_PER_RUN = Number(process.env.SMS_CRON_BATCH_SIZE || 30);
+const DISCOVERY_WINDOW_HOURS = Number(process.env.SMS_CRON_DISCOVERY_WINDOW_HOURS || 24);
+const LOCATIONS_PER_RUN = Math.max(1, Number(process.env.SMS_CRON_LOCATIONS_PER_RUN || 2));
+const MAX_CANDIDATES_PER_RUN = Math.max(1, Number(process.env.SMS_CRON_MAX_CANDIDATES || 40));
 const PARALLEL_BATCH = 5;
 const BATCH_DELAY_MS = 5000;
 
@@ -43,6 +47,69 @@ function parseTargetLocationIds() {
   return result;
 }
 
+// Round-robin: every *10-minute run picks a different slice of the target
+// locations so all of them get covered well within the discovery window.
+function pickRunLocationIds(allLocationIds, perRun, nowMs = Date.now()) {
+  if (allLocationIds.length === 0) return [];
+  const slots = Math.max(1, Math.ceil(allLocationIds.length / perRun));
+  const slot = Math.floor(nowMs / (10 * 60 * 1000)) % slots;
+  return allLocationIds.slice(slot * perRun, slot * perRun + perRun);
+}
+
+function dedupKeyForAppointment(a) {
+  const clientId = String(a?.clientId || '').trim();
+  if (clientId) return `c:${clientId}`;
+  const phone = String(a?.clientPhone || '').replace(/\D/g, '');
+  if (phone) return `p:${phone}`;
+  const email = String(a?.clientEmail || '').trim().toLowerCase();
+  return email ? `e:${email}` : '';
+}
+
+// Build outbound candidates from the appointments scanned at a set of locations.
+// Mirrors the "missing firstName/email/phone" filter that
+// /api/sms/automation/pre-appointment applies to discovered candidates.
+async function discoverCandidates(auth, runLocationMap, nowMs) {
+  const cutoffMs = nowMs + DISCOVERY_WINDOW_HOURS * 60 * 60 * 1000;
+  const seen = new Set();
+  const candidates = [];
+  for (const [locId, locName] of runLocationMap.entries()) {
+    let scan = null;
+    try {
+      scan = await scanAppointments(auth.apiUrl, auth.headers, {
+        locationId: locId,
+        windowStart: new Date(nowMs - 30 * 60 * 1000),
+        windowEnd: new Date(cutoffMs),
+      });
+    } catch (e) {
+      continue; // one location's scan failing must not abort the whole run
+    }
+    const appts = Array.isArray(scan?.appointments) ? scan.appointments : [];
+    for (const a of appts) {
+      const startMs = new Date(a?.startOn || '').getTime();
+      if (!Number.isFinite(startMs) || startMs < nowMs || startMs > cutoffMs) continue;
+      const firstName = String(a?.clientFirstName || '').trim();
+      const lastName = String(a?.clientLastName || '').trim();
+      const email = String(a?.clientEmail || '').trim().toLowerCase();
+      const phone = String(a?.clientPhone || '').trim();
+      if (!firstName || !lastName || (!email && !phone)) continue;
+      const key = dedupKeyForAppointment(a);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      candidates.push({
+        clientId: String(a?.clientId || ''),
+        firstName,
+        lastName,
+        email,
+        phone,
+        appointmentId: String(a?.id || ''),
+        locationName: locName || '',
+      });
+      if (candidates.length >= MAX_CANDIDATES_PER_RUN) return candidates;
+    }
+  }
+  return candidates;
+}
+
 function checkOneCandidate(candidate, endpoint, automationToken, now) {
   return fetch(endpoint, {
     method: 'POST',
@@ -52,7 +119,7 @@ function checkOneCandidate(candidate, endpoint, automationToken, now) {
     },
     body: JSON.stringify({
       dryRun: false,
-      windowHours: 24,
+      windowHours: DISCOVERY_WINDOW_HOURS,
       candidates: [candidate],
       trigger: 'vercel-cron-sms-upgrade-scan',
       now,
@@ -108,72 +175,74 @@ export async function GET(request) {
   if (targetLocationMap.size === 0) {
     return NextResponse.json({ error: 'SMS_CRON_LOCATIONS is empty or invalid.' }, { status: 400 });
   }
-
   const targetLocationIds = [...targetLocationMap.keys()];
 
-  const registryCounts = await getRegistryCounts(targetLocationIds);
-  const registeredMembers = await getRegisteredMembers(targetLocationIds);
+  const auth = getBoulevardAuthContext();
+  if (!auth) {
+    return NextResponse.json({ error: 'Boulevard API credentials are not configured.' }, { status: 500 });
+  }
 
-  if (registeredMembers.length === 0) {
-    return NextResponse.json({
+  const nowMs = Date.now();
+  const runLocationIds = pickRunLocationIds(targetLocationIds, LOCATIONS_PER_RUN, nowMs);
+  const runLocationMap = new Map(runLocationIds.map(id => [id, targetLocationMap.get(id) || '']));
+
+  const [registryCounts, candidates] = await Promise.all([
+    getRegistryCounts(targetLocationIds),
+    discoverCandidates(auth, runLocationMap, nowMs),
+  ]);
+
+  if (candidates.length === 0) {
+    const payload = {
       ok: true,
-      skipped: 'registry_empty',
+      skipped: 'no_appointments_in_window',
+      runLocations: runLocationIds,
       registryCounts,
-      hint: 'Run /api/cron/sms-registry-seed to populate the registry from Boulevard.',
-    });
+    };
+    console.log('[sms-upgrade-scan]', JSON.stringify(payload));
+    return NextResponse.json(payload);
   }
-
-  // Fisher-Yates shuffle
-  for (let i = registeredMembers.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [registeredMembers[i], registeredMembers[j]] = [registeredMembers[j], registeredMembers[i]];
-  }
-
-  const candidates = registeredMembers.slice(0, CANDIDATES_PER_RUN).map(m => ({
-    clientId: m.clientId || '',
-    firstName: m.firstName || '',
-    lastName: m.lastName || '',
-    email: m.email || '',
-    phone: m.phone || '',
-    locationName: m.locationName || '',
-  }));
 
   const endpoint = new URL('/api/sms/automation/pre-appointment', request.url);
   const automationToken = String(process.env.SMS_AUTOMATION_TOKEN || '').trim();
   const now = new Date().toISOString();
 
-  // Process in batches of 10 to avoid Boulevard rate limiting
   const allResults = [];
   for (let i = 0; i < candidates.length; i += PARALLEL_BATCH) {
     const batch = candidates.slice(i, i + PARALLEL_BATCH);
     const batchSettled = await Promise.allSettled(
-      batch.map(c => checkOneCandidate(c, endpoint, automationToken, now))
+      batch.map(c => checkOneCandidate(c, endpoint, automationToken, now)),
     );
     for (const r of batchSettled) {
       allResults.push(
         r.status === 'fulfilled'
           ? r.value
-          : { candidate: '?', status: 'error', reason: r.reason?.message || 'rejected', ok: false }
+          : { candidate: '?', status: 'error', reason: r.reason?.message || 'rejected', ok: false },
       );
     }
-    // Pause between batches to let Boulevard recover
     if (i + PARALLEL_BATCH < candidates.length) {
       await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
     }
   }
 
-  const summary = { total: allResults.length, sent: 0, skipped: 0, errors: 0 };
+  const summary = { total: allResults.length, sent: 0, skipped: 0, errors: 0, skippedByReason: {} };
   for (const val of allResults) {
     if (val.status === 'sent') summary.sent++;
     else if (val.status === 'error' || !val.ok) summary.errors++;
-    else summary.skipped++;
+    else {
+      summary.skipped++;
+      const reason = val.reason || 'unknown';
+      summary.skippedByReason[reason] = (summary.skippedByReason[reason] || 0) + 1;
+    }
   }
 
-  return NextResponse.json({
+  const payload = {
     ok: true,
+    runLocations: runLocationIds,
     registryCounts,
     candidateCount: candidates.length,
     summary,
     results: allResults,
-  });
+  };
+  console.log('[sms-upgrade-scan]', JSON.stringify({ runLocations: runLocationIds, candidateCount: candidates.length, summary }));
+  return NextResponse.json(payload);
 }

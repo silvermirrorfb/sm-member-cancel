@@ -26,11 +26,11 @@ Issues are numbered per system, in chronological order of discovery. Numbers do 
 
 The five issues most worth knowing about right now, in order of stakes:
 
-1. **outbound-sms #8** - PR #3 verification still incomplete. We don't know with certainty whether outbound SMS sends are actually working in production.
-2. **cancel-bot #6** - Bot makes fabricated escalation promises ("I've alerted our QA team") that map to no real system. Trust erosion. Decision 3 with Travis.
+1. **outbound-sms #8** - FIXED IN CODE 2026-05-12: the cron now builds candidates from per-location appointment discovery, not random registry sampling (which had a near-zero hit rate). Awaiting post-deploy confirmation of a real `summary.sent > 0`.
+2. **cancel-bot #6** - Bot makes fabricated escalation promises ("I've alerted our QA team") that map to no real system. Trust erosion. Decision 3 with Travis (the prompt-guardrail code portion is plannable now - see `docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Task 3.1).
 3. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decisions 1 and 2 with Travis.
 4. **cancel-bot #12** - Identity verification is name + email only. Privacy and bad-actor risk. Decision 5 with Travis.
-5. **cross-cutting** - No alerting on zero outbound sends in 24 hours. The April outage went 3 weeks before detection. Still not built.
+5. **cross-cutting** - No alerting on zero outbound sends in 24 hours. The April outage went 3 weeks before detection. Planned (`docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Tasks 2.1-2.2), not yet built.
 
 ---
 
@@ -128,23 +128,15 @@ Some of these (#2 telemetry, #5 tier resolution) are good ideas as standalone PR
 ---
 
 ### outbound-sms #8
-**Status:** OPEN - verification in progress via Cowork
-**Severity:** unknown until verified
-**Outstanding since:** May 5, 2026
+**Status:** FIXED IN CODE 2026-05-12 (PR: `fix/sms-cron-uses-appointment-discovery`), pending post-deploy verification
+**Severity:** was prod-down (near-zero sends)
+**Discovered:** May 5, 2026 (verification never closed) - root cause nailed down 2026-05-12
 
-PR #3 was merged May 5. The verification step is: observe a real in-window `/api/cron/sms-upgrade-scan` run and read its response. The actual response shape is `{ ok, registryCounts, candidateCount, summary: { total, sent, skipped, errors }, results: [ { candidate, status, reason } ] }`. There is no `summary.skippedByReason` field (an earlier version of these docs claimed one - that histogram was item #2 in the rejected 5-fix bundle, never merged, see #7); the per-candidate `results[]` array is the only breakdown of why each candidate was or was not sent.
+**Real root cause (the 2026-05-12 investigation):** the practical cause of the near-zero sends was NOT the PR #3 client-fields bug. PR #3 (`631a0e1`) fixed `scanAppointments`'s client-field selection, but that bug only affected the `locations[]` discovery path in `/api/sms/automation/pre-appointment`. The `sms-upgrade-scan` cron does not use that path - it was switched to random-registry-sampling in commit `3606088` (2026-04-08). Random-sampling 30 of ~6,394 registry members per run means almost no sampled member has an appointment in the next 24h, so `evaluateUpgradeOpportunityForProfile` returns `no_appointments_available` for nearly all of them (probed 6 random members 2026-05-12: all 6 returned that). Config gates were all open the whole time (`SMS_CRON_ENABLED=true`, `SMS_REQUIRE_MANUAL_LIVE_APPROVAL=false`, `SMS_UPGRADE_STATUS=live`, all 10 locations). The Redis registry is healthy (~6,394 members, valid data). `lookupMember` works. A direct `locations[]` discovery probe (Bryant Park, 24h, dryRun) returned 22 appointments with populated client fields (so PR #3 IS working) and 1 would-send addon offer (so the pipeline works end-to-end) - funnel: 8 `member_not_found`, 4 `klaviyo_sms_not_subscribed`, 3 `addon_already_on_booking`, 3 `no_upcoming_appointment_in_window`, 3 `appointment_scan_failed`, 1 would-send.
 
-Read it in this order:
+**The fix:** `src/app/api/cron/sms-upgrade-scan/route.js` now builds candidates by scanning appointments per location (`scanAppointments({ locationId, windowStart, windowEnd })`) for a rotating subset of the target locations each run, mirroring pre-appointment's discovery filter (drop appointments missing name/email/phone), deduping by client, capping at `SMS_CRON_MAX_CANDIDATES` (default 40), then feeding them through the existing parallel-batch-of-5 sender. Knobs: `SMS_CRON_DISCOVERY_WINDOW_HOURS` (default 24), `SMS_CRON_LOCATIONS_PER_RUN` (default 2 - every location covered roughly every ~50 min), `SMS_CRON_MAX_CANDIDATES` (default 40). Also added `summary.skippedByReason` and a `console.log('[sms-upgrade-scan]', ...)` so the run shows up in Vercel logs. Test: `__tests__/sms-upgrade-scan-route.test.js`.
 
-1. If the response is `{ ok: true, skipped: 'SMS_CRON_ENABLED is false' }`, the cron is switched off. Not a bug, but nothing will ever send until that flag is truthy. Check this FIRST.
-2. If the response is `{ ok: true, skipped: 'Outside configured send window', ... }`, you ran it outside 9 AM to 7 PM America/New_York. Re-check during the window.
-3. `summary.sent > 0` means the outage is fully over, fix works, system is sending.
-4. `summary.sent = 0` with `results[]` showing legitimate reasons (`klaviyo_sms_not_subscribed`, no upcoming appointment, cooldown, or a `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` hold) means the fix works, just no eligible sends in that run. Note `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` can suppress every send by design - if it is on, `sent: 0` is expected and tells you nothing about PR #3.
-5. `summary.errors > 0`, an empty `registryCounts`, or `skipped: 'registry_empty'` means something ELSE is broken (seed cron, Boulevard auth) - dig further.
-
-**Config side verified clean 2026-05-12** (via `vercel env pull`): `SMS_CRON_ENABLED` is `true`, `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` is `false`, `SMS_UPGRADE_STATUS` is `live`, `SMS_REQUIRE_KLAVIYO_OPT_IN` is `true`, and `SMS_CRON_LOCATIONS` lists all 10 locations. So nothing in configuration is gating sends - the cron is actively attempting real sends every 10 minutes inside the 9-to-7 ET window. That narrows what remains: a `sent: 0` now points at the PR #3 code path (do candidates come back with `client.firstName/email/phone` populated?) or a genuine absence of eligible appointments + Klaviyo-subscribed guests in that run, not a switch someone forgot to flip. Note the cron route does not log its `summary`, so logs alone won't show `sent` - you need to observe the JSON response directly (auth with `CRON_SECRET`) or check the SMS-send log Sheet.
-
-As of May 12 the send-side verification is still pending (Cowork has it). Until it closes, every claim about "outbound SMS is back" is a hope, not a fact.
+**Post-deploy verification (still TODO):** between 9 AM and 7 PM ET, `vercel logs sm-member-cancel.vercel.app --scope silver-mirror-projects` and look for `[sms-upgrade-scan]` lines - `summary.sent > 0` on any in-window run means it's sending. Or re-run the read-only Redis check: `SCAN 0 MATCH sms-cooldown:* COUNT 1000` against Upstash - any keys = a real send in the last 6h. If `summary.sent` stays 0 across many in-window runs and `summary.skippedByReason` is dominated by `member_not_found` (~36% of Bryant Park appt-holders couldn't be matched) or `klaviyo_sms_not_subscribed`, that's a data/consent issue, not this fix - open a new QA_ISSUES item. Once a real send is confirmed, change status to VERIFIED FIXED.
 
 ---
 
