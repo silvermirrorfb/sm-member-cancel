@@ -305,6 +305,43 @@ Fastest Path Shared With Guest: Call (888) 677-0055
   }
 }
 
+// Generic ops/alerting email (e.g. the zero-outbound-SMS health check).
+// Goes to EMAIL_ESCALATION (falls back to EMAIL_TO). Safe no-op if SMTP unconfigured.
+async function sendOpsAlertEmail({ subject, text }) {
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT || '587', 10);
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.EMAIL_FROM || 'info@silvermirror.com';
+  const to = process.env.EMAIL_ESCALATION || process.env.EMAIL_TO || 'matt@silvermirror.com';
+
+  if (!host || !user || !pass) {
+    console.warn('SMTP not configured — ops alert email not sent:', subject);
+    return { sent: false, reason: 'SMTP not configured' };
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text,
+      html: `<pre style="font-family:Arial, sans-serif; white-space:pre-wrap;">${String(text || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`,
+    });
+    return { sent: true };
+  } catch (err) {
+    console.error('Ops alert email send failed:', err);
+    return { sent: false, reason: err.message };
+  }
+}
+
 function buildSubjectLine(summary) {
   const outcome = summary.outcome || 'UNKNOWN';
   const name = summary.client_name || 'Unknown Member';
@@ -1256,6 +1293,7 @@ async function processConversationEnd(summary, transcript) {
 export {
   sendSummaryEmail,
   sendReasonAlert,
+  sendOpsAlertEmail,
   matchReasonToCategory,
   logToGoogleSheets,
   logChatMessages,

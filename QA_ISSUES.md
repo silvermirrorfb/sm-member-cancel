@@ -30,7 +30,7 @@ The five issues most worth knowing about right now, in order of stakes:
 2. **cancel-bot #6** - Bot makes fabricated escalation promises ("I've alerted our QA team") that map to no real system. Trust erosion. Decision 3 with Travis (the prompt-guardrail code portion is plannable now - see `docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Task 3.1).
 3. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decisions 1 and 2 with Travis.
 4. **cancel-bot #12** - Identity verification is name + email only. Privacy and bad-actor risk. Decision 5 with Travis.
-5. **cross-cutting** - No alerting on zero outbound sends in 24 hours. The April outage went 3 weeks before detection. Planned (`docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Tasks 2.1-2.2), not yet built.
+5. **cancel-bot #9 (adjacent vuln)** - Email-template reason matching still uses unanchored regexes for RETAINED/CANCELLED outcomes, so a substring like "transitions" false-matches "transit". Plannable now (`docs/superpowers/plans/2026-05-12-sm-member-cancel-fixes.md` Task 3.2). (cross-cutting #1 - zero-send alerting - was BUILT 2026-05-12, PR #11.)
 
 ---
 
@@ -377,13 +377,13 @@ Proposed standardized language pending Travis review.
 ## Cross-cutting issues
 
 ### cross-cutting #1
-**Status:** NOT BUILT
+**Status:** BUILT 2026-05-12 (PR #11 `feat/sms-zero-send-alert`, builds on PR #10 `feat/sms-daily-send-counter`)
 **Severity:** detection gap that allowed a 3-week prod outage
-**Outstanding since:** May 5, 2026
+**Discovered:** May 5, 2026
 
 No health-check alerting on outbound SMS sends. April-May outage went undetected for 3 weeks because the detection mechanism was "Matt happens to check the Sheet."
 
-Minimum viable build: daily cron that emails memberships@silvermirror.com if outbound sends in the last 24 hours fall below threshold N. Could be built as a new cron in this repo without major architectural work.
+**Fix:** `src/lib/sms-metrics.js` tracks a daily send count in Redis (`sms-sent:<YYYY-MM-DD>`, 3-day TTL), bumped on every successful Twilio send in `/api/sms/automation/pre-appointment`. A new daily cron `/api/cron/sms-health-check` (`0 14 * * *` ≈ 9-10 AM ET, after the previous day's send window has closed) reads yesterday's count and, if it is below `SMS_MIN_DAILY_SENDS` (default 1), emails `EMAIL_ESCALATION` (fallback `EMAIL_TO`) with a triage checklist. Tests: `__tests__/sms-metrics.test.js`, `__tests__/sms-health-check-route.test.js`. Note: the day right after a deploy may produce one false-positive alert (no counter history yet) - the alert email says so.
 
 ---
 
