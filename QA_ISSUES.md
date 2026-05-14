@@ -412,15 +412,25 @@ Proposed standardized language pending Travis review.
 ---
 
 ### cancel-bot #18
-**Status:** OPEN, fix in flight (PR 2 in the May 13 ship sequence)
+**Status:** FIXED IN CODE 2026-05-14 by PR `fix/template-routing-reason-vs-offer`. Bump to VERIFIED FIXED after merge + production deploy and a clean follow-on RETAINED + non-pause session.
 **Severity:** customer-harm (wrong template into the memberships team queue; required manual rewrite before send)
 **Discovered:** May 6, 2026 (Rose Williamson session, Fernanda escalation)
 
 Rose Williamson session: outcome RETAINED, reason Travel, accepted Bi-monthly billing. Email template `01-travel-pause` fired with subject "Your Silver Mirror membership pause is confirmed" and no mention of bi-monthly. Fernanda rewrote it by hand before send.
 
-PR #4 made offer-acceptance beat reason for RETAINED routing for many reason categories, but the Travel + Bi-monthly combination still routes by reason. The Travel-reason branch fires when bi-monthly is the accepted save, producing a pause-confirmation email for a member who did not pause. Adjacent risk: any other reason × accepted-offer combinations that PR #4 did not cover.
+PR #4 made offer-acceptance beat reason for RETAINED routing for many reason categories, but inside the RETAINED block the offer-type detectors ran in the order `isPause` -> `isDowngrade` -> `isBimonthly` -> `isTransfer`. When the LLM-generated `offer_accepted` summary string contained both "bi-monthly" and "pause" (e.g. "Bi-monthly billing instead of 2-month pause"), `isPause` fired first and the Travel reason fell into `tmplTravelPause`, producing a pause-confirmation email for a member who did not pause.
 
-Fix in `src/lib/member-draft.js`: audit every accepted-offer × reason combination in the RETAINED routing logic, make accepted-offer the primary key (with reason-templates as fallback only when no save offer was accepted), and add a bi-monthly confirmation template if one doesn't already exist. PR 2 lands the code change plus regression tests for the Rose pattern (RETAINED + Travel + bi-monthly accepted) and every other accepted-offer × reason combination surfaced by the audit.
+**Fix in `src/lib/member-draft.js`:** the RETAINED block now evaluates accepted-offer types from most-specific to least-specific: bi-monthly, transfer, downgrade, then pause. Bi-monthly, transfer, and downgrade hard-route to their own templates regardless of reason; pause then keeps its reason-aware sub-routing (Travel, Medical, Lost Job, Forgot, Voucher, default Cost). The existing `30-cost-bimonthly` template (subject "Your Silver Mirror bi-monthly billing is confirmed") is reused, no new template needed. Regression test covers RETAINED + Travel + Bi-monthly accepted (both clean and pause-mixed offer_accepted strings); preservation tests retain Emily Merghart pause routing, Travel + Pause, Zoe Dickinson REFERRED routing, and all CANCELLED-outcome cases.
+
+**Audit findings surfaced but NOT fixed in this PR (one-fix-per-PR rule):**
+1. **Inconsistent Usage + Pause accepted** routes to `29-cost-pause`. Body mentions rate-lock, not the inconsistency issue. Acceptable default, no customer-harm. Documented in existing test (Emily Merghart).
+2. **Forgot + Bi-monthly accepted** routes to `30-cost-bimonthly` (generic). No `forgot-bimonthly` variant exists.
+3. **Voucher + Bi-monthly accepted** routes to `30-cost-bimonthly` (generic). No `voucher-bimonthly` variant exists.
+4. **Travel + Downgrade accepted** routes to `28-cost-downgrade`. Reads acceptably, no Travel-aware downgrade copy.
+5. **Reaction + Pause accepted** routes to `29-cost-pause` (no reaction-pause; the reaction-specific templates `20-reaction-callback` and `21-reaction-free-calming` only fire when no save offer was accepted).
+6. **Relocation + Pause accepted** routes to `29-cost-pause` (no relocation-pause; transfer is the relocation-specific save).
+
+Travel + Bi-monthly was the only audited combination producing customer-facing misrepresentation (the email subject contradicted the action taken). The others produce reasonable defaults; if any of them surfaces a customer complaint, fold a reason-specific variant in its own PR.
 
 ---
 

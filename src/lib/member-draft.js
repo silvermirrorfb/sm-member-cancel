@@ -117,6 +117,20 @@ function pickTemplate(summary) {
   const isAIScan = /skin.?scan|\bai\b/.test(offerAccepted);
 
   if (isRetained) {
+    // Order is most-specific accepted-offer first. Bi-monthly, downgrade, and
+    // transfer are checked before pause because the offer_accepted summary
+    // field can contain "pause" alongside the actually-accepted offer (e.g.
+    // "Bi-monthly billing instead of 2-month pause"). When that happens we
+    // must route by what the member accepted, not by an incidental keyword.
+    // Production regression: Rose Williamson, May 6 2026 (QA_ISSUES cancel-bot
+    // #18), accepted Bi-monthly billing on a Travel-reason session and
+    // received the 01-travel-pause template.
+    if (isBimonthly) return tmplCostBimonthly(summary);
+    if (isTransfer) return tmplRelocationAnyLocation(summary);
+    if (isDowngrade) {
+      if (/forgot|didn.?t use|haven.?t used|not using/.test(reason)) return tmplForgotDowngrade(summary);
+      return tmplCostDowngrade(summary);
+    }
     if (isPause) {
       if (/\btravel|\bvacation|\btrip/.test(reason)) return tmplTravelPause(summary);
       if (/medical|health|surgery|pregnan/.test(reason)) return tmplMedicalPause(summary);
@@ -125,12 +139,6 @@ function pickTemplate(summary) {
       if (/voucher|credit.?build|unused.?credit/.test(reason)) return tmplVoucherPause(summary);
       return tmplCostPause(summary);
     }
-    if (isDowngrade) {
-      if (/forgot|didn.?t use|haven.?t used|not using/.test(reason)) return tmplForgotDowngrade(summary);
-      return tmplCostDowngrade(summary);
-    }
-    if (isBimonthly) return tmplCostBimonthly(summary);
-    if (isTransfer) return tmplRelocationAnyLocation(summary);
   }
 
   // Reason matching (order matters — more specific first)
