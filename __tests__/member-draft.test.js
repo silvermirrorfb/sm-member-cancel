@@ -190,6 +190,72 @@ describe('buildMemberDraft — outcome routing', () => {
 
     expect(draft.templateId).toBe('01-travel-pause');
   });
+
+  it('routes RETAINED + Travel + Bi-monthly accepted to the bi-monthly template, NOT travel-pause (regression: Rose Williamson, 2026-05-06)', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      client_name: 'Rose Williamson',
+      outcome: 'RETAINED',
+      reason_primary: 'Travel',
+      offer_accepted: 'Bi-monthly billing',
+    });
+
+    expect(draft.templateId).toBe('30-cost-bimonthly');
+    expect(draft.templateId).not.toBe('01-travel-pause');
+    expect(draft.subject).toMatch(/bi-monthly/i);
+    expect(draft.subject).not.toMatch(/pause/i);
+    expect(draft.body).not.toMatch(/paused/i);
+  });
+
+  it('routes RETAINED + Travel + Bi-monthly with pause mentioned in offer_accepted string to bi-monthly (Rose Williamson full-text variant)', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      client_name: 'Rose Williamson',
+      outcome: 'RETAINED',
+      reason_primary: 'Travel',
+      offer_accepted: 'Bi-monthly billing (instead of 2-month pause)',
+    });
+
+    expect(draft.templateId).toBe('30-cost-bimonthly');
+    expect(draft.templateId).not.toBe('01-travel-pause');
+    expect(draft.subject).toMatch(/bi-monthly/i);
+    expect(draft.subject).not.toMatch(/pause/i);
+  });
+
+  it('routes RETAINED + Travel + Downgrade accepted to the downgrade template, NOT travel-pause', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Travel',
+      offer_accepted: 'Downgrade to 30-Minute',
+    });
+
+    expect(draft.templateId).toBe('28-cost-downgrade');
+    expect(draft.templateId).not.toBe('01-travel-pause');
+  });
+
+  it('routes RETAINED + Travel + Transfer accepted to the relocation-any-location template', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Travel',
+      offer_accepted: 'Use any Silver Mirror location',
+    });
+
+    expect(draft.templateId).toBe('relocation-any-location');
+    expect(draft.templateId).not.toBe('01-travel-pause');
+  });
+
+  it('routes RETAINED + Travel + no offer accepted to travel-pause as reason fallback', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Travel',
+      offer_accepted: 'None',
+    });
+
+    expect(draft.templateId).toBe('01-travel-pause');
+  });
 });
 
 describe('pickTemplate: reason matching does not catch substrings', () => {
