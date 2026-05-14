@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 13, 2026
+**Last updated:** May 14, 2026
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -29,7 +29,7 @@ What's actually still open right now, in order of stakes:
 **Production escalations from Fernanda (May 6-10), shipping May 13 in corrected order:**
 
 1. **cancel-bot #20 (and code half of cancel-bot #6)** - FIXED IN CODE 2026-05-13 by PR `fix/broaden-no-process-handoff-rule` (PR 1 of the May 13 sequence, not yet merged). Three edits to `src/lib/system-prompt.txt`: (a) new `HARD RULE - MILESTONE DISCUSSION SCOPE` (upcoming only, no historical-perk enumeration like Zoe got); (b) new `HARD RULE - NO DEFINED PROCESS HANDOFFS` mandating Travis's exact phrase "I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." with bans on specific timelines, outcomes, and actions; (c) strengthened PR #13's `HARD RULE - NO FABRICATED ESCALATION` with Sindhura-class soft-promise example bans ("they'll resolve this," "they'll reach out within 24-48 hours," etc.). 18 new tests cover both production cases plus PR #5/#6/#13 preservation. Bump to VERIFIED FIXED after merge + production deploy.
-2. **cancel-bot #19 part 1** - Sindhura Polepalli (May 10) REFERRED + Technical Issue routed to `42-generic-cancelled`; her session predates PR #8 merge May 12. PR 4 reads the Cancellations Google Sheet to confirm REFERRED sessions on or after 2026-05-13 route to `43-referred-manual-review` (not `42-generic-cancelled` or any other template). Verification only, no code change unless a regression is surfaced.
+2. **cancel-bot #19 part 1** - VERIFIED FIXED 2026-05-14 by PR 4 (`verify/pr8-referred-routing-deployed`, verification only, no code change). PR #8's REFERRED routing is live in production: confirmed via `pickTemplate()` code (any REFERRED → template 43), green tests, and an auto-deploy of main (commit `4d77646`) at 08:42:53 EDT today. Sheet-based observational verification was blocked by pre-existing data-quality issues (bot fabricates `session_summary.date`; sparse May 2026 row count); both surfaced as adjacent findings in the cancel-bot #19 entry below.
 3. **cancel-bot #18** - Rose Williamson (May 6): RETAINED + Travel + accepted Bi-monthly routed to `01-travel-pause` instead of a bi-monthly confirmation. Fernanda rewrote by hand. PR 2 in `src/lib/member-draft.js`: audit every accepted-offer × reason combination, make accepted-offer the primary key for RETAINED template routing (reason-templates as fallback only when no save offer was accepted), and add a bi-monthly confirmation template if one doesn't already exist. Closes the gap PR #4 left in RETAINED routing.
 4. **cancel-bot #19 part 2** - Sindhura's email body contained the literal placeholder string `Your existing credits (5 (missing from display)) are usable for 90 days`. PR 3 sanitizes the field-stringification path in `src/lib/member-draft.js` (fields like `Unused Credits = '5 (missing from display)'`) so bracket-style placeholders can't interpolate raw into member-facing emails. Lands after PR 2 because PR 2's accepted-offer × reason audit may surface adjacent fields PR 3 needs to sanitize.
 
@@ -425,15 +425,27 @@ Fix in `src/lib/member-draft.js`: audit every accepted-offer × reason combinati
 ---
 
 ### cancel-bot #19
-**Status:** OPEN, two-part fix in flight (PR 4 verification only on the REFERRED-routing piece, slot 2 of 4; PR 3 fixes the placeholder bleed, slot 4 of 4)
+**Status:** PART 1 VERIFIED FIXED 2026-05-14 by PR 4 (verification only, no code change). PART 2 still OPEN, fix in flight in PR 3 (slot 4 of 4).
 **Severity:** customer-harm (a non-cancelled member received a cancellation-confirmed email; a raw template placeholder rendered verbatim in a member-facing email)
 **Discovered:** May 10, 2026 (Sindhura Polepalli session, Fernanda escalation)
 
 Sindhura Polepalli session: outcome REFERRED, reason Technical Issue (credits disappeared during pause). Two distinct failures in the one session:
 
-1. **Wrong template:** `42-generic-cancelled` fired with subject "Your Silver Mirror membership cancellation is confirmed." Sindhura was REFERRED, not CANCELLED. Her session was May 10; PR #8 (REFERRED routes to `43-referred-manual-review`) merged May 12, so her session predates the fix. PR 4 reads the Cancellations Google Sheet for REFERRED sessions on or after 2026-05-13 and confirms each routes to `43-referred-manual-review` (not `42-generic-cancelled` or any other template). Verification only, no code change unless the verification surfaces a regression.
+1. **Wrong template:** `42-generic-cancelled` fired with subject "Your Silver Mirror membership cancellation is confirmed." Sindhura was REFERRED, not CANCELLED. Her session was May 10; PR #8 (REFERRED routes to `43-referred-manual-review`) merged 2026-05-11 17:28 EDT, so her session predates the fix.
+
+   **VERIFIED FIXED 2026-05-14 by PR 4 (`verify/pr8-referred-routing-deployed`).** PR #8's REFERRED routing is live in production via three independent verification paths:
+   - **Code:** `src/lib/member-draft.js:89-91` routes any `outcome === 'REFERRED'` to `tmplReferredManualReview()`, returning template id `43-referred-manual-review` and subject "Your Silver Mirror membership inquiry." No reason-dependency, so Sindhura's Technical Issue class and Zoe's milestone-history class both flow through the same exit.
+   - **Tests:** `__tests__/member-draft.test.js:111-125` (Zoe-shape REFERRED → template 43) passes against current main (19/19 member-draft tests green).
+   - **Deploy:** production deployment `dpl_GkLc95grNjGiC6fDTfwf4F46ECFL` (created 2026-05-14 08:42:53 EDT) tracks `main`, which includes commit `4d77646` (PR #18 merge), well past PR #8's `790ebb5`. Auto-deploy fired immediately on merge per `silver-mirror-projects` Vercel team config.
+
+   **Sheet-based observational verification was attempted and is BLOCKED by adjacent data-quality issues that pre-date PR #8 (not regressions):**
+   - The Cancellations Sheet `Date` column is corrupted for many rows (the bot fabricates `session_summary.date` instead of using a real timestamp; `notify.js` line 529 only falls back to `new Date()` when the field is null, so a hallucinated date is written verbatim). Zoe's real-May-7 session is logged as `2024-12-19`; Sindhura's real-May-10 session as `2025-01-27`. Filtering by Date is unreliable.
+   - Only ~4 entries with Month=May 2026 visible across the whole sheet for May 1-15, well below the CLAUDE.md baseline of ~31 sessions/day. Either a sheet-write health issue or genuinely low May traffic. Worth its own investigation.
+   - Net effect: zero REFERRED rows visible with Date or Month indicating 2026-05-13 or later. So the sheet can neither confirm nor deny PR #8 effect on its own. The three-path code + tests + deploy verification is the actual signal.
 
 2. **Placeholder bled into member-facing email:** body contained the literal string `Your existing credits (5 (missing from display)) are usable for 90 days`. The nested `(missing from display)` is what comes back from the upstream field-stringification path in `src/lib/member-draft.js` (fields like `Unused Credits = '5 (missing from display)'`) when a value isn't resolvable, and that string then interpolates raw into the email template. PR 3 sanitizes the field-stringification path so bracket-style placeholders are either replaced with a safe fallback or hard-fail the render rather than silently shipping verbatim to the member. PR 3 lands after PR 2 because PR 2's accepted-offer × reason audit may surface adjacent fields that share the same stringification path.
+
+   **Confirmed in sheet (2026-05-14, PR 4 dig):** the literal string `5 (missing from display)` is currently present in the `Unused Credits` column of Sindhura's REFERRED row. So the upstream Boulevard/Klaviyo data fetch IS returning the bracket-style placeholder string and that string IS reaching the sheet write (and therefore the email body). PR 3's scope is correct.
 
 ---
 
