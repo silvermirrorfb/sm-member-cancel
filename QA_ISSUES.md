@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 12, 2026
+**Last updated:** May 13, 2026
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -26,12 +26,23 @@ Issues are numbered per system, in chronological order of discovery. Numbers do 
 
 What's actually still open right now, in order of stakes:
 
-1. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. AWAITING Travis Decisions 1 and 2 (how aggressive after a clear refusal; geographic/medical exits).
-2. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
-3. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped, but whether/how to soften the "48-hour confirmation" promise and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
-4. **cancel-bot #11 / #13 / #14 / #15 / #16 / #17** - the rest of the Travis decisions (perk dollar values; refund/double-billing script; credit visibility; tone; channel-loop rule; commitment language). Code is mostly trivial; the calls aren't ours.
-5. **Sentry DSN not set** - PR #12 wired `@sentry/nextjs` but it's inert until someone creates a Sentry project and runs `vercel env add SENTRY_DSN production`. Cowork task.
-6. **Dedicated staging Vercel project** - the cross-cutting #5 "real gap": `dryRun` + synthetic mode + previews now cover most safe testing (see `docs/STAGING.md`), but a fully-isolated `sm-member-cancel-staging` project with its own env vars is still a provisioning decision for the Vercel-team owner (not done unilaterally - it's billable infra).
+**Production escalations from Fernanda (May 6-10), shipping May 13 in corrected order:**
+
+1. **cancel-bot #20 (and code half of cancel-bot #6)** - FIXED IN CODE 2026-05-13 by PR `fix/broaden-no-process-handoff-rule` (PR 1 of the May 13 sequence, not yet merged). Three edits to `src/lib/system-prompt.txt`: (a) new `HARD RULE - MILESTONE DISCUSSION SCOPE` (upcoming only, no historical-perk enumeration like Zoe got); (b) new `HARD RULE - NO DEFINED PROCESS HANDOFFS` mandating Travis's exact phrase "I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." with bans on specific timelines, outcomes, and actions; (c) strengthened PR #13's `HARD RULE - NO FABRICATED ESCALATION` with Sindhura-class soft-promise example bans ("they'll resolve this," "they'll reach out within 24-48 hours," etc.). 18 new tests cover both production cases plus PR #5/#6/#13 preservation. Bump to VERIFIED FIXED after merge + production deploy.
+2. **cancel-bot #19 part 1** - Sindhura Polepalli (May 10) REFERRED + Technical Issue routed to `42-generic-cancelled`; her session predates PR #8 merge May 12. PR 4 reads the Cancellations Google Sheet to confirm REFERRED sessions on or after 2026-05-13 route to `43-referred-manual-review` (not `42-generic-cancelled` or any other template). Verification only, no code change unless a regression is surfaced.
+3. **cancel-bot #18** - Rose Williamson (May 6): RETAINED + Travel + accepted Bi-monthly routed to `01-travel-pause` instead of a bi-monthly confirmation. Fernanda rewrote by hand. PR 2 in `src/lib/member-draft.js`: audit every accepted-offer × reason combination, make accepted-offer the primary key for RETAINED template routing (reason-templates as fallback only when no save offer was accepted), and add a bi-monthly confirmation template if one doesn't already exist. Closes the gap PR #4 left in RETAINED routing.
+4. **cancel-bot #19 part 2** - Sindhura's email body contained the literal placeholder string `Your existing credits (5 (missing from display)) are usable for 90 days`. PR 3 sanitizes the field-stringification path in `src/lib/member-draft.js` (fields like `Unused Credits = '5 (missing from display)'`) so bracket-style placeholders can't interpolate raw into member-facing emails. Lands after PR 2 because PR 2's accepted-offer × reason audit may surface adjacent fields PR 3 needs to sanitize.
+
+**Ship order today:** PR 1, PR 4, PR 2, PR 3. PR 1 smallest scope and biggest surface (system prompt only). PR 4 verification only (Sheet read). PR 2 and PR 3 both touch `member-draft.js` in different functions; PR 2 first so its audit can surface fields PR 3 needs to know about.
+
+**Still parked behind Travis decisions or provisioning calls:**
+
+4. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. AWAITING Travis Decisions 1 and 2 (how aggressive after a clear refusal; geographic/medical exits).
+5. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
+6. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped (PR #13). The generic no-SLA escalation language and the strengthened example bans resolve via cancel-bot #20 / PR 1. Whether/how to soften the "48-hour confirmation email" promise in the outcome-notification path (separate from in-chat escalation language) and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
+7. **cancel-bot #11 / #13 / #14 / #15 / #16 / #17** - the rest of the Travis decisions (perk dollar values; refund/double-billing script; credit visibility; tone; channel-loop rule; commitment language). Code is mostly trivial; the calls aren't ours.
+8. **Sentry DSN not set** - PR #12 wired `@sentry/nextjs` but it's inert until someone creates a Sentry project and runs `vercel env add SENTRY_DSN production`. Cowork task.
+9. **Dedicated staging Vercel project** - the cross-cutting #5 "real gap": `dryRun` + synthetic mode + previews now cover most safe testing (see `docs/STAGING.md`), but a fully-isolated `sm-member-cancel-staging` project with its own env vars is still a provisioning decision for the Vercel-team owner (not done unilaterally - it's billable infra).
 
 **Recently fixed (all 2026-05-12):** outbound-sms #8 (cron uses per-location appointment discovery, not random registry sampling - verified sending, PR #9); outbound-sms #9 (discovery candidates resolved by clientId, `member_not_found` eliminated - verified, PR #15); cross-cutting #1 (daily send counter + zero-send alert cron, PRs #10-11); error monitoring wired (Sentry, PR #12); cancel-bot #6 code portion (no-fabricated-escalation prompt rule, PR #13); cancel-bot #9 adjacent vuln (email-template reason regexes anchored, PR #14); cross-cutting #4 (per-subsystem env validation, loud at boot, PR #16); cross-cutting #2 (conversational eval scaffold, skip-by-default) + cross-cutting #5 partial (safe-test paths documented in `docs/STAGING.md`).
 
@@ -221,7 +232,7 @@ Code fix is small (system prompt edit). Business decision is Travis's call: how 
 ---
 
 ### cancel-bot #6
-**Status:** PARTIALLY ADDRESSED - prompt guardrail shipped 2026-05-12 (PR `fix/bot-no-fabricated-escalations`); the broader "what should the bot promise / 48-hour language / sendBeacon robustness" question stays AWAITING DECISION (Travis Decision 3)
+**Status:** CODE HALF CLOSED - PR #13 (`fix/bot-no-fabricated-escalations`, 2026-05-12) plus PR `fix/broaden-no-process-handoff-rule` (2026-05-13, not yet merged) close the code half of Travis Decision 3. The 48-hour confirmation-email wording in the outcome-notification path (separate from in-chat escalation language) and the `sendBeacon` robustness for leg-A stay AWAITING DECISION (residual Travis Decision 3)
 **Severity:** trust-erosion
 **Discovered:** Ongoing
 
@@ -239,7 +250,11 @@ Audit of `src/lib/notify.js`:
 - "48 hours" depends on memberships team capacity, which varies.
 - All of the above silently no-op if any env var is missing. Bot still tells the member they'll get an email even if the email system is broken.
 
-**Shipped 2026-05-12:** added a `HARD RULE - NO FABRICATED ESCALATION` to `src/lib/system-prompt.txt` forbidding the bot from claiming it has "alerted our QA team," "flagged this as urgent," "escalated to engineering," opened a ticket, or notified any team/queue/system that does not exist; it may say only that it is passing the issue to the memberships team. Test: `__tests__/claude.test.js`. Also confirmed the env audit (memberships email infra IS configured). Still open / Travis Decision 3: whether/how to soften the "48 hours" promise, the `sendBeacon` robustness for leg-A, and any wording changes to the handoff language itself.
+**Shipped 2026-05-12 (PR #13):** added a `HARD RULE - NO FABRICATED ESCALATION` to `src/lib/system-prompt.txt` forbidding the bot from claiming it has "alerted our QA team," "flagged this as urgent," "escalated to engineering," opened a ticket, or notified any team/queue/system that does not exist; it may say only that it is passing the issue to the memberships team. Test: `__tests__/claude.test.js`. Also confirmed the env audit (memberships email infra IS configured).
+
+**Shipped 2026-05-13 (PR `fix/broaden-no-process-handoff-rule`, in flight):** broadened the same principle to cover soft-promise language and "no defined process" issue classes. Strengthens PR #13 with additional banned patterns ("they'll resolve this," "they'll fix this," "they'll restore your credits," "they'll reach out within 24-48 hours," "they'll investigate," etc.) and adds a new `HARD RULE - NO DEFINED PROCESS HANDOFFS` mandating the Travis-decided handoff phrase: "I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." This closes the code half of Travis Decision 3 (what should the bot promise when no system fires). Also adds `HARD RULE - MILESTONE DISCUSSION SCOPE` (upcoming only, no historical-perk enumeration). Tests in `__tests__/claude.test.js`. Closes cancel-bot #20 fully; materially reduces cancel-bot #11 (bot no longer recites the historical perk list as authoritative dollar values).
+
+**Still AWAITING (residual Travis Decision 3):** whether to soften the literal "48-hour confirmation email" wording in the outcome-notification path (separate code surface from the in-chat escalation language); `sendBeacon` robustness for leg-A.
 
 ---
 
@@ -305,7 +320,7 @@ Fix added centralized current bi-monthly pricing constants in `pricing.js`. Bi-m
 ---
 
 ### cancel-bot #11
-**Status:** AWAITING DECISION (Travis Decision 4)
+**Status:** MATERIALLY REDUCED 2026-05-13 by PR `fix/broaden-no-process-handoff-rule` (cancel-bot #20). Decision 4 still AWAITING for the residual case (bot naming the next upcoming milestone's value).
 **Severity:** trust-risk, unverified data going to members
 **Discovered:** Ongoing
 
@@ -318,7 +333,9 @@ Bot quotes specific dollar values for perks:
 
 Nobody has verified whether these are correct, where they came from, or whether they're hard-coded versus model-fabricated. Reviewing Zoe's transcript and others, bot quotes them as authoritative facts.
 
-Three options on the table: verify and lock into single source of truth, drop dollar values entirely, confirm already accurate.
+**Material reduction 2026-05-13 (PR `fix/broaden-no-process-handoff-rule`):** the production-flagged failure mode here was the bot reciting a CHECKLIST of multiple historical milestones with dollar values as authoritative ("Month 2 Moisturizer $65, Month 4 HA Serum $77, Month 9 Cleanser $41, Month 12 Foundational Formulas Bundle $183..."). The new `HARD RULE - MILESTONE DISCUSSION SCOPE` forbids that enumeration regardless of how the member phrases the question. Members asking about historical perks now route to the no-defined-process handoff. The residual surface (bot naming the SINGLE next upcoming milestone with its dollar value from the static table) still has the same source-of-truth risk and stays under Travis Decision 4: verify and lock into single source of truth, drop dollar values from the upcoming-perk language entirely, or confirm already accurate.
+
+Three options still on the table for the residual: verify and lock into single source of truth, drop dollar values entirely, confirm already accurate.
 
 ---
 
@@ -391,6 +408,47 @@ Proposed rule: if member says they've already tried email or phone, the bot shou
 Bot says "memberships have no minimum commitment, you can cancel anytime with 30 days notice." Then in the same conversation, it offers a pause with a 3-billing-cycle commitment. Side by side, confusing.
 
 Proposed standardized language pending Travis review.
+
+---
+
+### cancel-bot #18
+**Status:** OPEN, fix in flight (PR 2 in the May 13 ship sequence)
+**Severity:** customer-harm (wrong template into the memberships team queue; required manual rewrite before send)
+**Discovered:** May 6, 2026 (Rose Williamson session, Fernanda escalation)
+
+Rose Williamson session: outcome RETAINED, reason Travel, accepted Bi-monthly billing. Email template `01-travel-pause` fired with subject "Your Silver Mirror membership pause is confirmed" and no mention of bi-monthly. Fernanda rewrote it by hand before send.
+
+PR #4 made offer-acceptance beat reason for RETAINED routing for many reason categories, but the Travel + Bi-monthly combination still routes by reason. The Travel-reason branch fires when bi-monthly is the accepted save, producing a pause-confirmation email for a member who did not pause. Adjacent risk: any other reason × accepted-offer combinations that PR #4 did not cover.
+
+Fix in `src/lib/member-draft.js`: audit every accepted-offer × reason combination in the RETAINED routing logic, make accepted-offer the primary key (with reason-templates as fallback only when no save offer was accepted), and add a bi-monthly confirmation template if one doesn't already exist. PR 2 lands the code change plus regression tests for the Rose pattern (RETAINED + Travel + bi-monthly accepted) and every other accepted-offer × reason combination surfaced by the audit.
+
+---
+
+### cancel-bot #19
+**Status:** OPEN, two-part fix in flight (PR 4 verification only on the REFERRED-routing piece, slot 2 of 4; PR 3 fixes the placeholder bleed, slot 4 of 4)
+**Severity:** customer-harm (a non-cancelled member received a cancellation-confirmed email; a raw template placeholder rendered verbatim in a member-facing email)
+**Discovered:** May 10, 2026 (Sindhura Polepalli session, Fernanda escalation)
+
+Sindhura Polepalli session: outcome REFERRED, reason Technical Issue (credits disappeared during pause). Two distinct failures in the one session:
+
+1. **Wrong template:** `42-generic-cancelled` fired with subject "Your Silver Mirror membership cancellation is confirmed." Sindhura was REFERRED, not CANCELLED. Her session was May 10; PR #8 (REFERRED routes to `43-referred-manual-review`) merged May 12, so her session predates the fix. PR 4 reads the Cancellations Google Sheet for REFERRED sessions on or after 2026-05-13 and confirms each routes to `43-referred-manual-review` (not `42-generic-cancelled` or any other template). Verification only, no code change unless the verification surfaces a regression.
+
+2. **Placeholder bled into member-facing email:** body contained the literal string `Your existing credits (5 (missing from display)) are usable for 90 days`. The nested `(missing from display)` is what comes back from the upstream field-stringification path in `src/lib/member-draft.js` (fields like `Unused Credits = '5 (missing from display)'`) when a value isn't resolvable, and that string then interpolates raw into the email template. PR 3 sanitizes the field-stringification path so bracket-style placeholders are either replaced with a safe fallback or hard-fail the render rather than silently shipping verbatim to the member. PR 3 lands after PR 2 because PR 2's accepted-offer × reason audit may surface adjacent fields that share the same stringification path.
+
+---
+
+### cancel-bot #20
+**Status:** FIXED IN CODE 2026-05-13 by PR `fix/broaden-no-process-handoff-rule` (PR 1 of the May 13 ship sequence, not yet merged). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** trust-erosion across two issue classes (milestone history per Zoe; technical/credit issues per Sindhura)
+**Discovered:** May 7, 2026 (Zoe Dickinson follow-up); Travis decision received 2026-05-12
+
+Two-part Travis ruling resolving the operational gap behind cancel-bot #9 and cancel-bot #19:
+
+1. **Milestone scope.** Silver Mirror has no defined process for fragmented-account milestone reconciliation. The bot should mention only UPCOMING milestones, never enumerate historical perks the company has no defined process to honor. Zoe's transcript (the bot reciting "Month 2: Moisturizer ($65 value)... Month 9: Cleanser ($41 value)...") is exactly the pattern to remove.
+
+2. **Generic no-SLA escalation language.** For any issue class with no defined SLA (milestone history per Zoe; technical/credit issues per Sindhura; adjacent classes), the bot says exactly: "I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." No specific timeline, no "48 hours," no outcome promise.
+
+**PR 1 landed 2026-05-13 (`fix/broaden-no-process-handoff-rule`)** with three edits to `src/lib/system-prompt.txt`: (a) new `HARD RULE - MILESTONE DISCUSSION SCOPE` constraining milestone discussion to the member's NEXT upcoming milestone only, with BAD/GOOD example pair drawn from the Zoe transcript (Month 2/4/5/9/12 historical recital banned); (b) new `HARD RULE - NO DEFINED PROCESS HANDOFFS` mandating Travis's exact phrase "I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." with documented contextual variations ("review your account history" / "review your credits" / "review this") and explicit bans on specific timelines, outcomes, and actions; covers Zoe + Sindhura plus the broader class (missing milestones, credits/points/perks not showing, fragmented account history, technical/display issues, duplicate-charge billing disputes); (c) strengthened `HARD RULE - NO FABRICATED ESCALATION` (PR #13) with "Additional banned soft-promise patterns" listing the Sindhura-class language ("they'll resolve this," "they'll restore your credits," "they'll reach out within 24-48 hours," "they'll investigate," etc.) plus a BAD/GOOD example pair from the Sindhura transcript. 18 new tests in `__tests__/claude.test.js` (regression for both production cases plus preservation tests for PR #5, PR #6, PR #13, and HARD RULE #22). Touch: 2 files. Together with PR #13 (no fabricated escalation) this closes the substantive code half of cancel-bot #6 / Travis Decision 3. Smallest blast radius of the four May 13 PRs (system prompt + tests only, no code paths touched), largest production-flagged surface. The remaining piece of Decision 3 (whether to keep the literal "48-hour confirmation email" wording in the outcome-notification path, separate from the in-chat escalation language) stays AWAITING.
 
 ---
 
