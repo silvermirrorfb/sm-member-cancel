@@ -493,8 +493,8 @@ describe('system prompt: no em dashes or en dashes in the new footprint-aware ru
     // Decision Tree #2 reference earlier in the prompt.
     const startIdx = prompt.indexOf('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING:');
     expect(startIdx).toBeGreaterThan(-1);
-    // Find the end of the rule (right before numbered HARD RULE 19)
-    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    // Find the end of the rule (right before the next HARD RULE)
+    const endIdx = prompt.indexOf('\nHARD RULE - BILLING DISPUTE HANDLING', startIdx);
     expect(endIdx).toBeGreaterThan(startIdx);
     const section = prompt.slice(startIdx, endIdx);
     // No em dash (U+2014) or en dash (U+2013)
@@ -507,5 +507,261 @@ describe('system prompt: no em dashes or en dashes in the new footprint-aware ru
     const treeLineMatch = prompt.match(/2\. Relocation:[^\n]*HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING[^\n]*/);
     expect(treeLineMatch).not.toBeNull();
     expect(treeLineMatch[0]).not.toMatch(/[–—]/);
+  });
+});
+
+describe('system prompt: billing dispute handling (cancel-bot #13 / Decision 6)', () => {
+  it('includes the BILLING DISPUTE HANDLING hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - BILLING DISPUTE HANDLING');
+  });
+
+  it('mandates serious acknowledgment and forbids minimizing the dispute', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/MUST acknowledge the dispute seriously/i);
+    expect(prompt).toMatch(/MUST NOT minimize what the member is reporting/i);
+  });
+
+  it('explains why the bot cannot contradict the member on transaction history', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/bot cannot see transaction history/i);
+    expect(prompt).toMatch(/must not contradict the member's account/i);
+  });
+
+  it('lists detection triggers for the canonical billing-dispute phrasings', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"duplicate charge"');
+    expect(prompt).toContain('"double-billed"');
+    expect(prompt).toContain('"charged twice"');
+    expect(prompt).toContain('"you charged me again"');
+    expect(prompt).toContain('"I see two charges"');
+    expect(prompt).toContain('"wrong amount"');
+    expect(prompt).toContain('"the amount is wrong"');
+    expect(prompt).toContain('"I was overcharged"');
+    expect(prompt).toContain('"I want a refund"');
+    expect(prompt).toContain('"I never authorized this"');
+  });
+
+  it('mandates the response pattern (acknowledge, flag, hand off)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Acknowledge the dispute seriously, leading with empathy/i);
+    expect(prompt).toMatch(/cannot pull the full transaction history, which the memberships team can/i);
+    expect(prompt).toMatch(/Flag the matter as a billing dispute for the memberships team to review/i);
+  });
+
+  it('allows asking for dates of disputed charges but bans sensitive payment data', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Optionally invite the member to share the dates of the disputed charges/i);
+    expect(prompt).toMatch(/MUST NOT ask for card numbers, CVV\/CVC, full account numbers, billing ZIP/i);
+    expect(prompt).toContain('Dates only.');
+  });
+
+  it('includes the canonical scripted response containing the take-this-seriously acknowledgment', () => {
+    const prompt = getSystemPrompt();
+    const scripted = "I take this seriously. I can see your membership details on my end, but our memberships team can pull your full transaction history to review. I'm flagging this as a billing dispute for them to look into. If you can share the dates of the charges you're seeing (no card numbers needed), that'll help speed up the review. Someone will follow up with you about next steps.";
+    expect(prompt).toContain(scripted);
+  });
+
+  it('reuses the PR #18 standard handoff phrase verbatim in the script', () => {
+    const prompt = getSystemPrompt();
+    // The billing-dispute scripted response must end with the PR #18 phrase.
+    const billingStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING');
+    expect(billingStart).toBeGreaterThan(-1);
+    const billingSection = prompt.slice(billingStart);
+    expect(billingSection).toContain('Someone will follow up with you about next steps.');
+  });
+
+  it('bans dismissive readouts of membership state', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"I see only one membership, so that should be correct,"');
+    expect(prompt).toContain('"I only see one membership on file,"');
+    expect(prompt).toContain('"It looks fine on my end,"');
+    expect(prompt).toContain('"I don\'t see any duplicate charges"');
+  });
+
+  it('bans deflection to the bank', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"It\'s probably a duplicate from your bank, not us,"');
+    expect(prompt).toContain('"Your bank may have run the charge twice."');
+  });
+
+  it('bans email-screenshots-only as the sole path forward', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Offload-only paths/i);
+    expect(prompt).toMatch(/Please email screenshots to memberships@silvermirror\.com" as the ONLY next step/i);
+  });
+
+  it('bans specific resolution timelines (per PR #18)', () => {
+    const prompt = getSystemPrompt();
+    const billingStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING');
+    const billingSection = prompt.slice(billingStart);
+    expect(billingSection).toMatch(/Specific resolution timelines/i);
+    expect(billingSection).toContain('"within 24 hours,"');
+    expect(billingSection).toContain('"by tomorrow,"');
+    expect(billingSection).toContain('"this week,"');
+    expect(billingSection).toContain('Silver Mirror has no defined SLA for billing dispute resolution');
+  });
+
+  it('bans specific resolution outcomes (per PR #18)', () => {
+    const prompt = getSystemPrompt();
+    const billingStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING');
+    const billingSection = prompt.slice(billingStart);
+    expect(billingSection).toMatch(/Specific outcomes/i);
+    expect(billingSection).toContain('"they\'ll refund you,"');
+    expect(billingSection).toContain('"they\'ll process a refund,"');
+    expect(billingSection).toContain('"they\'ll fix this,"');
+  });
+
+  it('bans fabricated finance / billing team names (per PR #13)', () => {
+    const prompt = getSystemPrompt();
+    const billingStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING');
+    const billingSection = prompt.slice(billingStart);
+    expect(billingSection).toMatch(/Fabricated team names/i);
+    expect(billingSection).toContain('"I\'ve alerted the finance team,"');
+    expect(billingSection).toContain('"I\'ve notified our billing team,"');
+    expect(billingSection).toContain('"I\'ve opened a billing ticket,"');
+    expect(billingSection).toContain('"I\'ve escalated this to accounting."');
+  });
+
+  it('exempts normal cancellation-flow refund requests from the dispute pattern', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/does NOT change how the bot handles a refund request that is part of a normal cancellation flow/i);
+    expect(prompt).toMatch(/route through the standard cancellation pattern, not through this dispute handoff/i);
+  });
+
+  it('includes BAD/GOOD example pair from the production case', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (production case, May 2026, member alleged duplicate billing)');
+    // BAD example uses every banned pattern at once
+    expect(prompt).toContain('"I was charged twice this month and I want a refund."');
+    expect(prompt).toContain('I see one membership on file');
+    expect(prompt).toContain('Please email screenshots');
+    expect(prompt).toContain("they'll refund you within 24 hours");
+    // GOOD example uses the scripted response
+    expect(prompt).toContain('I take this seriously.');
+    expect(prompt).toContain("I'm flagging this as a billing dispute");
+    expect(prompt).toContain("Someone will follow up with you about next steps.");
+  });
+
+  it('includes BAD/GOOD example pair for the bank-deflection pattern', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (deflection to the bank)');
+    expect(prompt).toContain('"You charged me $99 twice on the 5th."');
+    expect(prompt).toContain("It's probably a duplicate from your bank, not us.");
+    // GOOD example for the bank deflection
+    const goodBank = "I hear you. I can see your membership details on my end, but our memberships team can pull your full transaction history to confirm what happened on the 5th. I'm flagging this as a billing dispute for them to review. Someone will follow up with you about next steps.";
+    expect(prompt).toContain(goodBank);
+  });
+
+  it('regression: the production-case GOOD response satisfies every spec assertion', () => {
+    const prompt = getSystemPrompt();
+    // Find the GOOD response that follows the production-case BAD example.
+    const productionGoodStart = prompt.indexOf('Example BAD (production case, May 2026, member alleged duplicate billing)');
+    expect(productionGoodStart).toBeGreaterThan(-1);
+    // Slice forward to the next BAD example so we capture only the production GOOD block
+    const nextBadStart = prompt.indexOf('Example BAD (deflection to the bank)', productionGoodStart);
+    expect(nextBadStart).toBeGreaterThan(productionGoodStart);
+    const productionBlock = prompt.slice(productionGoodStart, nextBadStart);
+
+    // The good response (everything after "Example GOOD:" inside the block)
+    const goodStart = productionBlock.indexOf('Example GOOD:');
+    expect(goodStart).toBeGreaterThan(-1);
+    const goodResponse = productionBlock.slice(goodStart);
+
+    // Per spec: must contain serious acknowledgment
+    expect(goodResponse).toMatch(/take this seriously/i);
+    // Per spec: must contain the PR #18 standard handoff phrase
+    expect(goodResponse).toContain('Someone will follow up with you about next steps.');
+    // Per spec: may invite dates of disputed charges
+    expect(goodResponse).toMatch(/share the dates of the charges/i);
+    // Per spec: must NOT promise specific timeline
+    expect(goodResponse).not.toMatch(/24 hours|by tomorrow|this week|within \d/i);
+    // Per spec: must NOT promise specific outcome
+    expect(goodResponse.toLowerCase()).not.toContain("they'll refund you");
+    expect(goodResponse.toLowerCase()).not.toContain("they'll process a refund");
+    // Per spec: must NOT contain dismissive phrases
+    expect(goodResponse.toLowerCase()).not.toContain('only one membership');
+    expect(goodResponse.toLowerCase()).not.toContain('looks fine on my end');
+    expect(goodResponse.toLowerCase()).not.toContain('that should be correct');
+    // Per spec: must NOT punt to email-only
+    expect(goodResponse.toLowerCase()).not.toContain('email screenshots');
+    // Per spec: must NOT request sensitive payment details. The GOOD response
+    // proactively reassures the member ("no card numbers needed"); it must
+    // never invite them to send card numbers, CVV/CVC, etc.
+    expect(goodResponse).toContain('no card numbers needed');
+    expect(goodResponse.toLowerCase()).not.toMatch(/please (send|share|provide|enter).{0,40}(card|cvv|cvc)/);
+    expect(goodResponse.toLowerCase()).not.toMatch(/(can you|could you).{0,40}(card number|cvv|cvc)/);
+  });
+
+  it('updates the NO DEFINED PROCESS HANDOFFS trigger pointer to reference the specific dispute rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Member alleges duplicate charges or billing disputes (see HARD RULE - BILLING DISPUTE HANDLING below for the specific script pattern)');
+  });
+});
+
+describe('system prompt: prior PR rules survive the billing-dispute PR', () => {
+  it('preserves PR #5 bi-monthly current-pricing rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+  });
+
+  it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
+    expect(prompt).toContain('pauses come with a 3-billing-cycle commitment once you resume');
+  });
+
+  it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO FABRICATED ESCALATION');
+    expect(prompt.toLowerCase()).toContain('alerted our qa team');
+    expect(prompt.toLowerCase()).toContain('flagged this as urgent');
+  });
+
+  it('preserves PR #18 NO DEFINED PROCESS HANDOFFS hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO DEFINED PROCESS HANDOFFS');
+    expect(prompt).toContain("I'm flagging this for our memberships team to review");
+    expect(prompt).toContain('Someone will follow up with you about next steps');
+  });
+
+  it('preserves numbered HARD RULE 22 (perk messaging uses injected fields only)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/use ONLY the injected "Next Perk Milestone" \+ "Months Until Next Perk" fields/i);
+    expect(prompt).toMatch(/Do not infer perk timing from the static milestone table/i);
+  });
+
+  it('preserves PR #23 ALREADY ATTEMPTED CHANNEL hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - ALREADY ATTEMPTED CHANNEL');
+    expect(prompt).toMatch(/MUST NOT redirect them back to the same channel/i);
+    expect(prompt).toContain("I see you've already tried");
+  });
+
+  it('preserves PR #24 FOOTPRINT-AWARE RELOCATION HANDLING hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING');
+    expect(prompt).toMatch(/MUST classify the destination as IN-FOOTPRINT or OUT-OF-FOOTPRINT BEFORE presenting any retention offer/i);
+    expect(prompt).toContain("Best of luck with the move to [destination]. We've loved having you with us.");
+  });
+});
+
+describe('system prompt: no em dashes or en dashes in the new billing-dispute rule', () => {
+  it('the billing-dispute section uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING:');
+    expect(startIdx).toBeGreaterThan(-1);
+    // The rule ends right before numbered HARD RULE 19 reappears
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('the updated NO DEFINED PROCESS HANDOFFS trigger line uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const triggerLineMatch = prompt.match(/- Member alleges duplicate charges or billing disputes[^\n]*/);
+    expect(triggerLineMatch).not.toBeNull();
+    expect(triggerLineMatch[0]).not.toMatch(/[–—]/);
   });
 });
