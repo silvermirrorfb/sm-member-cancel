@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 15, 2026 (billing dispute handling rule)
+**Last updated:** May 15, 2026 (firm-refusal short-circuit + credit visibility disclaimer)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -37,10 +37,10 @@ What's actually still open right now, in order of stakes:
 
 **Still parked behind Travis decisions or provisioning calls:**
 
-4. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decision 2 (geographic exits / out-of-footprint relocation) FIXED IN CODE 2026-05-15 by PR `fix/relocation-out-of-footprint-no-retention` (Congo case fix: HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING skips retention entirely for moves outside NYC/DC/Miami metros, preserves in-footprint transfer-first behavior, 19 new tests). Decision 1 (retention aggressiveness after first clear refusal generally) still AWAITING Travis.
+4. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decision 1 (retention aggressiveness after first clear refusal generally) FIXED IN CODE 2026-05-15 by PR `fix/retention-softening-and-credit-disclaimer` (Christina case fix: HARD RULE - FIRM REFUSAL SHORT-CIRCUIT skips final-warning loss-framing after one offer + a firm second refusal, preserves the first retention offer, defines firm vs non-firm refusal phrasings, allows one clarifying question on ambiguous responses). Decision 2 (geographic exits / out-of-footprint relocation) FIXED IN CODE 2026-05-15 by PR `fix/relocation-out-of-footprint-no-retention` (Congo case fix: HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING skips retention entirely for moves outside NYC/DC/Miami metros, preserves in-footprint transfer-first behavior, 19 new tests). Both halves now FIXED IN CODE.
 5. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
 6. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped (PR #13). The generic no-SLA escalation language and the strengthened example bans resolve via cancel-bot #20 / PR 1. Whether/how to soften the "48-hour confirmation email" promise in the outcome-notification path (separate from in-chat escalation language) and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
-7. **cancel-bot #11 / #14 / #15 / #17** - the rest of the Travis decisions (perk dollar values; credit visibility; tone; commitment language). Code is mostly trivial; the calls aren't ours. (cancel-bot #16 / channel-loop rule resolved 2026-05-15 by PR `fix/already-tried-channel-auto-escalation` per Travis Decision 9. cancel-bot #13 / refund-double-billing script resolved 2026-05-15 by PR `fix/billing-dispute-escalation-script` per Travis Decision 6.)
+7. **cancel-bot #11 / #15 / #17** - the rest of the Travis decisions (perk dollar values; tone; commitment language). Code is mostly trivial; the calls aren't ours. (cancel-bot #14 / credit visibility resolved 2026-05-15 by PR `fix/retention-softening-and-credit-disclaimer` per Travis Decision 7. cancel-bot #16 / channel-loop rule resolved 2026-05-15 by PR `fix/already-tried-channel-auto-escalation` per Travis Decision 9. cancel-bot #13 / refund-double-billing script resolved 2026-05-15 by PR `fix/billing-dispute-escalation-script` per Travis Decision 6.)
 8. **Sentry DSN not set** - PR #12 wired `@sentry/nextjs` but it's inert until someone creates a Sentry project and runs `vercel env add SENTRY_DSN production`. Cowork task.
 9. **Dedicated staging Vercel project** - the cross-cutting #5 "real gap": `dryRun` + synthetic mode + previews now cover most safe testing (see `docs/STAGING.md`), but a fully-isolated `sm-member-cancel-staging` project with its own env vars is still a provisioning decision for the Vercel-team owner (not done unilaterally - it's billable infra).
 
@@ -218,10 +218,10 @@ Chatlog logging silently no-op'd because `GOOGLE_CHATLOG_SHEET_ID` env var was n
 ---
 
 ### cancel-bot #5
-**Status:** Decision 2 (geographic exits / out-of-footprint relocation) FIXED IN CODE 2026-05-15 by PR `fix/relocation-out-of-footprint-no-retention`. Bump to VERIFIED FIXED after merge + production deploy. Decision 1 (retention aggressiveness after first clear refusal generally) still AWAITING.
+**Status:** Decision 1 (retention aggressiveness after first clear refusal generally) FIXED IN CODE 2026-05-15 by PR `fix/retention-softening-and-credit-disclaimer`. Decision 2 (geographic exits / out-of-footprint relocation) FIXED IN CODE 2026-05-15 by PR `fix/relocation-out-of-footprint-no-retention`. Bump to VERIFIED FIXED after merge + production deploy.
 **Severity:** customer-harm, compliance-risk
 **Discovered:** April to early May 2026 (660-session review)
-**Travis decision received:** 2026-05-15 (Decision 2 only; Decision 1 still open)
+**Travis decision received:** 2026-05-15 (Decision 1 + Decision 2)
 
 Bot pushed retention past clear refusals in multiple sessions:
 
@@ -240,7 +240,7 @@ Also updated Decision Tree #2 (Relocation) to point to the new hard rule: "this 
 
 19 new tests in `__tests__/claude.test.js` (`system prompt: footprint-aware relocation handling`, `prior PR rules survive the footprint-aware relocation PR`, and `no em dashes or en dashes in the new footprint-aware rule`) cover the Congo regression, in-footprint transfer-first preservation, ambiguous-destination clarifying ask, and preservation of PR #5, PR #6, PR #13, PR #18, HARD RULE #22, and PR #23. Touch: 2 files (system-prompt.txt + claude.test.js). Closes Travis Decision 2.
 
-**Still AWAITING Decision 1:** how aggressive should retention be after the first clear refusal generally (not just geographic exits). The `d60c370e` session is the canonical example. Final-warning loss-framing after a clear "just cancel" is still allowed by the prompt outside the OUT-OF-FOOTPRINT path.
+**Decision 1 ship (this PR, `fix/retention-softening-and-credit-disclaimer`):** new `HARD RULE - FIRM REFUSAL SHORT-CIRCUIT` in `src/lib/system-prompt.txt`, structured to match the PR #6 / PR #13 / PR #18 / PR #23 / PR #24 / PR #25 rule format. After ONE retention offer and a firm second refusal ("no", "no thank you", "just cancel", "please cancel", "cancel anyway", "I don't want it", "stop offering", etc.), the bot MUST skip the final-warning loss-framing block and process the cancellation directly. Defines "firm" vs "NOT firm" explicitly (questions, hesitation, "tell me more" do NOT trigger the short-circuit). Allows ONE clarifying question on ambiguous responses ("Just to confirm, you'd like to go ahead with the cancellation?"). Bans the loss-framing phrases the final-warning block uses ("you'll be giving up," "here's what you'd be giving up," "before you go..." etc.). The first retention offer is preserved (some members legitimately don't know pause is an option). Updates numbered HARD RULE 1 and Step 5 to cross-reference the new rule; updates the in-footprint relocation cross-reference for consistency. BAD example uses the actual Christina production transcript (session d60c370e, May 1 2026); GOOD examples cover the Christina case, soft-response retention conversation, and the ambiguous-response clarification path. 17 new tests in `__tests__/claude.test.js` cover the regression, every banned pattern, the BAD/GOOD example pairs, and no em/en dashes in the new rule. Closes Travis Decision 1.
 
 ---
 
@@ -390,13 +390,23 @@ Also updated the trigger pointer inside `HARD RULE - NO DEFINED PROCESS HANDOFFS
 ---
 
 ### cancel-bot #14
-**Status:** AWAITING DECISION (Travis Decision 7)
+**Status:** FIXED IN CODE 2026-05-15 by PR `fix/retention-softening-and-credit-disclaimer`. Bump to VERIFIED FIXED after merge + production deploy.
 **Severity:** information gap in critical moments
 **Discovered:** Ongoing
+**Travis decision received:** 2026-05-15 (Decision 7)
 
-Member asks "do I have any unused credits before I cancel?" Bot says it can't see specific credit details and gives a generic answer. True (bot doesn't have credit visibility), but the framing is weak.
+Member asks "do I have any unused credits before I cancel?" Bot says it can't see specific credit details and gives a generic answer. True (bot doesn't have credit visibility), but the framing is weak. Production case (April 16 2026, session 90d9b96b): member asked whether a credit expiring June 30 was already paid for and whether cancellation would lose it; bot gave a generic "credits valid 90 days after cancellation" answer with no acknowledgment of the visibility limit. Member walked away unsure whether the answer was for THEIR credit or just policy in general.
 
-Three options: wire in credit visibility, add explicit upfront disclaimer plus 24-hour follow-up, or status quo.
+**Travis decision (May 15 2026, Decision 7):** option B. Add explicit upfront disclaimer ("I don't have visibility into your specific credit balances") then route the member through the PR #18 standard handoff phrase. Do NOT promise a 24-hour timeline (per PR #18 / cancel-bot #20). Do NOT fabricate a specific credit count. The bot MAY still share general credit policy framed as policy.
+
+**Fix (this PR, `fix/retention-softening-and-credit-disclaimer`):** new `HARD RULE - CREDIT VISIBILITY DISCLAIMER` in `src/lib/system-prompt.txt`, structured to match the PR #6 / PR #13 / PR #18 / PR #23 / PR #24 / PR #25 rule format. Five pieces:
+1. Statement that the bot cannot see specific credit balances, expiration dates, or credit transaction history.
+2. Detection triggers covering the canonical credit-visibility phrasings ("do I have any credits," "will I lose my credits if I cancel," "when does my credit expire," "is this credit already paid for," any specific credit count or date the member states, etc.).
+3. Response pattern: honest upfront disclaimer ("I can see your membership details, but I don't have visibility into your specific credit balances or expiration dates."), PR #18 standard handoff phrase ("I'm flagging this for our memberships team to review your credits. Someone will follow up with you about next steps."), optional general credit policy framed as policy (90-day validity, etc.).
+4. Banned language: fabricating a specific credit count, promising specific credits will be honored or restored (per PR #18), promising a specific timeline (per PR #18), stating whether a specific credit is or is not already paid for, generic policy-only answers when the member is asking about THEIR credits.
+5. Explicit exemption: general-policy questions framed as policy ("how long are credits good for in general?") do NOT trigger the handoff.
+
+BAD example uses the actual April 16 production transcript (session 90d9b96b, the June 30 credit question); GOOD examples cover the production case with disclaimer + general policy + handoff, the general-policy exemption, and a member-specific credit question combining all three elements. 19 new tests in `__tests__/claude.test.js` cover the regression, every banned pattern, the BAD/GOOD example pairs, and no em/en dashes in the new rule. Closes Travis Decision 7.
 
 ---
 
@@ -586,13 +596,13 @@ The 10 chatbot-script decisions parked with Travis for review, mirrored from `do
 
 | Decision | Issue | Topic | Stakes |
 |---|---|---|---|
-| 1 | cancel-bot #5 | Retention aggressiveness after first clear refusal | high (FTC) |
+| 1 | cancel-bot #5 | Retention aggressiveness after first clear refusal | high (FTC) | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`) |
 | 2 | cancel-bot #5 | Retention behavior on geographic/medical exits | high | FIXED IN CODE 2026-05-15 (PR `fix/relocation-out-of-footprint-no-retention`, geographic half only; medical exits still default to Decision Tree #17) |
 | 3 | cancel-bot #6 | Escalation reality vs fabricated promises | HIGHEST |
 | 4 | cancel-bot #11 | Perk dollar value verification | medium |
 | 5 | cancel-bot #12 | Identity verification floor | high (privacy) |
 | 6 | cancel-bot #13 | Refund / double-billing escalation script | medium | FIXED IN CODE 2026-05-15 (PR `fix/billing-dispute-escalation-script`) |
-| 7 | cancel-bot #14 | Credit visibility approach | medium |
+| 7 | cancel-bot #14 | Credit visibility approach | medium | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`) |
 | 8 | cancel-bot #15 | Tone fixes (Perfect!, empathy, benefits list) | low-medium |
 | 9 | cancel-bot #16 | Channel-loop rule (don't redirect to failed channels) | medium | FIXED IN CODE 2026-05-15 (PR `fix/already-tried-channel-auto-escalation`) |
 | 10 | cancel-bot #17 | Commitment language standardization | medium |

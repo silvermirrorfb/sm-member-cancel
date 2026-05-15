@@ -751,8 +751,8 @@ describe('system prompt: no em dashes or en dashes in the new billing-dispute ru
     const prompt = getSystemPrompt();
     const startIdx = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING:');
     expect(startIdx).toBeGreaterThan(-1);
-    // The rule ends right before numbered HARD RULE 19 reappears
-    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    // The rule ends right before the next HARD RULE (FIRM REFUSAL SHORT-CIRCUIT)
+    const endIdx = prompt.indexOf('\nHARD RULE - FIRM REFUSAL SHORT-CIRCUIT', startIdx);
     expect(endIdx).toBeGreaterThan(startIdx);
     const section = prompt.slice(startIdx, endIdx);
     expect(section).not.toMatch(/[–—]/);
@@ -763,5 +763,387 @@ describe('system prompt: no em dashes or en dashes in the new billing-dispute ru
     const triggerLineMatch = prompt.match(/- Member alleges duplicate charges or billing disputes[^\n]*/);
     expect(triggerLineMatch).not.toBeNull();
     expect(triggerLineMatch[0]).not.toMatch(/[–—]/);
+  });
+});
+
+describe('system prompt: firm-refusal short-circuit (Christina case, cancel-bot #5 / Decision 1)', () => {
+  it('includes the FIRM REFUSAL SHORT-CIRCUIT hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT');
+  });
+
+  it('mandates skipping the final-warning loss-framing after a firm refusal', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/MUST skip the final-warning loss-framing block and process the cancellation directly/i);
+  });
+
+  it('preserves the FIRST retention offer (does not remove the initial offer)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/preserves the FIRST retention offer/i);
+    expect(prompt).toMatch(/some members legitimately do not know that pause or bi-monthly is an option/i);
+  });
+
+  it('defines firm refusal explicitly with the canonical phrasings', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"no"');
+    expect(prompt).toContain('"no thank you"');
+    expect(prompt).toContain('"just cancel"');
+    expect(prompt).toContain('"please just cancel"');
+    expect(prompt).toContain('"please cancel"');
+    expect(prompt).toContain('"cancel anyway"');
+    expect(prompt).toContain('"I don\'t want it"');
+    expect(prompt).toContain('"stop offering"');
+  });
+
+  it('defines NOT firm with hesitation / question phrasings', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"I\'m not sure"');
+    expect(prompt).toContain('"tell me more about the pause"');
+    expect(prompt).toContain('"maybe"');
+    expect(prompt).toContain('"can you explain"');
+    expect(prompt).toMatch(/any question, any hesitation, any request for more information/i);
+  });
+
+  it('allows clarifying ONCE on ambiguous responses with the canonical phrasing', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Just to confirm, you\'d like to go ahead with the cancellation?');
+    expect(prompt).toMatch(/Do not ask this clarifying question more than once/i);
+    expect(prompt).toMatch(/Do not use clarification as a stalling tactic/i);
+  });
+
+  it('bans the loss-framing phrases the final-warning block uses', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"you\'ll be giving up"');
+    expect(prompt).toContain('"you\'ll lose access to"');
+    expect(prompt).toContain('"you\'ll no longer have"');
+    expect(prompt).toContain('"you\'re walking away from"');
+    expect(prompt).toContain('"here\'s what you\'d be giving up"');
+    expect(prompt).toContain('"before you go..."');
+  });
+
+  it('routes the bot to the standard cancellation confirmation pattern after firm refusal', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/proceeds directly to the standard cancellation confirmation pattern/i);
+    expect(prompt).toContain("Got it, I'm processing your cancellation now. Anything else I can help with?");
+  });
+
+  it('overrides numbered HARD RULE 1 final-warning tail and Step 5', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/overrides the "Final warning" tail of numbered HARD RULE 1 and Step 5/i);
+  });
+
+  it('updates numbered HARD RULE 1 to cross-reference the firm-refusal short-circuit', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/1\. If "just cancel" after at least one offer, respect immediately\. After a firm refusal following the first offer, skip the final-warning loss-framing block and process the cancellation directly \(see HARD RULE - FIRM REFUSAL SHORT-CIRCUIT below\)/);
+  });
+
+  it('updates Step 5 with an EXCEPTION clause for firm refusals', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Step 5:[^\n]*EXCEPTION: if the member firmly refused the first retention offer \(see HARD RULE - FIRM REFUSAL SHORT-CIRCUIT\), skip this Final Warning block entirely/);
+  });
+
+  it('clarifies the rule is separate from HARD RULE - GUEST DEMANDS AND ULTIMATUMS', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/HARD RULE - GUEST DEMANDS AND ULTIMATUMS still applies separately/i);
+  });
+
+  it('includes the Christina BAD example as the production case', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (Christina case, production session d60c370e, May 1 2026)');
+    expect(prompt).toContain('No I would like to cancel please.');
+    expect(prompt).toContain("Before we finalize, here's what you'd be giving up");
+    expect(prompt).toContain('No thank you, please just cancel.');
+    expect(prompt).toMatch(/Two firm refusals before Silver Mirror honored the request\. Reads as harassment\./);
+  });
+
+  it('includes the Christina GOOD example with direct cancellation and no loss-framing', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (Christina case, firm-refusal short-circuit)');
+    const goodChristina = "Got it, Christina, I'm processing your cancellation now. Any unused credits remain valid for 90 days from your last bill date. Anything else I can help with?";
+    expect(prompt).toContain(goodChristina);
+    // The good response must not contain loss-framing language
+    expect(goodChristina.toLowerCase()).not.toContain('giving up');
+    expect(goodChristina.toLowerCase()).not.toContain('lose access');
+    expect(goodChristina.toLowerCase()).not.toContain('walking away');
+    expect(goodChristina.toLowerCase()).not.toContain('before you go');
+    // The good response must not contain another retention offer
+    expect(goodChristina.toLowerCase()).not.toContain('pause');
+    expect(goodChristina.toLowerCase()).not.toContain('bi-monthly');
+    expect(goodChristina.toLowerCase()).not.toContain('discount');
+  });
+
+  it('includes a GOOD example showing soft responses keep retention conversation alive', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (soft response keeps retention conversation alive)');
+    expect(prompt).toContain('Tell me more about the pause.');
+    expect(prompt).toMatch(/This is NOT a firm refusal, so the short-circuit does not apply/);
+  });
+
+  it('includes a GOOD example showing the one-time clarification on ambiguous responses', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (ambiguous response, bot clarifies once)');
+    expect(prompt).toContain("I don't know, just do it.");
+    expect(prompt).toContain("Just to confirm, you'd like to go ahead with the cancellation?");
+    expect(prompt).toContain('Yes, cancel it.');
+  });
+
+  it('regression: the Christina GOOD response contains no loss-framing or follow-on offer', () => {
+    const prompt = getSystemPrompt();
+    // Locate the Christina GOOD example block
+    const goodStart = prompt.indexOf('Example GOOD (Christina case, firm-refusal short-circuit)');
+    expect(goodStart).toBeGreaterThan(-1);
+    const nextExampleStart = prompt.indexOf('Example GOOD (soft response', goodStart);
+    expect(nextExampleStart).toBeGreaterThan(goodStart);
+    const block = prompt.slice(goodStart, nextExampleStart);
+    // The bot's response in this block must not loss-frame or re-pitch
+    expect(block.toLowerCase()).not.toContain('giving up');
+    expect(block.toLowerCase()).not.toContain('lose access');
+    expect(block.toLowerCase()).not.toContain('walking away');
+    expect(block.toLowerCase()).not.toContain('before you go');
+    expect(block.toLowerCase()).not.toContain('would you like to proceed');
+    // The bot must confirm cancellation immediately
+    expect(block).toMatch(/processing your cancellation/i);
+    // The bot must confirm the 48-hour email
+    expect(block).toMatch(/unused credits remain valid for 90 days/i);
+  });
+});
+
+describe('system prompt: credit visibility disclaimer (April 16 case, cancel-bot #14 / Decision 8)', () => {
+  it('includes the CREDIT VISIBILITY DISCLAIMER hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - CREDIT VISIBILITY DISCLAIMER');
+  });
+
+  it('states explicitly that the bot cannot see specific credit details', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/bot cannot see specific credit balances, expiration dates, or credit transaction history/i);
+  });
+
+  it('lists detection triggers for member-specific credit questions', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"do I have any credits"');
+    expect(prompt).toContain('"do I have any unused credits"');
+    expect(prompt).toContain('"will I lose my credits if I cancel"');
+    expect(prompt).toContain('"when does my credit expire"');
+    expect(prompt).toContain('"is this credit already paid for"');
+    expect(prompt).toContain('"I have a credit on my account"');
+  });
+
+  it('mandates the honest upfront disclaimer phrasing', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain("I can see your membership details, but I don't have visibility into your specific credit balances or expiration dates.");
+  });
+
+  it('mandates the PR #18 standard handoff phrase verbatim', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain("I'm flagging this for our memberships team to review your credits. Someone will follow up with you about next steps.");
+  });
+
+  it('allows sharing GENERAL credit policy framed as policy', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/MAY share GENERAL credit policy as policy if it is relevant/i);
+    expect(prompt).toMatch(/credits are valid for 90 days from the bill date that accrued them/i);
+    expect(prompt).toMatch(/MUST frame this as policy, not as a statement about THIS member's specific credits/i);
+  });
+
+  it('bans fabricating a specific credit count', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Fabricating a specific credit count/i);
+    expect(prompt).toContain('"you have 3 credits"');
+    expect(prompt).toContain('"you have 1 unused credit"');
+  });
+
+  it('bans promising specific credits will be honored or restored (per PR #18)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Promising specific credits will be honored or restored/i);
+    expect(prompt).toContain('"they\'ll restore your credits"');
+    expect(prompt).toContain('"your credits will be honored"');
+  });
+
+  it('bans promising a specific timeline (per PR #18)', () => {
+    const prompt = getSystemPrompt();
+    const creditStart = prompt.indexOf('HARD RULE - CREDIT VISIBILITY DISCLAIMER');
+    const creditSection = prompt.slice(creditStart, prompt.indexOf('\n19. If any profile field is UNKNOWN', creditStart));
+    expect(creditSection).toMatch(/Promising a specific timeline/i);
+    expect(creditSection).toContain('"within 24 hours"');
+    expect(creditSection).toContain('"by tomorrow"');
+    expect(creditSection).toContain('"this week"');
+  });
+
+  it('bans stating whether a specific credit is or is not already paid for', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Stating that a specific credit on the member's account is or is not already paid for, when the bot cannot actually verify that/i);
+  });
+
+  it('bans generic policy-only answers when the member is asking about their specific credits', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Giving a generic policy-only answer with no acknowledgment of the visibility gap when the member is asking about THEIR credits/i);
+  });
+
+  it('exempts general credit policy questions framed as general policy', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/does NOT block general credit policy questions framed as policy/i);
+    expect(prompt).toMatch(/how long are credits good for in general/i);
+  });
+
+  it('includes the production-case BAD example (April 16, session 90d9b96b)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (production case, April 16 2026, session 90d9b96b)');
+    expect(prompt).toContain('I have a credit that expires June 30. Was that already paid for? Will I lose it if I cancel now?');
+    expect(prompt).toMatch(/Bot gave a generic policy answer with no acknowledgment that it cannot see this specific credit/i);
+  });
+
+  it('includes the production-case GOOD example with disclaimer + general policy + handoff', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (production case, credit-visibility disclaimer)');
+    const goodResponse = "I can see your membership details, but I don't have visibility into your specific credit balances or expiration dates, so I can't confirm whether that June 30 credit is already paid for. As general policy, unused credits remain valid for 90 days after cancellation. I'm flagging this for our memberships team to review your credits. Someone will follow up with you about next steps.";
+    expect(prompt).toContain(goodResponse);
+  });
+
+  it('includes a general-policy GOOD example showing no handoff needed', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (general-policy question, no handoff needed)');
+    expect(prompt).toContain('How long are credits good for in general?');
+    expect(prompt).toMatch(/Credits are valid for 90 days from the bill date that accrued them/i);
+  });
+
+  it('includes a member-specific credit GOOD example combining disclaimer + general policy + handoff', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (member-specific credit question with general policy plus disclaimer)');
+    expect(prompt).toContain("Do I have any credits I'll lose if I cancel?");
+    expect(prompt).toMatch(/I don't have visibility into your specific credit balance on my end/i);
+  });
+
+  it('regression: production-case GOOD response satisfies every spec assertion', () => {
+    const prompt = getSystemPrompt();
+    // Find the production-case GOOD block
+    const goodStart = prompt.indexOf('Example GOOD (production case, credit-visibility disclaimer)');
+    expect(goodStart).toBeGreaterThan(-1);
+    const nextExampleStart = prompt.indexOf('Example GOOD (general-policy question', goodStart);
+    expect(nextExampleStart).toBeGreaterThan(goodStart);
+    const goodBlock = prompt.slice(goodStart, nextExampleStart);
+
+    // Per spec: must contain the honest disclaimer
+    expect(goodBlock).toMatch(/don't have visibility into your specific credit balance/i);
+    // Per spec: must contain the PR #18 standard handoff phrase
+    expect(goodBlock).toContain('Someone will follow up with you about next steps.');
+    // Per spec: must NOT fabricate a specific credit count
+    expect(goodBlock).not.toMatch(/you have \d+ credit/i);
+    // Per spec: must NOT promise a specific timeline
+    expect(goodBlock).not.toMatch(/within 24 hours|by tomorrow|this week|within \d/i);
+    // Per spec: must NOT promise specific credits will be restored / honored
+    expect(goodBlock.toLowerCase()).not.toContain("they'll restore");
+    expect(goodBlock.toLowerCase()).not.toContain('will be honored');
+  });
+});
+
+describe('system prompt: prior PR rules survive the firm-refusal + credit-disclaimer PR', () => {
+  it('preserves PR #5 bi-monthly current-pricing rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+  });
+
+  it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
+    expect(prompt).toContain('pauses come with a 3-billing-cycle commitment once you resume');
+  });
+
+  it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO FABRICATED ESCALATION');
+    expect(prompt.toLowerCase()).toContain('alerted our qa team');
+    expect(prompt.toLowerCase()).toContain('flagged this as urgent');
+  });
+
+  it('preserves PR #18 NO DEFINED PROCESS HANDOFFS hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO DEFINED PROCESS HANDOFFS');
+    expect(prompt).toContain("I'm flagging this for our memberships team to review");
+    expect(prompt).toContain('Someone will follow up with you about next steps');
+  });
+
+  it('preserves numbered HARD RULE 22 (perk messaging uses injected fields only)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/use ONLY the injected "Next Perk Milestone" \+ "Months Until Next Perk" fields/i);
+    expect(prompt).toMatch(/Do not infer perk timing from the static milestone table/i);
+  });
+
+  it('preserves PR #23 ALREADY ATTEMPTED CHANNEL hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - ALREADY ATTEMPTED CHANNEL');
+    expect(prompt).toMatch(/MUST NOT redirect them back to the same channel/i);
+    expect(prompt).toContain("I see you've already tried");
+  });
+
+  it('preserves PR #24 FOOTPRINT-AWARE RELOCATION HANDLING hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING');
+    expect(prompt).toMatch(/MUST classify the destination as IN-FOOTPRINT or OUT-OF-FOOTPRINT BEFORE presenting any retention offer/i);
+    expect(prompt).toContain("Best of luck with the move to [destination]. We've loved having you with us.");
+  });
+
+  it('preserves PR #25 BILLING DISPUTE HANDLING hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - BILLING DISPUTE HANDLING');
+    expect(prompt).toMatch(/MUST acknowledge the dispute seriously/i);
+    expect(prompt).toContain('I take this seriously.');
+  });
+
+  it('preserves the initial retention offer (first offer not removed by firm-refusal rule)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Step 4: Present offers ONE AT A TIME from Decision Tree based on reason/i);
+    // The full decision tree still exists with 20 reason categories
+    expect(prompt).toContain('1. Travel:');
+    expect(prompt).toContain('15. Cost Overwhelming');
+  });
+
+  it('preserves the in-footprint relocation transfer-first behavior', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('IN-FOOTPRINT handling (existing behavior preserved)');
+    expect(prompt).toMatch(/offers a LOCATION TRANSFER first/i);
+  });
+});
+
+describe('system prompt: no em dashes or en dashes in the new firm-refusal and credit-disclaimer rules', () => {
+  it('the firm-refusal section uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT:');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('\nHARD RULE - CREDIT VISIBILITY DISCLAIMER', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('the credit-visibility section uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - CREDIT VISIBILITY DISCLAIMER:');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('the updated numbered HARD RULE 1 line uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/1\. If "just cancel" after at least one offer[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).not.toMatch(/[–—]/);
+  });
+
+  it('the updated Step 5 EXCEPTION clause uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/Step 5:[^\n]*EXCEPTION:[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).not.toMatch(/[–—]/);
+  });
+
+  it('the updated in-footprint cross-reference line uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/When the destination is classified IN-FOOTPRINT[^\n]*HARD RULE - FIRM REFUSAL SHORT-CIRCUIT[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).not.toMatch(/[–—]/);
   });
 });
