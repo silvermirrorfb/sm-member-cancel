@@ -422,7 +422,7 @@ describe('system prompt: footprint-aware relocation handling (Congo case, cancel
   it('includes the Congo GOOD example with warm send-off and no retention', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toContain('Example GOOD (Congo case, footprint-aware)');
-    const goodCongo = "Congratulations on the move. Silver Mirror is only in NYC, DC, and Miami, so a transfer isn't an option for Congo. I'm passing your cancellation to our memberships team for backend processing. You'll get a confirmation email within 48 hours, processing takes 30 days, and any unused credits remain valid for 90 days from your last bill date. Best of luck with the move to Congo. We've loved having you with us. If you're ever back in the NYC, DC, or Miami area, we'd love to welcome you back.";
+    const goodCongo = "Congratulations on the move. Silver Mirror only has locations in NYC, DC, and Miami, so a transfer isn't an option. I'm passing your cancellation to our memberships team. Any unused credits will remain valid for 90 days from your last bill date. Best of luck with the move to Congo, and we've loved having you with us. If you're ever back in the NYC, DC, or Miami area, we'd love to welcome you back.";
     expect(prompt).toContain(goodCongo);
     // The good Congo example must NOT contain retention language
     expect(goodCongo.toLowerCase()).not.toContain('pause');
