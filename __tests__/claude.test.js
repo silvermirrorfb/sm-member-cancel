@@ -316,7 +316,7 @@ describe('system prompt: already-attempted-channel auto-escalation (cancel-bot #
     expect(prompt).toContain('Example BAD (production case, May 15 2026');
     expect(prompt).toContain('Example BAD (phone tried, bot redirects to email)');
     expect(prompt).toContain('Example BAD (form tried, bot redirects to form)');
-    expect(prompt).toContain("I see you've already tried emailing");
+    expect(prompt).toContain("Six months without a response is really frustrating");
     expect(prompt).toContain("I see you've already tried calling");
     expect(prompt).toContain("I see you've already tried the cancellation form");
   });
@@ -325,7 +325,7 @@ describe('system prompt: already-attempted-channel auto-escalation (cancel-bot #
     const prompt = getSystemPrompt();
     // The GOOD email example must not include a specific timeline like "24-48 hours"
     // or specific outcome promise. It must use only the standard handoff phrase.
-    const goodEmailExample = "I see you've already tried emailing. I'm flagging this for our memberships team to review. Someone will follow up with you about next steps.";
+    const goodEmailExample = "Six months without a response is really frustrating, and I'm sorry that's been your experience. I'm flagging this for our memberships team to review. Someone will follow up with you about next steps.";
     expect(prompt).toContain(goodEmailExample);
   });
 });
