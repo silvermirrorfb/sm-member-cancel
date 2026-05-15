@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 13, 2026
+**Last updated:** May 15, 2026
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -463,6 +463,31 @@ Two-part Travis ruling resolving the operational gap behind cancel-bot #9 and ca
 ---
 
 ## Cross-cutting issues
+
+### cancel-bot #22
+**Status:** FIXED IN CODE 2026-05-15 by PR `fix/session-summary-server-side-date` (not yet merged). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** customer-harm (corrupted canonical cancellation record), trust-erosion
+**Discovered:** May 13, 2026 (PR #4 verification work, while reading the Cancellations Google Sheet)
+
+The bot was emitting a `date` field as part of the structured `session_summary` JSON, and `notify.js` wrote it verbatim to column A of the Cancellations Google Sheet (and into the summary email subject line and the reason-alert email). Bot-generated dates have hallucinated wrong values in production:
+
+- Zoe Dickinson: actual session 2026-05-07, Sheet row dated `2024-12-19`
+- Sindhura Polepalli: actual session 2026-05-10, Sheet row dated `2025-01-27`
+
+Concrete downstream harm: Fernanda's queue ordering by date is wrong (she misses fresh escalations because they sort with two-year-old rows); trend analysis is unreliable (May 2026 looks sparse because hallucinated rows file under 2024 and 2025); audit trails are noise; date-filtered Sheet queries return near-empty results when sessions actually exist under hallucinated dates.
+
+Cross-references PR #4 (`fix/email-template-outcome-priority`, May 11) which surfaced the issue during its post-merge sheet-reading verification work but did not touch the date field. Same root cause class as cancel-bot #6 / cancel-bot #20: bot output that the system trusts as authoritative when it shouldn't.
+
+**Fix (this PR):** three changes:
+1. **Strip the date field from the bot's output schema.** `src/lib/system-prompt.txt`: removed `"date": "[ISO date]"` from the `session_summary` JSON example and added a new `HARD RULE - SESSION SUMMARY DATE FIELD` explicitly instructing the bot not to emit a date field, citing both production cases. The server now stamps the date.
+2. **Stamp date server-side at session end.** `src/app/api/chat/end/route.js`: a `todayInEastern()` helper (tiny `Intl.DateTimeFormat` call, no library) returns today's date in `America/New_York` as `YYYY-MM-DD`, and `summary.date` is overwritten with that value immediately before `processConversationEnd` is called. Even if the bot emits a date field anyway, it is overwritten and ignored.
+3. **Defense in depth in `notify.js`.** A new `safeIsoDate(value)` helper passes through any string matching `^\d{4}-\d{2}-\d{2}$` and otherwise returns today's Eastern date in the same `YYYY-MM-DD` format. Applied to `logToGoogleSheets` (column A), `buildEmailBody` (text email), and `buildEmailHtml` (HTML email header). This catches any session that bypasses the end-route stamping path (e.g. older queued sessions, future call sites) and refuses to write a malformed value.
+
+17 new tests in `__tests__/session-summary-date-stamping.test.js`: prompt-no-longer-has-date assertions, regression tests for both Zoe and Sindhura production cases (bot-supplied hallucinated date is overwritten by `todayInEastern()`), `safeIsoDate` defense-in-depth coverage (missing/malformed/non-string/whitespace), preservation tests (other summary fields untouched, GENERAL conversations bypass notify entirely, fallback path still stamps date). Touch: 4 files (system-prompt.txt, route.js, notify.js, new test file). Existing notify, chat-message, and member-draft tests still pass; the 10 pre-existing failures on main (1 in `claude.test.js` for a stale assertion, 9 across the SMS cron tests) are unrelated to this PR.
+
+**Surfaced but not fixed in this PR:** sparse-May-2026-rows in the Cancellations Sheet is a downstream observability question. Once new sessions land with the corrected server-stamped date, count May rows again over a multi-day window. If the count is still surprisingly low, that is its own investigation (Sheet write reliability, session-end handler reach, etc.) and gets its own ticket. Out of scope here.
+
+---
 
 ### cross-cutting #1
 **Status:** BUILT 2026-05-12 (PR #11 `feat/sms-zero-send-alert`, builds on PR #10 `feat/sms-daily-send-counter`)

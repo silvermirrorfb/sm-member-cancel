@@ -11,6 +11,18 @@ function toFiniteNumberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// cancel-bot #22: bot was hallucinating session_summary.date (e.g. emitting
+// 2024-12-19 for a May 2026 session). Stamp the date server-side so the
+// canonical cancellation record reflects the actual session timestamp.
+function todayInEastern() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 function sanitizeRecoveredHistory(history) {
   if (!Array.isArray(history)) return [];
 
@@ -138,7 +150,6 @@ export async function POST(request) {
       if (!summary) {
         // Fallback minimal summary
         summary = {
-          date: new Date().toISOString(),
           client_name: session.memberProfile?.name || 'Unknown',
           email: session.memberProfile?.email || 'Unknown',
           phone: session.memberProfile?.phone || null,
@@ -184,6 +195,12 @@ export async function POST(request) {
       })
       .filter(Boolean)
       .join('\n\n');
+
+    // cancel-bot #22: stamp date server-side. Bot-generated dates are
+    // unreliable (Zoe Dickinson 2026-05-07 logged as 2024-12-19; Sindhura
+    // Polepalli 2026-05-10 logged as 2025-01-27). Overwrite anything the
+    // bot returned in summary.date with the actual server-side date.
+    summary.date = todayInEastern();
 
     // Send email + log to cancellations sheet
     const notifyResult = await processConversationEnd(summary, transcript);
