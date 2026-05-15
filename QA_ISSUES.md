@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 15, 2026
+**Last updated:** May 15, 2026 (already-attempted-channel auto-escalation rule)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -40,7 +40,7 @@ What's actually still open right now, in order of stakes:
 4. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. AWAITING Travis Decisions 1 and 2 (how aggressive after a clear refusal; geographic/medical exits).
 5. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
 6. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped (PR #13). The generic no-SLA escalation language and the strengthened example bans resolve via cancel-bot #20 / PR 1. Whether/how to soften the "48-hour confirmation email" promise in the outcome-notification path (separate from in-chat escalation language) and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
-7. **cancel-bot #11 / #13 / #14 / #15 / #16 / #17** - the rest of the Travis decisions (perk dollar values; refund/double-billing script; credit visibility; tone; channel-loop rule; commitment language). Code is mostly trivial; the calls aren't ours.
+7. **cancel-bot #11 / #13 / #14 / #15 / #17** - the rest of the Travis decisions (perk dollar values; refund/double-billing script; credit visibility; tone; commitment language). Code is mostly trivial; the calls aren't ours. (cancel-bot #16 / channel-loop rule resolved 2026-05-15 by PR `fix/already-tried-channel-auto-escalation` per Travis Decision 9.)
 8. **Sentry DSN not set** - PR #12 wired `@sentry/nextjs` but it's inert until someone creates a Sentry project and runs `vercel env add SENTRY_DSN production`. Cowork task.
 9. **Dedicated staging Vercel project** - the cross-cutting #5 "real gap": `dryRun` + synthetic mode + previews now cover most safe testing (see `docs/STAGING.md`), but a fully-isolated `sm-member-cancel-staging` project with its own env vars is still a provisioning decision for the Vercel-team owner (not done unilaterally - it's billable infra).
 
@@ -388,15 +388,23 @@ Decision favors banning default "Perfect!", limiting empathy phrases, shortening
 ---
 
 ### cancel-bot #16
-**Status:** AWAITING DECISION (Travis Decision 9)
+**Status:** FIXED IN CODE 2026-05-15 by PR `fix/already-tried-channel-auto-escalation`. Bump to VERIFIED FIXED after merge + production deploy.
 **Severity:** customer frustration
 **Discovered:** Ongoing
+**Travis decision received:** 2026-05-15
 
 Pattern: Member says she's been trying to cancel via email for six months. Bot suggests calling (888) 677-0055. Member says she's working and can't call. Only then does bot escalate to a human.
 
-Bot keeps deflecting to the phone number when it doesn't know what else to do, even after member said that channel didn't work.
+Bot kept deflecting to a channel the member had already exhausted, even after the member named the failed channel.
 
-Proposed rule: if member says they've already tried email or phone, the bot should NOT send them back to that channel. Escalate directly.
+**Travis decision (May 15 2026, Decision 9):** when a member says they have already tried email, phone, the cancellation form, or another channel that did not resolve their issue, the bot must NOT redirect them back to that channel. Auto-escalate using the PR #18 standard handoff phrase, prefixed with an acknowledgement of what the member already tried so they feel heard.
+
+**Fix (this PR):** new `HARD RULE - ALREADY ATTEMPTED CHANNEL` in `src/lib/system-prompt.txt`, structured to match the PR #6 / PR #13 / PR #18 rule format. Three pieces:
+1. Detection triggers for email ("I tried emailing," "I've been emailing for months," "I sent it but never heard back"), phone ("I called and no one answered," "I left voicemails," "I can't call, I'm at work"), cancellation form ("I filled out the form," "the form didn't work"), plus passive/generic variants ("got no response," "never heard back," "I've been trying for weeks").
+2. Acknowledge-then-handoff response pattern reusing the PR #18 phrase verbatim: "I see you've already tried [channel]. I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." No specific timeline, outcome, or action.
+3. Per-channel blocks: email tried -> do NOT suggest emailing memberships@/hello@; phone tried -> do NOT suggest (888) 677-0055 or any location phone; form tried -> do NOT suggest the cancellation form. The rule governs the escalation/handoff path only; the in-chat retention conversation (pause, downgrade, bi-monthly, etc.) is untouched.
+
+Three BAD/GOOD example pairs cover the production case (email tried for six months), phone-tried-redirected-to-email, and form-tried-redirected-to-form. 7 new tests in `__tests__/claude.test.js` (`system prompt: already-attempted-channel auto-escalation`) cover the new rule plus preservation tests for PR #5, PR #6, PR #13, PR #18 already exist in the same file and continue to pass. Touch: 2 files (system-prompt.txt + claude.test.js). Closes Travis Decision 9.
 
 ---
 
@@ -558,7 +566,7 @@ The 10 chatbot-script decisions parked with Travis for review, mirrored from `do
 | 6 | cancel-bot #13 | Refund / double-billing escalation script | medium |
 | 7 | cancel-bot #14 | Credit visibility approach | medium |
 | 8 | cancel-bot #15 | Tone fixes (Perfect!, empathy, benefits list) | low-medium |
-| 9 | cancel-bot #16 | Channel-loop rule (don't redirect to failed channels) | medium |
+| 9 | cancel-bot #16 | Channel-loop rule (don't redirect to failed channels) | medium | FIXED IN CODE 2026-05-15 (PR `fix/already-tried-channel-auto-escalation`) |
 | 10 | cancel-bot #17 | Commitment language standardization | medium |
 
 ---

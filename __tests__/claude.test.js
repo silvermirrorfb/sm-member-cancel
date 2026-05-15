@@ -234,7 +234,7 @@ describe('system prompt: strengthened PR #13 no-fabricated-escalation rule', () 
     expect(prompt.toLowerCase()).toContain("they'll resolve this");
     expect(prompt.toLowerCase()).toContain("they'll fix this");
     expect(prompt.toLowerCase()).toContain("they'll restore your credits");
-    expect(prompt.toLowerCase()).toContain("they'll reach out within 24-48 hours");
+    expect(prompt.toLowerCase()).toContain("they'll reach out within 24 to 48 hours");
     expect(prompt.toLowerCase()).toContain("they'll address this");
   });
 
@@ -267,5 +267,65 @@ describe('system prompt: prior-PR rules survive PR 1 system-prompt rewrite', () 
     const prompt = getSystemPrompt();
     expect(prompt).toMatch(/use ONLY the injected "Next Perk Milestone" \+ "Months Until Next Perk" fields/i);
     expect(prompt).toMatch(/Do not infer perk timing from the static milestone table/i);
+  });
+});
+
+describe('system prompt: already-attempted-channel auto-escalation (cancel-bot #16 / Decision 9)', () => {
+  it('includes the ALREADY ATTEMPTED CHANNEL hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - ALREADY ATTEMPTED CHANNEL');
+  });
+
+  it('forbids redirecting the member back to a channel they already tried', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/MUST NOT redirect them back to the same channel/i);
+  });
+
+  it('lists detection triggers for email, phone, and cancellation form', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain("I tried emailing");
+    expect(prompt).toContain("I've been emailing for months");
+    expect(prompt).toContain("I called and no one answered");
+    expect(prompt).toContain("I filled out the form");
+    expect(prompt).toContain("the form didn't work");
+    expect(prompt.toLowerCase()).toContain("never heard back");
+  });
+
+  it('mandates the acknowledge-then-handoff structure', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain("I see you've already tried");
+    expect(prompt).toContain("I'm flagging this for our memberships team to review");
+    expect(prompt).toContain('Someone will follow up with you about next steps');
+  });
+
+  it('blocks each specific channel the member already attempted', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Email attempted: do NOT suggest emailing/i);
+    expect(prompt).toMatch(/Phone attempted: do NOT suggest calling/i);
+    expect(prompt).toMatch(/Cancellation form attempted: do NOT suggest the cancellation form/i);
+  });
+
+  it('clarifies the rule governs the escalation path only, not the retention conversation', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/governs the escalation\/handoff path only/i);
+    expect(prompt).toMatch(/may still proceed with the in-chat cancellation/i);
+  });
+
+  it('includes BAD/GOOD example pairs for email, phone, and form channel cases', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (production case, May 15 2026');
+    expect(prompt).toContain('Example BAD (phone tried, bot redirects to email)');
+    expect(prompt).toContain('Example BAD (form tried, bot redirects to form)');
+    expect(prompt).toContain("Six months without a response is really frustrating");
+    expect(prompt).toContain("I see you've already tried calling");
+    expect(prompt).toContain("I see you've already tried the cancellation form");
+  });
+
+  it('reuses the PR #18 standard handoff phrase (no specific timeline/outcome/action)', () => {
+    const prompt = getSystemPrompt();
+    // The GOOD email example must not include a specific timeline like "24-48 hours"
+    // or specific outcome promise. It must use only the standard handoff phrase.
+    const goodEmailExample = "Six months without a response is really frustrating, and I'm sorry that's been your experience. I'm flagging this for our memberships team to review. Someone will follow up with you about next steps.";
+    expect(prompt).toContain(goodEmailExample);
   });
 });
