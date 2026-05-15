@@ -314,3 +314,217 @@ describe('pickTemplate: reason matching does not catch substrings', () => {
     expect(draft.templateId).toBe('42-generic-cancelled');
   });
 });
+
+describe('buildMemberDraft — placeholder string sanitization', () => {
+  // Regression: Sindhura Polepalli, 2026-05-10. The session summary's
+  // unused_credits field arrived as the literal string "5 (missing from
+  // display)" because the bot could not verify the count. That string
+  // interpolated raw into the member-facing email body as
+  // "Your existing credits (5 (missing from display)) are usable for 90
+  // days from your last charge date." (QA_ISSUES cancel-bot #19 part 2.)
+
+  it('strips the "missing from display" placeholder from a CANCELLED relocation draft', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      client_name: 'Sindhura Polepalli',
+      outcome: 'CANCELLED',
+      reason_primary: 'moving to Austin',
+      offer_accepted: 'None',
+      unused_credits: '5 (missing from display)',
+    });
+
+    expect(draft.body).not.toMatch(/missing from display/i);
+    expect(draft.body).not.toContain('(5 (');
+    expect(draft.body).not.toMatch(/\([^()]*\([^()]*\)[^()]*\)/);
+    expect(draft.body).toMatch(/existing credits are usable for 90 days/i);
+  });
+
+  it('strips the "missing from display" placeholder from every credits-bearing template', () => {
+    const cases = [
+      { outcome: 'RETAINED', reason_primary: 'Travel', offer_accepted: 'Pause for trip' },
+      { outcome: 'RETAINED', reason_primary: 'moving cities', offer_accepted: 'Use any Silver Mirror location' },
+      { outcome: 'CANCELLED', reason_primary: 'moving to Austin', offer_accepted: 'None' },
+      { outcome: 'RETAINED', reason_primary: 'medical issue', offer_accepted: 'Pause for surgery' },
+      { outcome: 'RETAINED', reason_primary: 'lost my job', offer_accepted: 'Pause' },
+      { outcome: 'CANCELLED', reason_primary: 'lost my job', offer_accepted: 'None' },
+      { outcome: 'RETAINED', reason_primary: 'Cost Overwhelming', offer_accepted: 'Downgrade to 30-Minute' },
+      { outcome: 'RETAINED', reason_primary: 'Cost Overwhelming', offer_accepted: 'Pause for 2 months' },
+      { outcome: 'RETAINED', reason_primary: 'forgot about it', offer_accepted: 'Pause' },
+      { outcome: 'RETAINED', reason_primary: 'forgot about it', offer_accepted: 'Downgrade' },
+      { outcome: 'RETAINED', reason_primary: 'voucher build-up', offer_accepted: 'Convert credits to product' },
+      { outcome: 'RETAINED', reason_primary: 'voucher build-up', offer_accepted: 'Pause' },
+      { outcome: 'CANCELLED', reason_primary: 'seeing a dermatologist', offer_accepted: 'None' },
+      { outcome: 'CANCELLED', reason_primary: 'found a new spa', offer_accepted: 'None' },
+      { outcome: 'CANCELLED', reason_primary: 'parking is terrible', offer_accepted: 'None' },
+      { outcome: 'CANCELLED', reason_primary: 'just done', offer_accepted: 'None' },
+    ];
+
+    for (const c of cases) {
+      const draft = buildMemberDraft({
+        ...baseSummary,
+        ...c,
+        unused_credits: '5 (missing from display)',
+      });
+      expect(draft.body, `template ${draft.templateId} leaked placeholder`).not.toMatch(/missing from display/i);
+      expect(draft.body, `template ${draft.templateId} has nested parens`).not.toMatch(/\([^()]*\([^()]*\)[^()]*\)/);
+      expect(draft.body, `template ${draft.templateId} has stray "(5 ("`).not.toContain('(5 (');
+    }
+  });
+
+  it('strips "unknown" from the unused_credits field in a RETAINED draft', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Travel',
+      offer_accepted: 'Pause for trip',
+      unused_credits: 'unknown',
+    });
+
+    expect(draft.body).not.toMatch(/\(unknown\)/i);
+    expect(draft.body).not.toMatch(/credits \(unknown/i);
+    expect(draft.body).toMatch(/any existing credits will expire or roll over/i);
+  });
+
+  it('strips "TBD" from the unused_credits field', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'moving',
+      offer_accepted: 'None',
+      unused_credits: 'TBD',
+    });
+
+    expect(draft.body).not.toMatch(/\(TBD\)/i);
+    expect(draft.body).toMatch(/existing credits are usable for 90 days/i);
+  });
+
+  it('omits the credits parenthetical when the value is an empty string', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'moving',
+      offer_accepted: 'None',
+      unused_credits: '',
+    });
+
+    expect(draft.body).toMatch(/existing credits are usable for 90 days/i);
+    expect(draft.body).not.toMatch(/credits \(\)/);
+  });
+
+  it('omits the credits parenthetical when the value is undefined', () => {
+    const summary = { ...baseSummary };
+    delete summary.unused_credits;
+    const draft = buildMemberDraft({
+      ...summary,
+      outcome: 'CANCELLED',
+      reason_primary: 'moving',
+      offer_accepted: 'None',
+    });
+
+    expect(draft.body).toMatch(/existing credits are usable for 90 days/i);
+    expect(draft.body).not.toMatch(/credits \(\)/);
+    expect(draft.body).not.toMatch(/\(undefined\)/i);
+  });
+
+  it('renders a clean credits parenthetical when the value is "0"', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'moving',
+      offer_accepted: 'None',
+      unused_credits: '0',
+    });
+
+    expect(draft.body).toMatch(/existing credits \(0\) are usable for 90 days/i);
+    expect(draft.body).not.toMatch(/missing from display/i);
+  });
+
+  it('renders a clean credits parenthetical when the value is "3"', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'moving',
+      offer_accepted: 'None',
+      unused_credits: '3',
+    });
+
+    expect(draft.body).toMatch(/existing credits \(3\) are usable for 90 days/i);
+    expect(draft.body).not.toMatch(/missing from display/i);
+  });
+
+  it('renders "3 credits" cleanly in the voucher-credit conversion template', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'voucher build-up',
+      offer_accepted: 'Convert credits to product credit',
+      unused_credits: '3',
+    });
+
+    expect(draft.templateId).toBe('26-voucher-credit');
+    expect(draft.body).toMatch(/converted your 3 credits to product credit/i);
+  });
+
+  it('falls back to "remaining credits" wording when voucher-credit value is a placeholder', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'voucher build-up',
+      offer_accepted: 'Convert credits to product credit',
+      unused_credits: '5 (missing from display)',
+    });
+
+    expect(draft.templateId).toBe('26-voucher-credit');
+    expect(draft.body).toMatch(/converted your remaining credits to product credit/i);
+    expect(draft.body).not.toMatch(/missing from display/i);
+    expect(draft.body).not.toContain('(5 (');
+  });
+
+  it('preserves a legitimate Loyalty Points value when "unknown" appears in unused_credits (loyalty_points is not interpolated)', () => {
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Travel',
+      offer_accepted: 'Pause for trip',
+      loyalty_points: '1360',
+      unused_credits: 'unknown',
+    });
+
+    expect(draft.body).not.toMatch(/\(unknown points\)/i);
+    expect(draft.body).not.toMatch(/\(unknown\)/i);
+  });
+
+  it('legitimate "Matches current" string in a non-credits field never reaches the body unsanitized', () => {
+    // Sanity check: even though "Matches current" is not a placeholder, the
+    // sanitization layer keys off the unused_credits field specifically and
+    // does not strip values from fields we do not interpolate.
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'RETAINED',
+      reason_primary: 'Cost Overwhelming',
+      offer_accepted: 'Bi-monthly billing',
+      rate_lock_savings: 'Matches current',
+    });
+
+    expect(draft.templateId).toBe('30-cost-bimonthly');
+    expect(draft.body).not.toMatch(/missing from display/i);
+  });
+
+  it('Sindhura full-case regression: REFERRED + Technical Issue with placeholder credits produces a coherent body', () => {
+    // REFERRED routes to 43-referred-manual-review which does not interpolate
+    // credits at all, so the placeholder cannot leak through this template
+    // path post-PR #8. This test pins the contract.
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      client_name: 'Sindhura Polepalli',
+      outcome: 'REFERRED',
+      reason_primary: 'Technical Issue with credits',
+      offer_accepted: 'None',
+      unused_credits: '5 (missing from display)',
+    });
+
+    expect(draft.templateId).toBe('43-referred-manual-review');
+    expect(draft.body).not.toMatch(/missing from display/i);
+    expect(draft.body).not.toContain('(5 (');
+  });
+});

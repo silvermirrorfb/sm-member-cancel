@@ -72,6 +72,45 @@ function formatCurrentBimonthlyPricing(membershipTier) {
   return `$${CURRENT_BIMONTHLY_PRICING.THIRTY_MINUTE} for 30-minute facials or $${CURRENT_BIMONTHLY_PRICING.FIFTY_MINUTE} for 50-minute facials`;
 }
 
+// --- PLACEHOLDER SANITIZATION ----------------------------------------------
+//
+// Session summary fields can arrive carrying upstream "I can't resolve this"
+// placeholders (e.g. unused_credits = "5 (missing from display)"). Pre-fix,
+// those strings interpolated verbatim into the member-facing email body, so a
+// member could open a draft that said "Your existing credits (5 (missing from
+// display)) are usable for 90 days." Production case: Sindhura Polepalli, May
+// 10 2026 (QA_ISSUES cancel-bot #19 part 2).
+//
+// Rule: any session summary value that matches a known placeholder pattern
+// (literal "missing from display", "unknown", "TBD", empty string, or any
+// stray parenthesis) is treated as unsafe and never interpolated. Each
+// template either omits the parenthetical or substitutes neutral language.
+
+const PLACEHOLDER_PATTERNS = [
+  /missing\s+from\s+display/i,
+  /\bunknown\b/i,
+  /\btbd\b/i,
+];
+
+function isPlaceholderValue(value) {
+  if (value === undefined || value === null) return true;
+  const s = String(value).trim();
+  if (s === '') return true;
+  if (PLACEHOLDER_PATTERNS.some((p) => p.test(s))) return true;
+  if (/[()]/.test(s)) return true;
+  return false;
+}
+
+function safeFieldValue(value) {
+  if (isPlaceholderValue(value)) return null;
+  return String(value).trim();
+}
+
+function creditsParen(s) {
+  const count = safeFieldValue(s.unused_credits);
+  return count !== null ? ` (${count})` : '';
+}
+
 // --- TEMPLATE MATCHER -------------------------------------------------------
 //
 // Picks a template based on (reason_primary, outcome, offer_accepted).
@@ -227,7 +266,7 @@ Thanks so much for letting us know about your upcoming travel. I've gone ahead a
 Here's what that means for you:
 • Your billing is paused — no charges during the pause period
 • Your locked-in member rate of $${s.monthly_rate}/month stays locked for when you come back
-• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• Any existing credits${creditsParen(s)} will expire or roll over 90 days from the accrual date.
 • You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
 • Please keep in mind that our maximum allowed pause period is two months.
 • A 3-billing-cycle commitment applies when your membership resumes
@@ -247,7 +286,7 @@ Congrats on the move! Your ${s.membership_tier}-minute membership can be used at
 
 Here's what stays the same:
 • Your locked-in rate of $${s.monthly_rate}/month
-• Your existing credits (${s.unused_credits || 0}) carry forward
+• Your existing credits${creditsParen(s)} carry forward
 • Your milestone perks and loyalty points
 • Everything you'd expect as a member, no formal transfer required
 
@@ -267,7 +306,7 @@ function tmplRelocationCancel(s) {
 Thanks for letting us know about your move. I've processed your cancellation — your ${s.membership_tier}-minute membership will end after your next billing cycle, and no further charges will be made after that.
 
 A few things to know:
-• Your existing credits (${s.unused_credits || 0}) are usable for 90 days from your last charge date
+• Your existing credits${creditsParen(s)} are usable for 90 days from your last charge date
 • You may use any remaining credits toward product purchases, service upgrades, or add-ons in-store.
 • Any loyalty points will be forfeited once your membership is fully cancelled.
 • If you ever return to a city with a Silver Mirror location, we'd love to welcome you back
@@ -330,7 +369,7 @@ I'm sorry to hear you're dealing with something health-related. I've paused your
 Here's how it works:
 • No charges during your pause
 • Your rate of $${s.monthly_rate}/month stays locked
-• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• Any existing credits${creditsParen(s)} will expire or roll over 90 days from the accrual date.
 • You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
 • Membership pauses may be extended up to a maximum of two months.
 • No 3-billing-cycle commitment applies here — your health comes first
@@ -352,7 +391,7 @@ function tmplMedicalExtended(s) {
 I've extended your membership pause. Your membership is on hold with no charges during the pause period.
 
 Pause details:
-• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• Any existing credits${creditsParen(s)} will expire or roll over 90 days from the accrual date.
 • You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
 • Membership pauses may be extended up to a maximum of two months (through ${extensionDate}).
 • No 3-billing-cycle commitment applies here — your health comes first
@@ -372,7 +411,7 @@ I'm sorry you're going through this. I've paused your ${s.membership_tier}-minut
 
 A few things:
 • Your rate of $${s.monthly_rate}/month stays locked
-• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• Any existing credits${creditsParen(s)} will expire or roll over 90 days from the accrual date.
 • You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
 • Membership pauses may be extended up to a maximum of two months.
 • No 3-billing-cycle commitment applies here
@@ -393,7 +432,7 @@ function tmplLostJobCancel(s) {
 I've processed your cancellation — your ${s.membership_tier}-minute membership will end after your next billing cycle, and no further charges will be made.
 
 A few things to know:
-• Your existing credits (${s.unused_credits || 0}) are usable for 90 days from your last charge
+• Your existing credits${creditsParen(s)} are usable for 90 days from your last charge
 • Any loyalty points in your account can still be redeemed — just reply if you want help
 • When you're ready to come back, we'd love to have you
 
@@ -413,7 +452,7 @@ I've moved you down to our ${newTier}-minute membership, effective your next bil
 
 Here's what stays the same:
 • All member perks (20% off Silver Mirror products, 10% off other retail brands, loyalty points, milestone rewards)
-• Your existing credits (${s.unused_credits || 0}) carry forward
+• Your existing credits${creditsParen(s)} carry forward
 • Everything about your account, just on a smaller tier
 
 A 3-billing-cycle commitment applies to this change.
@@ -457,7 +496,7 @@ I've paused your ${s.membership_tier}-minute membership, effective today. No cha
 
 While you're paused:
 • Your rate of $${s.monthly_rate}/month stays locked
-• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• Any existing credits${creditsParen(s)} will expire or roll over 90 days from the accrual date.
 • You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
 • Membership pauses may be extended up to a maximum of two months.
 • A 3-billing-cycle commitment applies when you resume
@@ -478,7 +517,7 @@ Totally understand — life gets busy. I've paused your ${s.membership_tier}-min
 While you're paused:
 • No charges until you reactivate
 • Your rate of $${s.monthly_rate}/month stays locked
-• Any existing credits (${s.unused_credits || 0}) will expire or roll over 90 days from the accrual date.
+• Any existing credits${creditsParen(s)} will expire or roll over 90 days from the accrual date.
 • You won't have access to membership perks, including discounts on add-ons or products, during the pause period. However, you may still use any remaining credits.
 • Membership pauses may be extended up to a maximum of two months.
 • A 3-billing-cycle commitment applies when you resume
@@ -497,7 +536,7 @@ function tmplForgotDowngrade(s) {
 
 I've moved you to our ${newTier}-minute membership, effective your next billing cycle. Lower commitment, easier to keep up with on a busy schedule.
 
-What stays the same: all member perks, your credits (${s.unused_credits || 0}), your loyalty points, everything about your account — just on a smaller tier.
+What stays the same: all member perks, your credits${creditsParen(s)}, your loyalty points, everything about your account — just on a smaller tier.
 
 A 3-billing-cycle commitment applies.
 
@@ -705,12 +744,16 @@ Reply with dates that work and I'll confirm.${SIGNATURE}`,
 
 function tmplVoucherCredit(s) {
   const fn = firstName(s.client_name);
+  const count = safeFieldValue(s.unused_credits);
+  const introLine = count !== null
+    ? `I've converted your ${count} credits to product credit, which you can use toward Silver Mirror skincare products.`
+    : `I've converted your remaining credits to product credit, which you can use toward Silver Mirror skincare products.`;
   return {
     id: '26-voucher-credit',
     subject: 'Your Silver Mirror credits are converted to product credit',
     body: `Hi ${fn},
 
-I've converted your ${s.unused_credits || 0} credits to product credit, which you can use toward Silver Mirror skincare products. This way nothing goes to waste.
+${introLine} This way nothing goes to waste.
 
 Your product credit is good for the next 90 days. Let me know if you'd like recommendations on what to try — happy to help.${SIGNATURE}`,
   };
@@ -723,7 +766,7 @@ function tmplVoucherPause(s) {
     subject: 'Your Silver Mirror membership pause is confirmed',
     body: `Hi ${fn},
 
-I've paused your ${s.membership_tier}-minute membership so you can catch up on your existing credits (${s.unused_credits || 0}) before accumulating more.
+I've paused your ${s.membership_tier}-minute membership so you can catch up on your existing credits${creditsParen(s)} before accumulating more.
 
 While paused: no charges, your rate of $${s.monthly_rate}/month stays locked, any existing credits will expire or roll over 90 days from the accrual date, you won't have access to membership perks (including discounts on add-ons or products), and a 3-billing-cycle commitment applies when you resume.
 Membership pauses may be extended up to a maximum of two months.
@@ -755,7 +798,7 @@ function tmplDermCancel(s) {
     subject: 'Your Silver Mirror membership cancellation is confirmed',
     body: `Hi ${fn},
 
-I've processed your cancellation. Your existing credits (${s.unused_credits || 0}) are usable for 90 days from your last charge date.
+I've processed your cancellation. Your existing credits${creditsParen(s)} are usable for 90 days from your last charge date.
 
 Wishing you the best with your skincare — and if you ever want to add facial maintenance back alongside your derm care, we're here.${SIGNATURE}`,
   };
@@ -782,7 +825,7 @@ function tmplNewProviderCancel(s) {
     subject: 'Your Silver Mirror membership cancellation is confirmed',
     body: `Hi ${fn},
 
-Totally understand. I've processed your cancellation. Your existing credits (${s.unused_credits || 0}) are usable for 90 days from your last charge date.
+Totally understand. I've processed your cancellation. Your existing credits${creditsParen(s)} are usable for 90 days from your last charge date.
 
 If anything changes, we'd love to welcome you back.${SIGNATURE}`,
   };
@@ -841,7 +884,7 @@ function tmplLocationCancel(s) {
     subject: 'Your Silver Mirror membership cancellation is confirmed',
     body: `Hi ${fn},
 
-I understand — if the location isn't working, it's not working. I've processed your cancellation. Your existing credits (${s.unused_credits || 0}) are usable for 90 days from your last charge date.
+I understand — if the location isn't working, it's not working. I've processed your cancellation. Your existing credits${creditsParen(s)} are usable for 90 days from your last charge date.
 
 If we ever open closer to you, we'd love to welcome you back.${SIGNATURE}`,
   };
@@ -892,7 +935,7 @@ function tmplGenericCancelled(s) {
 I've processed your cancellation. Your ${s.membership_tier}-minute membership will end after your next billing cycle, and no further charges will be made.
 
 A few things to know:
-• Your existing credits (${s.unused_credits || 0}) are usable for 90 days from your last charge date
+• Your existing credits${creditsParen(s)} are usable for 90 days from your last charge date
 • Any loyalty points can still be redeemed — just reply if you want help
 • If anything changes, we'd love to welcome you back
 
