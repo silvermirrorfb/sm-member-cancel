@@ -329,3 +329,183 @@ describe('system prompt: already-attempted-channel auto-escalation (cancel-bot #
     expect(prompt).toContain(goodEmailExample);
   });
 });
+
+describe('system prompt: footprint-aware relocation handling (Congo case, cancel-bot #5 / Decision 2)', () => {
+  it('includes the FOOTPRINT-AWARE RELOCATION HANDLING hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING');
+  });
+
+  it('requires destination classification before any retention offer', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/MUST classify the destination as IN-FOOTPRINT or OUT-OF-FOOTPRINT BEFORE presenting any retention offer/i);
+  });
+
+  it('enumerates in-footprint metros (NYC, DC, Miami) with their locations', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('IN-FOOTPRINT destinations');
+    expect(prompt).toContain('Upper East Side');
+    expect(prompt).toContain('Flatiron');
+    expect(prompt).toContain('Bryant Park');
+    expect(prompt).toContain('Manhattan West');
+    expect(prompt).toContain('Upper West Side');
+    expect(prompt).toContain('Dupont Circle');
+    expect(prompt).toContain('Penn Quarter');
+    expect(prompt).toContain('Navy Yard');
+    expect(prompt).toContain('Brickell');
+    expect(prompt).toContain('Coral Gables');
+  });
+
+  it('enumerates out-of-footprint regions with examples', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('OUT-OF-FOOTPRINT destinations');
+    expect(prompt).toMatch(/international moves/i);
+    expect(prompt).toMatch(/west coast/i);
+    expect(prompt).toMatch(/midwest/i);
+  });
+
+  it('permits asking ONCE for clarification on ambiguous destinations', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Will you be staying in the NYC, DC, or Miami area, or moving farther?');
+    expect(prompt).toMatch(/Do not ask this clarifying question more than once/i);
+  });
+
+  it('bans pause, bi-monthly, credit consolidation, and final warning for out-of-footprint', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/MUST NOT offer a pause/i);
+    expect(prompt).toMatch(/MUST NOT offer bi-monthly billing/i);
+    expect(prompt).toMatch(/MUST NOT offer credit consolidation/i);
+    expect(prompt).toMatch(/MUST NOT run a final-warning loss-framing block/i);
+  });
+
+  it('mandates the warm send-off phrasing for out-of-footprint cancellations', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain("Best of luck with the move to [destination]. We've loved having you with us.");
+  });
+
+  it('allows one optional rejoin sentence, capped at one sentence', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain("If you're ever back in the NYC, DC, or Miami area, we'd love to welcome you back.");
+    expect(prompt).toMatch(/Keep the rejoin mention to one sentence maximum/i);
+    expect(prompt).toMatch(/Do not make it pushy/i);
+  });
+
+  it('preserves the in-footprint transfer-first behavior', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('IN-FOOTPRINT handling (existing behavior preserved)');
+    expect(prompt).toMatch(/offers a LOCATION TRANSFER first/i);
+    expect(prompt).toMatch(/If the transfer is declined, the bot proceeds with the standard relocation retention sequence/i);
+  });
+
+  it('preserves PR #23 firm-refusal short-circuit and HARD RULE 1 just-cancel honor', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/firm-refusal short-circuit still appl(y|ies)/i);
+    expect(prompt).toMatch(/"just cancel" is honored immediately after at least one offer/i);
+  });
+
+  it('updates Decision Tree #2 to point to the new hard rule for out-of-footprint cases', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/this default sequence only applies when the destination is IN-FOOTPRINT/i);
+    expect(prompt).toMatch(/skip retention entirely per HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING/i);
+  });
+
+  it('includes the Congo BAD example as the production case', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (Congo case, production session 9d661a35, May 6 2026)');
+    expect(prompt).toContain("I'm moving to Congo next month.");
+    expect(prompt).toContain('1-month pause');
+    expect(prompt).toContain('bi-monthly');
+    expect(prompt).toContain('consolidating your remaining credits');
+    expect(prompt).toContain("Before we finalize, here's what you'd be giving up");
+  });
+
+  it('includes the Congo GOOD example with warm send-off and no retention', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (Congo case, footprint-aware)');
+    const goodCongo = "Congratulations on the move. Silver Mirror only has locations in NYC, DC, and Miami, so a transfer isn't an option. I'm passing your cancellation to our memberships team. Any unused credits will remain valid for 90 days from your last bill date. Best of luck with the move to Congo, and we've loved having you with us. If you're ever back in the NYC, DC, or Miami area, we'd love to welcome you back.";
+    expect(prompt).toContain(goodCongo);
+    // The good Congo example must NOT contain retention language
+    expect(goodCongo.toLowerCase()).not.toContain('pause');
+    expect(goodCongo.toLowerCase()).not.toContain('bi-monthly');
+    expect(goodCongo.toLowerCase()).not.toContain('consolidate credits');
+    expect(goodCongo.toLowerCase()).not.toContain("here's what you'd be giving up");
+  });
+
+  it('includes an in-footprint transfer-first GOOD example for Miami', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (in-footprint, transfer offered first)');
+    expect(prompt).toContain("I'm moving to Miami next month.");
+    expect(prompt).toContain('two Miami locations, Brickell and Coral Gables');
+  });
+
+  it('includes an ambiguous-destination GOOD example showing the one-time clarifying question', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (ambiguous destination, bot asks once)');
+    expect(prompt).toContain("Will you be staying in the NYC, DC, or Miami area, or moving farther?");
+    expect(prompt).toContain('Moving to Seattle.');
+  });
+});
+
+describe('system prompt: prior PR rules survive the footprint-aware relocation PR', () => {
+  it('preserves PR #5 bi-monthly current-pricing rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+  });
+
+  it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
+    expect(prompt).toContain('pauses come with a 3-billing-cycle commitment once you resume');
+  });
+
+  it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO FABRICATED ESCALATION');
+    expect(prompt.toLowerCase()).toContain('alerted our qa team');
+    expect(prompt.toLowerCase()).toContain('flagged this as urgent');
+  });
+
+  it('preserves PR #18 NO DEFINED PROCESS HANDOFFS hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO DEFINED PROCESS HANDOFFS');
+    expect(prompt).toContain("I'm flagging this for our memberships team to review");
+    expect(prompt).toContain('Someone will follow up with you about next steps');
+  });
+
+  it('preserves numbered HARD RULE 22 (perk messaging uses injected fields only)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/use ONLY the injected "Next Perk Milestone" \+ "Months Until Next Perk" fields/i);
+    expect(prompt).toMatch(/Do not infer perk timing from the static milestone table/i);
+  });
+
+  it('preserves PR #23 ALREADY ATTEMPTED CHANNEL hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - ALREADY ATTEMPTED CHANNEL');
+    expect(prompt).toMatch(/MUST NOT redirect them back to the same channel/i);
+    expect(prompt).toContain("I see you've already tried");
+  });
+});
+
+describe('system prompt: no em dashes or en dashes in the new footprint-aware rule', () => {
+  it('the footprint-aware relocation section uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    // Anchor on the colon-terminated rule header so we don't match the
+    // Decision Tree #2 reference earlier in the prompt.
+    const startIdx = prompt.indexOf('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING:');
+    expect(startIdx).toBeGreaterThan(-1);
+    // Find the end of the rule (right before numbered HARD RULE 19)
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    // No em dash (U+2014) or en dash (U+2013)
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('the updated Decision Tree #2 line uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    // Pull just the line referencing the new rule from Decision Tree #2
+    const treeLineMatch = prompt.match(/2\. Relocation:[^\n]*HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING[^\n]*/);
+    expect(treeLineMatch).not.toBeNull();
+    expect(treeLineMatch[0]).not.toMatch(/[–—]/);
+  });
+});
