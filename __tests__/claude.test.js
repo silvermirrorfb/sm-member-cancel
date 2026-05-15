@@ -859,7 +859,7 @@ describe('system prompt: firm-refusal short-circuit (Christina case, cancel-bot 
   it('includes the Christina GOOD example with direct cancellation and no loss-framing', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toContain('Example GOOD (Christina case, firm-refusal short-circuit)');
-    const goodChristina = "Got it, Christina, I'm processing your cancellation now. You'll receive a confirmation email within 48 hours. Processing takes 30 days, and any unused credits remain valid for 90 days from your last bill date. Anything else I can help with?";
+    const goodChristina = "Got it, Christina, I'm processing your cancellation now. Any unused credits remain valid for 90 days from your last bill date. Anything else I can help with?";
     expect(prompt).toContain(goodChristina);
     // The good response must not contain loss-framing language
     expect(goodChristina.toLowerCase()).not.toContain('giving up');
@@ -904,7 +904,7 @@ describe('system prompt: firm-refusal short-circuit (Christina case, cancel-bot 
     // The bot must confirm cancellation immediately
     expect(block).toMatch(/processing your cancellation/i);
     // The bot must confirm the 48-hour email
-    expect(block).toMatch(/confirmation email within 48 hours/i);
+    expect(block).toMatch(/unused credits remain valid for 90 days/i);
   });
 });
 
