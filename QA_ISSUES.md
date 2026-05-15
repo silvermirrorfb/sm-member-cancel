@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 15, 2026 (footprint-aware relocation handling rule)
+**Last updated:** May 15, 2026 (billing dispute handling rule)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -40,7 +40,7 @@ What's actually still open right now, in order of stakes:
 4. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decision 2 (geographic exits / out-of-footprint relocation) FIXED IN CODE 2026-05-15 by PR `fix/relocation-out-of-footprint-no-retention` (Congo case fix: HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING skips retention entirely for moves outside NYC/DC/Miami metros, preserves in-footprint transfer-first behavior, 19 new tests). Decision 1 (retention aggressiveness after first clear refusal generally) still AWAITING Travis.
 5. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
 6. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped (PR #13). The generic no-SLA escalation language and the strengthened example bans resolve via cancel-bot #20 / PR 1. Whether/how to soften the "48-hour confirmation email" promise in the outcome-notification path (separate from in-chat escalation language) and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
-7. **cancel-bot #11 / #13 / #14 / #15 / #17** - the rest of the Travis decisions (perk dollar values; refund/double-billing script; credit visibility; tone; commitment language). Code is mostly trivial; the calls aren't ours. (cancel-bot #16 / channel-loop rule resolved 2026-05-15 by PR `fix/already-tried-channel-auto-escalation` per Travis Decision 9.)
+7. **cancel-bot #11 / #14 / #15 / #17** - the rest of the Travis decisions (perk dollar values; credit visibility; tone; commitment language). Code is mostly trivial; the calls aren't ours. (cancel-bot #16 / channel-loop rule resolved 2026-05-15 by PR `fix/already-tried-channel-auto-escalation` per Travis Decision 9. cancel-bot #13 / refund-double-billing script resolved 2026-05-15 by PR `fix/billing-dispute-escalation-script` per Travis Decision 6.)
 8. **Sentry DSN not set** - PR #12 wired `@sentry/nextjs` but it's inert until someone creates a Sentry project and runs `vercel env add SENTRY_DSN production`. Cowork task.
 9. **Dedicated staging Vercel project** - the cross-cutting #5 "real gap": `dryRun` + synthetic mode + previews now cover most safe testing (see `docs/STAGING.md`), but a fully-isolated `sm-member-cancel-staging` project with its own env vars is still a provisioning decision for the Vercel-team owner (not done unilaterally - it's billable infra).
 
@@ -366,11 +366,26 @@ Three options: keep as-is, add soft second factor (last 4 of card, last appointm
 ---
 
 ### cancel-bot #13
-**Status:** AWAITING DECISION (Travis Decision 6) - depends on #6 fix
+**Status:** FIXED IN CODE 2026-05-15 by PR `fix/billing-dispute-escalation-script`. Bump to VERIFIED FIXED after merge + production deploy.
 **Severity:** customer-harm in financially sensitive moments
 **Discovered:** Ongoing
+**Travis decision received:** 2026-05-15 (Decision 6)
 
-When member alleges duplicate charges, bot says it sees one membership and asks for screenshots via email. Reads as minimizing for a moment that needs to feel taken seriously. Recommended new script and a real escalation path; depends on cancel-bot #6 fix to know what "escalation path" actually means in code.
+When member alleges duplicate charges, bot said it sees one membership and asked for screenshots via email. Reads as minimizing for a moment that needs to feel taken seriously. Production case (May 2026): member alleged duplicate billing, bot's response was "I see one membership... please email screenshots", a dismissive offload that does not acknowledge the dispute.
+
+**Travis decision (May 15 2026, Decision 6):** the bot must acknowledge billing disputes seriously, must not minimize what the member is reporting, and must use the PR #18 standard handoff phrase pattern. Per the broader PR #18 rule (Silver Mirror has no defined process for billing dispute resolution SLA), the bot must NOT promise a specific timeline ("24 hours") or a specific outcome ("they'll refund you"). Per PR #13, no fabricated escalation language ("alerted finance team," "notified billing team," etc.).
+
+**Fix (this PR, `fix/billing-dispute-escalation-script`):** new `HARD RULE - BILLING DISPUTE HANDLING` in `src/lib/system-prompt.txt`, structured to match the PR #6 / PR #13 / PR #18 / PR #23 / PR #24 rule format. Six pieces:
+1. Detection triggers covering the canonical billing-dispute phrasings ("duplicate charge," "double-billed," "charged twice," "you charged me again," "I see two charges," "wrong amount," "I was overcharged," "I want a refund" tied to a charge dispute, "I never authorized this," etc.).
+2. Response pattern: acknowledge seriously (lead with empathy, not "I see one membership"), state what the bot can/cannot see (membership details yes, transaction history no, the memberships team can pull it), flag for memberships team review, optionally invite dates of disputed charges (NEVER card numbers / CVV / billing ZIP), close with the PR #18 standard handoff phrase.
+3. Canonical scripted response containing the "I take this seriously" acknowledgment plus the PR #18 phrase verbatim.
+4. Banned language list: dismissive readouts ("I see only one membership, so that should be correct," "looks fine on my end"), bank deflection ("It's probably a duplicate from your bank"), email-screenshots-only as the sole next step, specific timelines (per PR #18), specific outcomes (per PR #18), fabricated finance/billing team names (per PR #13).
+5. Explicit exemption: refund requests that are part of a normal cancellation flow (e.g. "refund my last month as part of cancelling") still route through the standard cancellation pattern, not this dispute handoff.
+6. Two BAD/GOOD example pairs: production-case BAD (the actual May 2026 dismissive script with all four banned patterns) paired with the canonical GOOD response, plus a bank-deflection BAD/GOOD pair.
+
+Also updated the trigger pointer inside `HARD RULE - NO DEFINED PROCESS HANDOFFS` from "(treat under this rule until and unless a defined process is built)" to "(see HARD RULE - BILLING DISPUTE HANDLING below for the specific script pattern)" so the broader rule cross-references the specific one.
+
+20 new tests in `__tests__/claude.test.js` (`system prompt: billing dispute handling`, `prior PR rules survive the billing-dispute PR`, `no em dashes or en dashes in the new billing-dispute rule`) cover the production regression, every banned pattern, the scripted response, the BAD/GOOD example pairs, and preservation of PR #5, PR #6, PR #13, PR #18, HARD RULE #22, PR #23, and PR #24. The regression test specifically asserts the GOOD production-case response: contains "take this seriously," contains the PR #18 standard handoff phrase, may invite dates, does NOT promise a 24-hour timeline, does NOT promise a refund outcome, does NOT contain dismissive phrases, does NOT punt to email-only, does NOT request card numbers/CVV. Touch: 2 files (system-prompt.txt + claude.test.js). Closes Travis Decision 6.
 
 ---
 
@@ -576,7 +591,7 @@ The 10 chatbot-script decisions parked with Travis for review, mirrored from `do
 | 3 | cancel-bot #6 | Escalation reality vs fabricated promises | HIGHEST |
 | 4 | cancel-bot #11 | Perk dollar value verification | medium |
 | 5 | cancel-bot #12 | Identity verification floor | high (privacy) |
-| 6 | cancel-bot #13 | Refund / double-billing escalation script | medium |
+| 6 | cancel-bot #13 | Refund / double-billing escalation script | medium | FIXED IN CODE 2026-05-15 (PR `fix/billing-dispute-escalation-script`) |
 | 7 | cancel-bot #14 | Credit visibility approach | medium |
 | 8 | cancel-bot #15 | Tone fixes (Perfect!, empathy, benefits list) | low-medium |
 | 9 | cancel-bot #16 | Channel-loop rule (don't redirect to failed channels) | medium | FIXED IN CODE 2026-05-15 (PR `fix/already-tried-channel-auto-escalation`) |
