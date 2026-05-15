@@ -510,6 +510,51 @@ describe('buildMemberDraft — placeholder string sanitization', () => {
     expect(draft.body).not.toMatch(/missing from display/i);
   });
 
+
+  // Regex tightening: verify that legitimate parenthetical qualifiers are NOT
+  // stripped by the placeholder check. The old /[()]/ regex would have blocked
+  // these; the new /\((missing|unknown|TBD|...)/ regex must let them through.
+
+  it('does NOT strip a legitimate parenthetical qualifier like "$95 (30-min)" from unused_credits', () => {
+    // "$95 (30-min)" is a hypothetical descriptive qualifier. The tightened
+    // regex must preserve it — it contains no structured placeholder keyword.
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'just done',
+      offer_accepted: 'None',
+      unused_credits: '$95 (30-min)',
+    });
+    // The value should appear in the email body, not be silently dropped.
+    expect(draft.body).toContain('$95 (30-min)');
+  });
+
+  it("does NOT strip a legitimate parenthetical qualifier like \"Esthetician's Choice (50-min)\" from unused_credits", () => {
+    // Same logic — descriptive qualifier with parens must pass through.
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'just done',
+      offer_accepted: 'None',
+      unused_credits: "Esthetician's Choice (50-min)",
+    });
+    expect(draft.body).toContain("Esthetician's Choice (50-min)");
+  });
+
+  it('still strips "5 (missing from display)" after the regex tightening', () => {
+    // Regression guard: the tightened regex must still catch the original
+    // production case (Sindhura Polepalli, May 10 2026).
+    const draft = buildMemberDraft({
+      ...baseSummary,
+      outcome: 'CANCELLED',
+      reason_primary: 'just done',
+      offer_accepted: 'None',
+      unused_credits: '5 (missing from display)',
+    });
+    expect(draft.body).not.toMatch(/missing from display/i);
+    expect(draft.body).not.toContain('(5 (');
+  });
+
   it('Sindhura full-case regression: REFERRED + Technical Issue with placeholder credits produces a coherent body', () => {
     // REFERRED routes to 43-referred-manual-review which does not interpolate
     // credits at all, so the placeholder cannot leak through this template

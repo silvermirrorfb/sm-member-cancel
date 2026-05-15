@@ -82,8 +82,10 @@ function formatCurrentBimonthlyPricing(membershipTier) {
 // 10 2026 (QA_ISSUES cancel-bot #19 part 2).
 //
 // Rule: any session summary value that matches a known placeholder pattern
-// (literal "missing from display", "unknown", "TBD", empty string, or any
-// stray parenthesis) is treated as unsafe and never interpolated. Each
+// (literal "missing from display", "unknown", "TBD", empty string, or a
+// structured placeholder parenthetical like "(missing from display)") is
+// treated as unsafe and never interpolated. Legitimate parenthetical qualifiers
+// like "$95 (30-min)" or "Esthetician's Choice (50-min)" are NOT blocked. Each
 // template either omits the parenthetical or substitutes neutral language.
 
 const PLACEHOLDER_PATTERNS = [
@@ -92,12 +94,23 @@ const PLACEHOLDER_PATTERNS = [
   /\btbd\b/i,
 ];
 
+/**
+ * Returns true if a session summary field value looks like an upstream
+ * placeholder that must never appear in a member-facing email body.
+ *
+ * Strips values containing structured placeholder text patterns like
+ * "(missing from display)" or "(unknown)". Does NOT strip legitimate
+ * parenthetical qualifiers like "(30-min)" or "(50-min)".
+ */
 function isPlaceholderValue(value) {
   if (value === undefined || value === null) return true;
   const s = String(value).trim();
   if (s === '') return true;
   if (PLACEHOLDER_PATTERNS.some((p) => p.test(s))) return true;
-  if (/[()]/.test(s)) return true;
+  // Block values that contain a structured placeholder parenthetical, e.g.
+  // "5 (missing from display)". Does NOT block legitimate qualifiers like
+  // "$95 (30-min)" or "Esthetician's Choice (50-min)".
+  if (/\((missing|unknown|TBD|n\/a|empty|null|undefined|pending)/i.test(s)) return true;
   return false;
 }
 
