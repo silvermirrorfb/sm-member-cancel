@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 15, 2026 (already-attempted-channel auto-escalation rule)
+**Last updated:** May 15, 2026 (footprint-aware relocation handling rule)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -37,7 +37,7 @@ What's actually still open right now, in order of stakes:
 
 **Still parked behind Travis decisions or provisioning calls:**
 
-4. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. AWAITING Travis Decisions 1 and 2 (how aggressive after a clear refusal; geographic/medical exits).
+4. **cancel-bot #5** - Bot pushes retention past clear refusals. Customer harm and FTC Negative Option exposure. Decision 2 (geographic exits / out-of-footprint relocation) FIXED IN CODE 2026-05-15 by PR `fix/relocation-out-of-footprint-no-retention` (Congo case fix: HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING skips retention entirely for moves outside NYC/DC/Miami metros, preserves in-footprint transfer-first behavior, 19 new tests). Decision 1 (retention aggressiveness after first clear refusal generally) still AWAITING Travis.
 5. **cancel-bot #12** - Identity verification is name + email only; the bot then processes pause/cancel/billing changes on that. Privacy and bad-actor risk. AWAITING Travis Decision 5.
 6. **cancel-bot #6 (broader)** - The fabricated-escalation prompt guardrail shipped (PR #13). The generic no-SLA escalation language and the strengthened example bans resolve via cancel-bot #20 / PR 1. Whether/how to soften the "48-hour confirmation email" promise in the outcome-notification path (separate from in-chat escalation language) and the `sendBeacon` robustness for leg-A are still AWAITING Travis Decision 3.
 7. **cancel-bot #11 / #13 / #14 / #15 / #17** - the rest of the Travis decisions (perk dollar values; refund/double-billing script; credit visibility; tone; commitment language). Code is mostly trivial; the calls aren't ours. (cancel-bot #16 / channel-loop rule resolved 2026-05-15 by PR `fix/already-tried-channel-auto-escalation` per Travis Decision 9.)
@@ -218,16 +218,29 @@ Chatlog logging silently no-op'd because `GOOGLE_CHATLOG_SHEET_ID` env var was n
 ---
 
 ### cancel-bot #5
-**Status:** AWAITING DECISION (Travis Decisions 1 and 2)
+**Status:** Decision 2 (geographic exits / out-of-footprint relocation) FIXED IN CODE 2026-05-15 by PR `fix/relocation-out-of-footprint-no-retention`. Bump to VERIFIED FIXED after merge + production deploy. Decision 1 (retention aggressiveness after first clear refusal generally) still AWAITING.
 **Severity:** customer-harm, compliance-risk
 **Discovered:** April to early May 2026 (660-session review)
+**Travis decision received:** 2026-05-15 (Decision 2 only; Decision 1 still open)
 
 Bot pushed retention past clear refusals in multiple sessions:
 
-- Session `d60c370e`: Member said "no I would like to cancel please." Bot offered a 2-month pause. Member said "No thank you, please just cancel." Bot still ran a final-warning loss-framing block before processing.
-- Session `9d661a35`: Member said she was moving to Congo. Bot offered four retention options (1-month pause, bi-monthly, consolidate credits to products, final warning) before letting her cancel. Congo doesn't have a Silver Mirror.
+- Session `d60c370e`: Member said "no I would like to cancel please." Bot offered a 2-month pause. Member said "No thank you, please just cancel." Bot still ran a final-warning loss-framing block before processing. (Decision 1, still open.)
+- Session `9d661a35`: Member said she was moving to Congo. Bot offered four retention options (1-month pause, bi-monthly, consolidate credits to products, final warning) before letting her cancel. Congo doesn't have a Silver Mirror. (Decision 2, fixed by this PR.)
 
-Code fix is small (system prompt edit). Business decision is Travis's call: how aggressive should retention be after clear refusals, what's the maximum number of save offers, how is "clear refusal" defined operationally. FTC Negative Option Rule is the legal ceiling.
+**Travis decision (May 15 2026, Decision 2):** when a member states a relocation reason AND the destination is outside Silver Mirror's footprint (NYC, DC, Miami metros), skip the standard relocation retention sequence entirely. No pause, no bi-monthly, no credit consolidation, no final-warning loss-framing. Process the cancellation cleanly with a warm send-off acknowledging the move and one optional sentence noting the member can rejoin if they ever come back to a Silver Mirror city. In-footprint relocations preserve the existing transfer-first behavior.
+
+**Fix (this PR, `fix/relocation-out-of-footprint-no-retention`):** new `HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING` in `src/lib/system-prompt.txt`, structured to match the PR #6 / PR #13 / PR #18 / PR #23 rule format. Four parts:
+1. Classification of destinations into IN-FOOTPRINT (NYC metro 5 locations, DC metro 3 locations, Miami metro 2 locations, plus any NY/NJ/CT/DC/MD/VA/FL city or town within reach of a location) vs. OUT-OF-FOOTPRINT (international, west coast, midwest, south outside Miami metro, northeast outside NYC/DC). Ambiguous destinations get one clarifying ask: "Will you be staying in the NYC, DC, or Miami area, or moving farther?"
+2. OUT-OF-FOOTPRINT handling: explicit MUST NOT list (no pause, no bi-monthly, no credit consolidation, no final warning), warm send-off "Best of luck with the move to [destination]. We've loved having you with us.", and one optional rejoin sentence.
+3. IN-FOOTPRINT handling: preserves the existing decision-tree behavior (transfer first, then pause -> bi-monthly -> credit consolidation if transfer declined). PR #23 firm-refusal short-circuit and HARD RULE 1 "just cancel" honor both still apply.
+4. BAD/GOOD example pairs: Congo case BAD (the actual May 6 session 9d661a35 transcript with four retention offers), Congo case GOOD (warm acknowledgment, clean cancellation, no retention), in-footprint Miami GOOD (transfer offered first), ambiguous-destination GOOD (one clarifying question then OUT-OF-FOOTPRINT handling).
+
+Also updated Decision Tree #2 (Relocation) to point to the new hard rule: "this default sequence only applies when the destination is IN-FOOTPRINT... For OUT-OF-FOOTPRINT relocations, skip retention entirely per HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING."
+
+19 new tests in `__tests__/claude.test.js` (`system prompt: footprint-aware relocation handling`, `prior PR rules survive the footprint-aware relocation PR`, and `no em dashes or en dashes in the new footprint-aware rule`) cover the Congo regression, in-footprint transfer-first preservation, ambiguous-destination clarifying ask, and preservation of PR #5, PR #6, PR #13, PR #18, HARD RULE #22, and PR #23. Touch: 2 files (system-prompt.txt + claude.test.js). Closes Travis Decision 2.
+
+**Still AWAITING Decision 1:** how aggressive should retention be after the first clear refusal generally (not just geographic exits). The `d60c370e` session is the canonical example. Final-warning loss-framing after a clear "just cancel" is still allowed by the prompt outside the OUT-OF-FOOTPRINT path.
 
 ---
 
@@ -559,7 +572,7 @@ The 10 chatbot-script decisions parked with Travis for review, mirrored from `do
 | Decision | Issue | Topic | Stakes |
 |---|---|---|---|
 | 1 | cancel-bot #5 | Retention aggressiveness after first clear refusal | high (FTC) |
-| 2 | cancel-bot #5 | Retention behavior on geographic/medical exits | high |
+| 2 | cancel-bot #5 | Retention behavior on geographic/medical exits | high | FIXED IN CODE 2026-05-15 (PR `fix/relocation-out-of-footprint-no-retention`, geographic half only; medical exits still default to Decision Tree #17) |
 | 3 | cancel-bot #6 | Escalation reality vs fabricated promises | HIGHEST |
 | 4 | cancel-bot #11 | Perk dollar value verification | medium |
 | 5 | cancel-bot #12 | Identity verification floor | high (privacy) |
