@@ -57,6 +57,24 @@ function isNilLike(value) {
   return trimmed === '' || trimmed === 'null' || trimmed === 'undefined' || trimmed === 'nan';
 }
 
+// cancel-bot #22 defense in depth. The end-of-session handler now stamps
+// summary.date server-side, but if anything bypasses that path (older
+// queued sessions, future call sites) we still refuse to write a
+// hallucinated date. Anything not in YYYY-MM-DD form gets replaced
+// with today's date in America/New_York (the timezone Fernanda's
+// queue is read in).
+function safeIsoDate(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+    return value.trim();
+  }
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 function toSheetValue(value) {
   return isNilLike(value) ? '' : value;
 }
@@ -364,7 +382,7 @@ function buildEmailBody(summary, transcript) {
 SILVER MIRROR — CANCELLATION SESSION SUMMARY
 ======================================
 
-Date: ${summary.date}
+Date: ${safeIsoDate(summary.date)}
 Client Name: ${summary.client_name}
 Email: ${summary.email}
 Phone: ${summary.phone || 'Not provided'}
@@ -443,7 +461,7 @@ function buildEmailHtml(summary, transcript) {
 <body>
   <div class="header">
     <h2 style="margin:0;">Cancellation Session Summary</h2>
-    <div style="opacity:0.8;">${esc(summary.date)}</div>
+    <div style="opacity:0.8;">${esc(safeIsoDate(summary.date))}</div>
   </div>
 
   <div style="text-align:center;"><span class="outcome">${esc(summary.outcome)}</span></div>
@@ -526,7 +544,7 @@ async function logToGoogleSheets(summary) {
 
     // 22 columns: A-V matching headers in the Cancellations sheet
     const row = [
-      toSheetValue(summary.date) || new Date().toISOString(),                 // A: Date
+      safeIsoDate(summary.date),                                              // A: Date
       toSheetValue(summary.sheet_month) || new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }), // B: Month
       toSheetValue(summary.client_name),                                      // C: Client Name
       toSheetValue(summary.phone),                                            // D: Phone
@@ -1291,6 +1309,7 @@ async function processConversationEnd(summary, transcript) {
 }
 
 export {
+  safeIsoDate,
   sendSummaryEmail,
   sendReasonAlert,
   sendOpsAlertEmail,

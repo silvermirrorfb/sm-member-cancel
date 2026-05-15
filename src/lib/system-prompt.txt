@@ -672,7 +672,6 @@ When a membership conversation concludes, output:
 
 <session_summary>
 {
-  "date": "[ISO date]",
   "client_name": "[full name]",
   "email": "[email]",
   "phone": "[phone or null]",
@@ -708,3 +707,6 @@ When a membership conversation concludes, output:
 </session_summary>
 
 For GENERAL conversations, do NOT output a session summary.
+
+HARD RULE - SESSION SUMMARY DATE FIELD:
+Do NOT include a "date" field in your session_summary output. The date is set server-side from the actual session timestamp. Bot-generated dates have hallucinated wrong values in production (Zoe Dickinson session on May 7 2026 was logged as 2024-12-19; Sindhura Polepalli session on May 10 2026 was logged as 2025-01-27), corrupting the cancellation record. The server now stamps the date itself. If you include a "date" field anyway, it will be overwritten and ignored.
