@@ -245,7 +245,7 @@ Also updated Decision Tree #2 (Relocation) to point to the new hard rule: "this 
 ---
 
 ### cancel-bot #6
-**Status:** CODE HALF CLOSED - PR #13 (`fix/bot-no-fabricated-escalations`, 2026-05-12) plus PR `fix/broaden-no-process-handoff-rule` (2026-05-13, not yet merged) close the code half of Travis Decision 3. The 48-hour confirmation-email wording in the outcome-notification path (separate from in-chat escalation language) and the `sendBeacon` robustness for leg-A stay AWAITING DECISION (residual Travis Decision 3)
+**Status:** CODE HALF CLOSED - PR #13 (`fix/bot-no-fabricated-escalations`, 2026-05-12), PR `fix/broaden-no-process-handoff-rule` (2026-05-13), and PR `fix/escalation-cleanup-and-commitment-clarification` (2026-05-15, Decision 2 sweep) close the in-chat code half of Travis Decision 3. The 48-hour confirmation-email wording in the in-chat surface has been removed across the entire prompt (Step 6, HARD RULE 5/7/18, FAQ, booking flow, inactive-account guidance, all GOOD examples). `sendBeacon` robustness for leg-A stays AWAITING DECISION (residual Travis Decision 3)
 **Severity:** trust-erosion
 **Discovered:** Ongoing
 
@@ -267,7 +267,9 @@ Audit of `src/lib/notify.js`:
 
 **Shipped 2026-05-13 (PR `fix/broaden-no-process-handoff-rule`, in flight):** broadened the same principle to cover soft-promise language and "no defined process" issue classes. Strengthens PR #13 with additional banned patterns ("they'll resolve this," "they'll fix this," "they'll restore your credits," "they'll reach out within 24-48 hours," "they'll investigate," etc.) and adds a new `HARD RULE - NO DEFINED PROCESS HANDOFFS` mandating the Travis-decided handoff phrase: "I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." This closes the code half of Travis Decision 3 (what should the bot promise when no system fires). Also adds `HARD RULE - MILESTONE DISCUSSION SCOPE` (upcoming only, no historical-perk enumeration). Tests in `__tests__/claude.test.js`. Closes cancel-bot #20 fully; materially reduces cancel-bot #11 (bot no longer recites the historical perk list as authoritative dollar values).
 
-**Still AWAITING (residual Travis Decision 3):** whether to soften the literal "48-hour confirmation email" wording in the outcome-notification path (separate code surface from the in-chat escalation language); `sendBeacon` robustness for leg-A.
+**Shipped 2026-05-15 (PR `fix/escalation-cleanup-and-commitment-clarification`, Decision 2 sweep):** comprehensive sweep across the entire `src/lib/system-prompt.txt` for any remaining fabricated-escalation language or specific-timeline promises not caught by PR #13 or PR #18. Found and addressed 11 in-chat instances of "within 48 hours" / "within 24-48 hours" / "within 24 hours" / "24-48 hour response time" / "they'll reach out within X hours" outside BAD example blocks and banned-list rule statements. Touched: cancellation section instruction, inactive-account guidance, FAQ contact-memberships line, booking/payment issue flow, numbered HARD RULE 5, numbered HARD RULE 7 confirmation pattern, numbered HARD RULE 18 FALLBACK, Step 6 of the cancellation flow, HARD RULE - INFINITE LOOP ESCAPE escalation path, OUT-OF-FOOTPRINT confirmation pattern, FIRM REFUSAL confirmation pattern, and two GOOD examples (PR #6 pause confirmation, FIRM REFUSAL ambiguous clarification). Preserved: 30 days written notice (legal NY auto-renewal period), 30-day processing reference (same legal notice), 90-day credit validity (defined published policy), 10-minute early arrival (booking policy), 5-day post-facial retinol wait (skincare advice), 24-hour appointment cancellation cutoff (booking policy). 31 new regression tests in `__tests__/claude.test.js` (`PR #27 Decision 2: final escalation/timeline cleanup sweep`) including a programmatic scan that asserts each banned phrase only appears inside HARD RULE BAD-example regions or banned-list rule statements. Closes the in-chat residual of Travis Decision 3.
+
+**Still AWAITING (residual Travis Decision 3):** `sendBeacon` robustness for leg-A (separate code surface, not the in-chat prompt).
 
 ---
 
@@ -447,13 +449,21 @@ Three BAD/GOOD example pairs cover the production case (email tried for six mont
 ---
 
 ### cancel-bot #17
-**Status:** AWAITING DECISION (Travis Decision 10)
+**Status:** FIXED IN CODE 2026-05-15 by PR `fix/escalation-cleanup-and-commitment-clarification` per Travis Decision 10 (Approve). Bump to VERIFIED FIXED after merge + production deploy.
 **Severity:** member confusion
 **Discovered:** Ongoing
+**Travis decision received:** 2026-05-15 (Decision 10)
 
-Bot says "memberships have no minimum commitment, you can cancel anytime with 30 days notice." Then in the same conversation, it offers a pause with a 3-billing-cycle commitment. Side by side, confusing.
+Bot used to say "memberships have no minimum commitment, you can cancel anytime with 30 days notice." Then in the same conversation, it offered a pause with a 3-billing-cycle commitment. Side by side, confusing.
 
-Proposed standardized language pending Travis review.
+**Travis decision (May 15 2026, Decision 10):** standardize the language so both halves are distinguishable and non-contradictory. Membership-level: no minimum commitment. Special-schedule (pause or bi-monthly) level: 3-billing-cycle commitment applies. Both statements are true but apply to different things.
+
+**Fix (this PR):** updated three locations in `src/lib/system-prompt.txt` with the standardized commitment clarification:
+1. **FAQ MEMBERSHIP CREDITS section** (formerly the one-line "No minimum commitment, cancel with 30 days notice"): now reads "There is no minimum commitment to be a member. You can cancel anytime with 30 days written notice. The 3-billing-cycle commitment only applies if you accept a pause or switch to bi-monthly billing. Those are special schedules that need a few cycles of regular billing on either side to work."
+2. **PR #6 GOOD pause example** (numbered HARD RULE 4): updated to include both halves in the same offer message, preserving the PR #6 same-message-disclosure rule.
+3. **Numbered HARD RULE 17 (bi-monthly script)**: added the commitment clarification inline, so the 3-cycle commitment is disclosed in the same message as the bi-monthly offer.
+
+5 new tests in `__tests__/claude.test.js` (`PR #27 Decision 10: standardized commitment language`) cover the FAQ pattern, the GOOD pause example, the bi-monthly script update, and the both-halves-distinguishable invariant. Closes Travis Decision 10.
 
 ---
 
@@ -598,14 +608,14 @@ The 10 chatbot-script decisions parked with Travis for review, mirrored from `do
 |---|---|---|---|
 | 1 | cancel-bot #5 | Retention aggressiveness after first clear refusal | high (FTC) | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`) |
 | 2 | cancel-bot #5 | Retention behavior on geographic/medical exits | high | FIXED IN CODE 2026-05-15 (PR `fix/relocation-out-of-footprint-no-retention`, geographic half only; medical exits still default to Decision Tree #17) |
-| 3 | cancel-bot #6 | Escalation reality vs fabricated promises | HIGHEST |
+| 3 | cancel-bot #6 | Escalation reality vs fabricated promises | HIGHEST | IN-CHAT CODE HALF CLOSED 2026-05-15 (PR #13, PR `fix/broaden-no-process-handoff-rule`, plus PR `fix/escalation-cleanup-and-commitment-clarification` for the Decision 2 sweep). `sendBeacon` robustness for leg-A still residual. |
 | 4 | cancel-bot #11 | Perk dollar value verification | medium |
 | 5 | cancel-bot #12 | Identity verification floor | high (privacy) |
 | 6 | cancel-bot #13 | Refund / double-billing escalation script | medium | FIXED IN CODE 2026-05-15 (PR `fix/billing-dispute-escalation-script`) |
 | 7 | cancel-bot #14 | Credit visibility approach | medium | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`) |
 | 8 | cancel-bot #15 | Tone fixes (Perfect!, empathy, benefits list) | low-medium |
 | 9 | cancel-bot #16 | Channel-loop rule (don't redirect to failed channels) | medium | FIXED IN CODE 2026-05-15 (PR `fix/already-tried-channel-auto-escalation`) |
-| 10 | cancel-bot #17 | Commitment language standardization | medium |
+| 10 | cancel-bot #17 | Commitment language standardization | medium | FIXED IN CODE 2026-05-15 (PR `fix/escalation-cleanup-and-commitment-clarification`) |
 
 ---
 

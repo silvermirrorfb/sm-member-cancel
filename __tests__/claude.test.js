@@ -201,7 +201,7 @@ describe('system prompt: no defined process handoffs (Sindhura Polepalli case, c
   it('bans specific resolution timelines, outcomes, and actions for no-defined-process cases', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toMatch(/MUST NOT add a specific resolution timeline/i);
-    expect(prompt).toContain('24-48 hours');
+    expect(prompt).toContain('24 to 48 hours');
     expect(prompt.toLowerCase()).toContain("they'll restore your credits");
     expect(prompt.toLowerCase()).toContain("they'll calculate what you're owed");
     expect(prompt.toLowerCase()).toContain("they'll investigate");
@@ -249,7 +249,7 @@ describe('system prompt: prior-PR rules survive PR 1 system-prompt rewrite', () 
     const prompt = getSystemPrompt();
     expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
     expect(prompt).toMatch(/bait.?and.?switch/i);
-    expect(prompt).toContain('pauses come with a 3-billing-cycle commitment once you resume');
+    expect(prompt).toContain('the 3-billing-cycle commitment applies if you accept a pause or bi-monthly billing');
   });
 
   it('preserves PR #5 bi-monthly current-pricing language', () => {
@@ -455,7 +455,7 @@ describe('system prompt: prior PR rules survive the footprint-aware relocation P
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
-    expect(prompt).toContain('pauses come with a 3-billing-cycle commitment once you resume');
+    expect(prompt).toContain('the 3-billing-cycle commitment applies if you accept a pause or bi-monthly billing');
   });
 
   it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
@@ -708,7 +708,7 @@ describe('system prompt: prior PR rules survive the billing-dispute PR', () => {
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
-    expect(prompt).toContain('pauses come with a 3-billing-cycle commitment once you resume');
+    expect(prompt).toContain('the 3-billing-cycle commitment applies if you accept a pause or bi-monthly billing');
   });
 
   it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
@@ -1046,7 +1046,7 @@ describe('system prompt: prior PR rules survive the firm-refusal + credit-discla
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
-    expect(prompt).toContain('pauses come with a 3-billing-cycle commitment once you resume');
+    expect(prompt).toContain('the 3-billing-cycle commitment applies if you accept a pause or bi-monthly billing');
   });
 
   it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
@@ -1143,6 +1143,428 @@ describe('system prompt: no em dashes or en dashes in the new firm-refusal and c
   it('the updated in-footprint cross-reference line uses no em or en dashes', () => {
     const prompt = getSystemPrompt();
     const lineMatch = prompt.match(/When the destination is classified IN-FOOTPRINT[^\n]*HARD RULE - FIRM REFUSAL SHORT-CIRCUIT[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).not.toMatch(/[–—]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #27, Decision 2 sweep (final escalation cleanup) + Decision 10
+// (commitment language clarification).
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper: build (startAbs, endAbs) bounds for every HARD RULE region that
+ * legitimately contains BAD examples and banned-list rule statements. Any
+ * banned soft-promise phrase found OUTSIDE these regions is a Decision 2 leak.
+ */
+function getRuleAndBadExampleBounds(prompt) {
+  const headers = [
+    'HARD RULE - NO FABRICATED ESCALATION',
+    'HARD RULE - NO DEFINED PROCESS HANDOFFS',
+    'HARD RULE - ALREADY ATTEMPTED CHANNEL',
+    'HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING',
+    'HARD RULE - BILLING DISPUTE HANDLING',
+    'HARD RULE - FIRM REFUSAL SHORT-CIRCUIT',
+    'HARD RULE - CREDIT VISIBILITY DISCLAIMER',
+  ];
+  const starts = headers
+    .map((h) => prompt.indexOf(h))
+    .filter((idx) => idx !== -1)
+    .sort((a, b) => a - b);
+  const numberedRulesStart = prompt.indexOf('\n19. If any profile field is UNKNOWN');
+  const bounds = [];
+  for (let i = 0; i < starts.length; i += 1) {
+    const start = starts[i];
+    const next = i + 1 < starts.length ? starts[i + 1] : Number.POSITIVE_INFINITY;
+    let end = next;
+    if (numberedRulesStart !== -1 && start < numberedRulesStart && numberedRulesStart < end) {
+      end = numberedRulesStart;
+    }
+    bounds.push({ start, end });
+  }
+  return bounds;
+}
+
+function countOccurrencesOutsideRegions(prompt, phrase, bounds) {
+  const lowerPrompt = prompt.toLowerCase();
+  const lowerPhrase = phrase.toLowerCase();
+  let total = 0;
+  let idx = 0;
+  while ((idx = lowerPrompt.indexOf(lowerPhrase, idx)) !== -1) {
+    const insideAllowedRegion = bounds.some(({ start, end }) => idx >= start && idx < end);
+    if (!insideAllowedRegion) total += 1;
+    idx += lowerPhrase.length;
+  }
+  return total;
+}
+
+describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
+  // The banned timeline phrases that the broader PR #18 rule forbids.
+  // Each must NOT appear in user-facing bot copy (instructions, GOOD examples)
+  // outside of BAD example blocks or banned-list rule statements.
+  const BANNED_TIMELINE_PHRASES = [
+    'within 24 hours',
+    'within 48 hours',
+    'within 24-48 hours',
+    '24-48 hour response',
+    '24-48 hour follow',
+    'within 24 to 48 hours',
+    'follow up within',
+    'reach out within',
+    '48-hour confirmation email',
+    '48-hour followup',
+    '48-hour follow-up',
+    'response is targeted within',
+    'targeted within 48',
+    '24-48 hours',
+  ];
+
+  for (const phrase of BANNED_TIMELINE_PHRASES) {
+    it(`banned timeline phrase ${JSON.stringify(phrase)} appears only in BAD examples or banned-list rule statements`, () => {
+      const prompt = getSystemPrompt();
+      const bounds = getRuleAndBadExampleBounds(prompt);
+      const leakCount = countOccurrencesOutsideRegions(prompt, phrase, bounds);
+      expect(leakCount).toBe(0);
+    });
+  }
+
+  it('cancellation flow Step 6 no longer promises a 48-hour confirmation email', () => {
+    const prompt = getSystemPrompt();
+    const stepMatch = prompt.match(/Step 6:[^\n]*/);
+    expect(stepMatch).not.toBeNull();
+    expect(stepMatch[0].toLowerCase()).not.toContain('within 48 hours');
+    expect(stepMatch[0].toLowerCase()).not.toContain('48-hour confirmation');
+    // The 30-day legal notice period IS preserved
+    expect(stepMatch[0]).toMatch(/30 days/);
+    // The 90-day credit validity policy IS preserved
+    expect(stepMatch[0]).toMatch(/90 days/);
+  });
+
+  it('cancellation section instruction line no longer promises "within 48 hours" for the confirmation email', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/- Tell the member they will receive a confirmation email[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0].toLowerCase()).not.toContain('within 48 hours');
+    expect(lineMatch[0].toLowerCase()).toContain('do not promise a specific timeline');
+  });
+
+  it('numbered HARD RULE 5 no longer says "Always 48-hour confirmation message"', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/\n5\. Always[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0].toLowerCase()).not.toContain('48-hour');
+    expect(lineMatch[0].toLowerCase()).not.toContain('48 hour');
+  });
+
+  it('numbered HARD RULE 7 confirmation pattern no longer includes a 48-hour timeline', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/\n7\. Preferred cancellation confirmation pattern:[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0].toLowerCase()).not.toContain('48-hour');
+    // The 30-day processing legal notice IS preserved
+    expect(lineMatch[0]).toMatch(/30-day processing/);
+    // The 90-day credit validity defined policy IS preserved
+    expect(lineMatch[0]).toMatch(/90-day credit validity/);
+  });
+
+  it('numbered HARD RULE 18 FALLBACK no longer promises a 48-hour follow-up', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/\n18\. FALLBACK:[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0].toLowerCase()).not.toContain('48-hour');
+    expect(lineMatch[0].toLowerCase()).not.toContain('48 hour');
+  });
+
+  it('inactive-account guidance no longer promises 24-48 hour follow-up', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/- If the account is inactive\/canceled already[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0].toLowerCase()).not.toContain('24-48 hour');
+    expect(lineMatch[0]).toContain('someone will follow up with you about next steps');
+  });
+
+  it('HOW TO CONTACT MEMBERSHIPS section no longer publishes a 24-48 hour response window', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/HOW TO CONTACT MEMBERSHIPS:[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0].toLowerCase()).not.toContain('24-48');
+    expect(lineMatch[0].toLowerCase()).not.toContain('hour response');
+  });
+
+  it('booking/payment issue flow no longer targets a 48-hour response', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/- Tell the guest the issue has been flagged for follow-up[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0].toLowerCase()).not.toContain('within 48 hours');
+    expect(lineMatch[0].toLowerCase()).not.toContain('targeted within');
+  });
+
+  it('HARD RULE - INFINITE LOOP ESCAPE uses the PR #18 standard handoff phrase, no 24-hour promise', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - INFINITE LOOP ESCAPE');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('\nHARD RULE -', startIdx + 1);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).toContain("I'm flagging this for our memberships team to review");
+    expect(section).toContain('Someone will follow up with you about next steps');
+    expect(section.toLowerCase()).not.toContain('within 24 hours');
+    expect(section.toLowerCase()).not.toContain('they\'ll reach out');
+  });
+
+  it('OUT-OF-FOOTPRINT handling no longer promises a 48-hour confirmation email', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('OUT-OF-FOOTPRINT handling (skip retention entirely)');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('\nIN-FOOTPRINT handling', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section.toLowerCase()).not.toContain('48-hour');
+    expect(section.toLowerCase()).not.toContain('within 48 hours');
+    // 30-day processing and 90-day credit validity preserved
+    expect(section).toMatch(/processing takes 30 days/);
+    expect(section).toMatch(/90 days/);
+  });
+
+  it('FIRM REFUSAL confirmation pattern no longer promises a 48-hour confirmation email', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT');
+    const endIdx = prompt.indexOf('\nHARD RULE - CREDIT VISIBILITY DISCLAIMER', startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    // Find the specific paragraph about the post-firm-refusal confirmation pattern
+    const paraMatch = section.match(/After a firm refusal, the bot proceeds directly[^\n]*/);
+    expect(paraMatch).not.toBeNull();
+    expect(paraMatch[0].toLowerCase()).not.toContain('48-hour');
+    expect(paraMatch[0].toLowerCase()).not.toContain('within 48 hours');
+    // 30-day legal notice and 90-day credit validity preserved
+    expect(paraMatch[0]).toMatch(/processing takes 30 days/);
+    expect(paraMatch[0]).toMatch(/90 days/);
+  });
+
+  it('FIRM REFUSAL confirmation language ban explicitly allows the 30-day legal notice and 90-day credit policy', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/Confirmation language must comply with PR #18:[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).toMatch(/30-day processing reference is the legal notice period and is allowed/);
+    expect(lineMatch[0]).toMatch(/90-day credit validity is defined published policy and is allowed/);
+  });
+
+  it('GOOD example for the PR #6 pause disclosure no longer promises "within 48 hours"', () => {
+    const prompt = getSystemPrompt();
+    // The GOOD example block for the 3-billing-cycle commitment lives near
+    // numbered HARD RULE 4. Pull a window starting from that example and
+    // extending until numbered HARD RULE 5.
+    const startIdx = prompt.indexOf('Example GOOD (commitment disclosed in the offer)');
+    const endIdx = prompt.indexOf('\n5. Always', startIdx);
+    expect(startIdx).toBeGreaterThan(-1);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const block = prompt.slice(startIdx, endIdx);
+    expect(block.toLowerCase()).not.toContain('within 48 hours');
+  });
+
+  it('GOOD example for the firm-refusal ambiguous-response clarification no longer promises "within 48 hours"', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('Example GOOD (ambiguous response, bot clarifies once)');
+    expect(startIdx).toBeGreaterThan(-1);
+    // This example sits at the end of the FIRM REFUSAL section. Pull until the
+    // next HARD RULE header.
+    const endIdx = prompt.indexOf('\nHARD RULE -', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const block = prompt.slice(startIdx, endIdx);
+    expect(block.toLowerCase()).not.toContain('within 48 hours');
+  });
+
+  it('preserves legitimate policy timelines that are NOT SM-side process SLAs', () => {
+    const prompt = getSystemPrompt();
+    // 30 days written notice (NY auto-renewal legal notice period) preserved
+    expect(prompt).toContain('30 days written notice');
+    // 30-day processing (the legal notice period in practice) preserved
+    expect(prompt).toMatch(/30 days/);
+    // 90 days credit validity (defined published policy) preserved
+    expect(prompt).toMatch(/90 days/);
+    // 10 minutes early arrival policy preserved
+    expect(prompt).toContain('10 minutes early');
+    // 5 days post-facial retinol wait skincare advice preserved
+    expect(prompt).toContain('5 DAYS before restarting retinol');
+    // 24 hours cancellation policy preserved (Late cancel rule)
+    expect(prompt).toMatch(/Must cancel more than 24 hours before/);
+    // 24 hours post-facial product resume preserved
+    expect(prompt).toContain('Resume regular cleansers, serums, moisturizers after 24 hours');
+  });
+
+  it('preserves the PR #13 / PR #18 banned-list rule statements verbatim', () => {
+    const prompt = getSystemPrompt();
+    // PR #13 ORIGINALS still in the prompt
+    expect(prompt.toLowerCase()).toContain('alerted our qa team');
+    expect(prompt.toLowerCase()).toContain('flagged this as urgent');
+    expect(prompt.toLowerCase()).toContain('escalated to engineering');
+    expect(prompt.toLowerCase()).toContain('notified our technical team');
+    expect(prompt.toLowerCase()).toContain('opened a ticket');
+    // PR #18 strengthened bans still in the prompt
+    expect(prompt.toLowerCase()).toContain("they'll resolve this");
+    expect(prompt.toLowerCase()).toContain("they'll fix this");
+    expect(prompt.toLowerCase()).toContain("they'll restore your credits");
+    expect(prompt.toLowerCase()).toContain("they'll reach out within 24 to 48 hours");
+    expect(prompt.toLowerCase()).toContain("they'll address this");
+  });
+});
+
+describe('PR #27 Decision 10: standardized commitment language', () => {
+  it('FAQ-style membership credits section uses the standardized commitment clarification', () => {
+    const prompt = getSystemPrompt();
+    // The standardized FAQ language is a single coherent paragraph in the
+    // MEMBERSHIP CREDITS section, distinguishing the membership-level (none)
+    // commitment from the special-schedule (3-cycle) commitment.
+    const memberCreditsStart = prompt.indexOf('MEMBERSHIP CREDITS:');
+    expect(memberCreditsStart).toBeGreaterThan(-1);
+    const nextSectionStart = prompt.indexOf('\nCANCELLATION:', memberCreditsStart);
+    expect(nextSectionStart).toBeGreaterThan(memberCreditsStart);
+    const block = prompt.slice(memberCreditsStart, nextSectionStart);
+    expect(block).toContain('There is no minimum commitment to be a member');
+    expect(block).toContain('You can cancel anytime with 30 days written notice');
+    expect(block).toContain('The 3-billing-cycle commitment only applies if you accept a pause or switch to bi-monthly billing');
+    expect(block).toContain('special schedules that need a few cycles of regular billing on either side to work');
+  });
+
+  it('removes the old single-line "No minimum commitment" phrasing that lacked the bi-monthly/pause distinction', () => {
+    const prompt = getSystemPrompt();
+    // The old phrasing was just: "No minimum commitment — can cancel anytime with 30 days written notice"
+    // After Decision 10 it is replaced with the longer clarification.
+    expect(prompt).not.toContain('No minimum commitment — can cancel anytime with 30 days written notice');
+    expect(prompt).not.toContain('No minimum commitment - can cancel anytime with 30 days written notice');
+  });
+
+  it('PR #6 GOOD pause example surfaces both halves of the commitment clarification in the same message', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('Example GOOD (commitment disclosed in the offer)');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('\n5. Always', startIdx);
+    const block = prompt.slice(startIdx, endIdx);
+    // The new pattern: membership-level (no) commitment + pause/bi-monthly commitment
+    expect(block).toContain('no minimum commitment to be a member');
+    expect(block).toContain('the 3-billing-cycle commitment applies if you accept a pause or bi-monthly billing');
+    // Same-message disclosure (PR #6) preserved: the commitment is in the offer message
+    expect(block).toContain('does a 2-month pause sound helpful?');
+  });
+
+  it('numbered HARD RULE 17 bi-monthly script includes the commitment clarification', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/\n17\. Bi-monthly:[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(lineMatch[0]).toContain('no minimum commitment to be a member');
+    expect(lineMatch[0]).toContain('the 3-billing-cycle commitment applies if you switch to bi-monthly billing');
+    expect(lineMatch[0]).toContain('special schedules that need a few cycles of regular billing on either side to work');
+  });
+
+  it('the two halves of the commitment statement (none-to-be-a-member vs 3-cycle-for-special-schedules) are distinguishable and non-contradictory', () => {
+    const prompt = getSystemPrompt();
+    // Half 1: there is no minimum commitment to be a member.
+    expect(prompt).toMatch(/There is no minimum commitment to be a member\./);
+    // Half 2: the 3-cycle commitment only applies in special schedules (pause / bi-monthly).
+    expect(prompt).toMatch(/3-billing-cycle commitment only applies if you accept a pause or switch to bi-monthly billing/);
+    // The PR #6 same-message disclosure rule is still in place.
+    expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
+  });
+});
+
+describe('PR #27 sweep does not regress any prior PR rule', () => {
+  it('preserves PR #5 bi-monthly current-pricing rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+  });
+
+  it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
+    expect(prompt).toMatch(/bait.?and.?switch/i);
+  });
+
+  it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO FABRICATED ESCALATION');
+  });
+
+  it('preserves PR #18 NO DEFINED PROCESS HANDOFFS hard rule with strengthened soft-promise bans', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO DEFINED PROCESS HANDOFFS');
+    expect(prompt).toContain("I'm flagging this for our memberships team to review");
+    expect(prompt).toContain('Someone will follow up with you about next steps');
+    expect(prompt).toMatch(/Additional banned soft-promise patterns/i);
+  });
+
+  it('preserves PR #22 milestone-perk messaging rule (upcoming only)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/use ONLY the injected "Next Perk Milestone" \+ "Months Until Next Perk" fields/i);
+    expect(prompt).toContain('HARD RULE - MILESTONE DISCUSSION SCOPE');
+  });
+
+  it('preserves PR #23 ALREADY ATTEMPTED CHANNEL rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - ALREADY ATTEMPTED CHANNEL');
+    expect(prompt).toMatch(/MUST NOT redirect them back to the same channel/i);
+  });
+
+  it('preserves PR #24 FOOTPRINT-AWARE RELOCATION HANDLING rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING');
+    expect(prompt).toMatch(/MUST classify the destination as IN-FOOTPRINT or OUT-OF-FOOTPRINT BEFORE presenting any retention offer/i);
+  });
+
+  it('preserves PR #25 BILLING DISPUTE HANDLING rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - BILLING DISPUTE HANDLING');
+    expect(prompt).toMatch(/MUST acknowledge the dispute seriously/i);
+    expect(prompt).toContain('I take this seriously.');
+  });
+
+  it('preserves PR #26 FIRM REFUSAL SHORT-CIRCUIT rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT');
+    expect(prompt).toMatch(/MUST skip the final-warning loss-framing block and process the cancellation directly/i);
+  });
+
+  it('preserves PR #26 CREDIT VISIBILITY DISCLAIMER rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - CREDIT VISIBILITY DISCLAIMER');
+    expect(prompt).toContain("I can see your membership details, but I don't have visibility into your specific credit balances or expiration dates.");
+  });
+});
+
+describe('PR #27 no em dashes or en dashes in the edits we touched', () => {
+  it('the updated MEMBERSHIP CREDITS commitment paragraph uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/- There is no minimum commitment to be a member\.[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).not.toMatch(/[–—]/);
+  });
+
+  it('the updated cancellation instruction line uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/- Tell the member they will receive a confirmation email[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).not.toMatch(/[–—]/);
+  });
+
+  it('the updated HARD RULE 17 bi-monthly script uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/\n17\. Bi-monthly:[^\n]*/);
+    expect(lineMatch).not.toBeNull();
+    expect(lineMatch[0]).not.toMatch(/[–—]/);
+  });
+
+  it('the updated GOOD pause example block uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('Example GOOD (commitment disclosed in the offer)');
+    const endIdx = prompt.indexOf('\n5. Always', startIdx);
+    const block = prompt.slice(startIdx, endIdx);
+    expect(block).not.toMatch(/[–—]/);
+  });
+
+  it('the updated HARD RULE - INFINITE LOOP ESCAPE handoff line uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const lineMatch = prompt.match(/- Offer the escalation path: "I'm flagging this for our memberships team to review\.[^\n]*/);
     expect(lineMatch).not.toBeNull();
     expect(lineMatch[0]).not.toMatch(/[–—]/);
   });
