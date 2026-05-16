@@ -1569,3 +1569,356 @@ describe('PR #27 no em dashes or en dashes in the edits we touched', () => {
     expect(lineMatch[0]).not.toMatch(/[–—]/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR #28: First-offer positive emotional reframing (customer suggestion
+// forwarded by Fernanda May 4 2026, Travis-approved May 15 2026).
+// ---------------------------------------------------------------------------
+
+describe('system prompt: first-offer positive emotional reframing rule', () => {
+  it('includes the HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING header', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING');
+  });
+
+  it('describes the framing as PERMITTED, not required, and scoped to the FIRST retention offer', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).toMatch(/PERMITTED \(not required\)/);
+    expect(section).toMatch(/FIRST retention offer/);
+  });
+
+  it('cites the customer suggestion origin (Fernanda forward, May 4 2026)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/customer feedback \(Fernanda forward, May 4 2026\)/);
+  });
+
+  it('connects the framing to why members signed up (skin, self-care, journey)', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).toMatch(/healthier skin/i);
+    expect(section).toMatch(/self-care routine/i);
+    expect(section).toMatch(/invest(ing)? in (themselves|yourself|your skin)/i);
+    expect(section).toMatch(/long(-| )term skincare journey|skincare journey/i);
+  });
+
+  it('lists the suggested patterns the bot may rework contextually', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('"Before you cancel, I want to acknowledge what you signed up for in the first place: healthier skin, a real self-care routine, time to invest in yourself."');
+    expect(prompt).toContain('"Skin is a long game and consistency is the magic ingredient.');
+    expect(prompt).toContain('"I know you came to Silver Mirror to invest in your skin.');
+    expect(prompt).toContain('"Healthier skin takes time, and you\'ve been on that journey with us.');
+  });
+
+  it('lists the reason categories where warmth IS used (Cost, Inconsistent Usage, No Value, Lack of Results, Bad Experience)', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('When to USE (FIRST OFFER only) for these reason categories:');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('When NOT to USE:', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const useBlock = prompt.slice(startIdx, endIdx);
+    expect(useBlock).toMatch(/Cost/);
+    expect(useBlock).toMatch(/Inconsistent Usage/);
+    expect(useBlock).toMatch(/No Value|Lack of Value/);
+    expect(useBlock).toMatch(/Lack of Results|No Results/);
+    expect(useBlock).toMatch(/Bad Experience/);
+  });
+
+  it('lists the reason categories and contexts where warmth must NOT be used', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('When NOT to USE:');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('Strict guardrails:', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const notBlock = prompt.slice(startIdx, endIdx);
+    expect(notBlock).toMatch(/Relocation cases/);
+    expect(notBlock).toMatch(/FOOTPRINT-AWARE RELOCATION HANDLING/);
+    expect(notBlock).toMatch(/Technical Issue cases/);
+    expect(notBlock).toMatch(/NO DEFINED PROCESS HANDOFFS/);
+    expect(notBlock).toMatch(/Billing Dispute cases/);
+    expect(notBlock).toMatch(/BILLING DISPUTE HANDLING/);
+    expect(notBlock).toMatch(/Schedule Conflict/);
+    expect(notBlock).toMatch(/SECOND or LATER retention offer/);
+    expect(notBlock).toMatch(/AFTER a firm refusal/);
+    expect(notBlock).toMatch(/FIRM REFUSAL SHORT-CIRCUIT/);
+  });
+
+  it('enforces the strict guardrails (ONCE per session, no loss-framing, no health claims, no perks-by-name, no empathy stacking)', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('Strict guardrails:');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('Example BAD (warmth applied AFTER a firm refusal', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const guardrails = prompt.slice(startIdx, endIdx);
+    expect(guardrails).toMatch(/ONCE per session/);
+    expect(guardrails).toMatch(/inside the FIRST retention offer ONLY/);
+    expect(guardrails).toMatch(/must NOT be combined with loss-framing or fear language/);
+    expect(guardrails).toMatch(/"you'll lose"/);
+    expect(guardrails).toMatch(/"you'll regret"/);
+    expect(guardrails).toMatch(/must NOT make health claims that overpromise/);
+    expect(guardrails).toMatch(/No "cure," no specific outcome guarantees/);
+    expect(guardrails).toMatch(/must NOT name specific products or perks/);
+    expect(guardrails).toMatch(/must NOT stack with empathy phrases/);
+    expect(guardrails).toMatch(/"I hear you"/);
+    expect(guardrails).toMatch(/"no worries"/);
+    expect(guardrails).toMatch(/"that makes sense"/);
+    expect(guardrails).toMatch(/must NOT use this framing if the member has expressed frustration, anger, or urgency to cancel/);
+    expect(guardrails).toMatch(/immediately follows the framing in the SAME message/);
+  });
+
+  it('explicitly cross-references the prior PR rules that still apply', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    const endIdx = prompt.indexOf('Example BAD (warmth applied AFTER a firm refusal', startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).toMatch(/PR #6 same-message commitment disclosure/);
+    expect(section).toMatch(/PR #13 no fabricated escalation/);
+    expect(section).toMatch(/PR #18 no specific timeline\/outcome\/action promises/);
+    expect(section).toMatch(/PR #26 firm-refusal short-circuit/);
+    expect(section).toMatch(/PR #27 commitment clarification language/);
+  });
+
+  it('includes a BAD example where warmth is applied AFTER a firm refusal (PR #26 violation)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (warmth applied AFTER a firm refusal, violates PR #26)');
+    expect(prompt).toMatch(/Member: "No, please just cancel\."[\s\S]+Bot: "Before you cancel, I want to acknowledge/);
+  });
+
+  it('includes a BAD example where warmth is combined with loss-framing', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (warmth combined with loss-framing)');
+    const startIdx = prompt.indexOf('Example BAD (warmth combined with loss-framing)');
+    const block = prompt.slice(startIdx, startIdx + 800);
+    expect(block).toMatch(/You'll be giving up/);
+  });
+
+  it('includes a BAD example where warmth is used in the SECOND offer', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (warmth used in the SECOND offer)');
+    expect(prompt).toMatch(/warmth in the second offer/i);
+  });
+
+  it('includes a BAD example for OUT-OF-FOOTPRINT Relocation case', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (warmth applied to an OUT-OF-FOOTPRINT Relocation case)');
+    expect(prompt).toMatch(/I'm moving to Seattle next month/);
+  });
+
+  it('includes a BAD example for Technical Issue case', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (warmth applied to a Technical Issue case)');
+    expect(prompt).toMatch(/credits disappeared after my pause/);
+  });
+
+  it('includes a BAD example for Billing Dispute case', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (warmth applied to a Billing Dispute case)');
+    expect(prompt).toMatch(/charged me twice this month/);
+  });
+
+  it('includes a BAD example for Schedule Conflict / administrative case', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example BAD (warmth applied to a Schedule Conflict / administrative case)');
+    expect(prompt).toMatch(/work nights now and can't make appointments/);
+  });
+
+  it('includes a GOOD example for a Cost-reason member (warmth + offer in same message)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (Cost reason, warmth + offer in same message, FIRST OFFER)');
+    const startIdx = prompt.indexOf('Example GOOD (Cost reason, warmth + offer in same message, FIRST OFFER)');
+    const block = prompt.slice(startIdx, startIdx + 800);
+    expect(block).toMatch(/healthier skin/i);
+    expect(block).toMatch(/routine to invest in yourself|self-care routine/i);
+    expect(block).toMatch(/downgrade/i);
+  });
+
+  it('includes a GOOD example for an Inconsistent Usage member (warmth + offer in same message)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (Inconsistent Usage reason, warmth + offer in same message, FIRST OFFER)');
+    const startIdx = prompt.indexOf('Example GOOD (Inconsistent Usage reason, warmth + offer in same message, FIRST OFFER)');
+    const block = prompt.slice(startIdx, startIdx + 800);
+    expect(block).toMatch(/consistency is the magic ingredient/i);
+    expect(block).toMatch(/1-month pause/);
+    // PR #6 same-message commitment disclosure still holds inside the GOOD example
+    expect(block).toMatch(/3-billing-cycle commitment/);
+    expect(block).toMatch(/special schedules that need a few cycles of regular billing on either side to work/);
+  });
+
+  it('includes a GOOD example demonstrating warmth offered ONCE then dropping cleanly on refusal (PR #26 still wins)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Example GOOD (FIRST OFFER framing offered ONCE, then dropped on refusal)');
+    const startIdx = prompt.indexOf('Example GOOD (FIRST OFFER framing offered ONCE, then dropped on refusal)');
+    const block = prompt.slice(startIdx, startIdx + 1000);
+    // Member firmly refuses
+    expect(block).toMatch(/Please just cancel/i);
+    // Bot does NOT re-warmth, does NOT loss-frame, processes cleanly
+    expect(block).toMatch(/processing your cancellation now/);
+    expect(block).toMatch(/90 days from your last bill date/);
+    // The follow-up after firm refusal contains no warmth language
+    const followUp = block.slice(block.indexOf('Please just cancel'));
+    expect(followUp).not.toMatch(/healthier skin/i);
+    expect(followUp).not.toMatch(/self-care routine/i);
+    expect(followUp).not.toMatch(/skin is a long game/i);
+  });
+});
+
+describe('system prompt: PR #28 coexists with PR #26 firm-refusal short-circuit', () => {
+  it('PR #26 FIRM REFUSAL SHORT-CIRCUIT rule is still present and unchanged', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT');
+    expect(prompt).toMatch(/MUST skip the final-warning loss-framing block and process the cancellation directly/i);
+    expect(prompt).toMatch(/This rule overrides the "Final warning" tail of numbered HARD RULE 1 and Step 5 of the cancellation flow whenever a firm refusal has followed the first retention offer\./);
+  });
+
+  it('PR #28 rule explicitly states the firm-refusal short-circuit wins (no warmth after firm refusal)', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).toMatch(/Any time AFTER a firm refusal[^\n]*FIRM REFUSAL SHORT-CIRCUIT wins/);
+    expect(section).toMatch(/warmth after a firm refusal reads as additional pressure/);
+  });
+
+  it('FIRM REFUSAL SHORT-CIRCUIT section still defines firm vs non-firm canonically', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('What counts as a firm refusal');
+    expect(prompt).toMatch(/"no thank you"/);
+    expect(prompt).toMatch(/"please just cancel"/);
+    expect(prompt).toMatch(/"I don't want a pause"/);
+  });
+});
+
+describe('system prompt: PR #28 does not regress any prior PR rule', () => {
+  it('preserves PR #5 bi-monthly current-pricing rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+  });
+
+  it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('Disclose the 3-billing-cycle commitment IN THE OFFER MESSAGE');
+    expect(prompt).toContain('the 3-billing-cycle commitment applies if you accept a pause or bi-monthly billing');
+  });
+
+  it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO FABRICATED ESCALATION');
+    expect(prompt.toLowerCase()).toContain('alerted our qa team');
+    expect(prompt.toLowerCase()).toContain('flagged this as urgent');
+  });
+
+  it('preserves PR #18 NO DEFINED PROCESS HANDOFFS hard rule (broader no-defined-process handoff)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - NO DEFINED PROCESS HANDOFFS');
+    expect(prompt).toContain("I'm flagging this for our memberships team to review");
+    expect(prompt).toContain('Someone will follow up with you about next steps');
+  });
+
+  it('preserves PR #22 milestone-perk messaging rule and CREDIT VISIBILITY DISCLAIMER', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - MILESTONE DISCUSSION SCOPE');
+    expect(prompt).toMatch(/use ONLY the injected "Next Perk Milestone" \+ "Months Until Next Perk" fields/i);
+    expect(prompt).toContain('HARD RULE - CREDIT VISIBILITY DISCLAIMER');
+  });
+
+  it('preserves PR #23 ALREADY ATTEMPTED CHANNEL rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - ALREADY ATTEMPTED CHANNEL');
+    expect(prompt).toMatch(/MUST NOT redirect them back to the same channel/i);
+  });
+
+  it('preserves PR #24 FOOTPRINT-AWARE RELOCATION HANDLING rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING');
+    expect(prompt).toMatch(/MUST classify the destination as IN-FOOTPRINT or OUT-OF-FOOTPRINT BEFORE presenting any retention offer/i);
+  });
+
+  it('preserves PR #25 BILLING DISPUTE HANDLING rule', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - BILLING DISPUTE HANDLING');
+    expect(prompt).toContain('I take this seriously.');
+  });
+
+  it('preserves PR #26 FIRM REFUSAL SHORT-CIRCUIT and CREDIT VISIBILITY DISCLAIMER', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT');
+    expect(prompt).toContain('HARD RULE - CREDIT VISIBILITY DISCLAIMER');
+  });
+
+  it('preserves PR #27 standardized commitment clarification language', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toContain('There is no minimum commitment to be a member');
+    expect(prompt).toContain('The 3-billing-cycle commitment only applies if you accept a pause or switch to bi-monthly billing');
+    expect(prompt).toContain('special schedules that need a few cycles of regular billing on either side to work');
+  });
+
+  it('warmth does NOT introduce specific timeline promises (PR #18 still holds)', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    // None of the banned PR #18 timeline phrases appear in the warmth section's GOOD examples
+    // (the warmth section may reference PR #18 in the cross-reference line; that's allowed).
+    // Pull just the GOOD examples and assert no specific timelines.
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|$)/g) || [];
+    for (const good of goodExamples) {
+      expect(good).not.toMatch(/within 24 hours/i);
+      expect(good).not.toMatch(/within 48 hours/i);
+      expect(good).not.toMatch(/within 24 to 48 hours/i);
+      expect(good).not.toMatch(/by tomorrow/i);
+    }
+  });
+
+  it('warmth does NOT introduce fabricated escalation language (PR #13 still holds)', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|$)/g) || [];
+    for (const good of goodExamples) {
+      expect(good).not.toMatch(/alerted our QA team/i);
+      expect(good).not.toMatch(/flagged this as urgent/i);
+      expect(good).not.toMatch(/escalated to engineering/i);
+      expect(good).not.toMatch(/notified our technical team/i);
+      expect(good).not.toMatch(/opened a ticket/i);
+    }
+  });
+
+  it('warmth does NOT contain medical or treatment claims', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|$)/g) || [];
+    for (const good of goodExamples) {
+      expect(good).not.toMatch(/\bcure\b/i);
+      expect(good).not.toMatch(/\bdiagnos\w*/i);
+      expect(good).not.toMatch(/\btreat\w*\s+your\s+\w+/i);
+    }
+  });
+
+  it('first retention offer remains intact (warmth is permitted alongside, not replacement)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/Step 4: Present offers ONE AT A TIME from Decision Tree based on reason/i);
+    expect(prompt).toContain('1. Travel:');
+    expect(prompt).toContain('15. Cost Overwhelming');
+  });
+});
+
+describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
+  it('the FIRST OFFER POSITIVE EMOTIONAL REFRAMING section uses no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const startIdx = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('\n19. If any profile field is UNKNOWN', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx);
+    expect(section).not.toMatch(/[–—]/);
+  });
+});
