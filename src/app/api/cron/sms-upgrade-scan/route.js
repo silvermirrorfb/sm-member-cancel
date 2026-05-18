@@ -202,7 +202,10 @@ export async function GET(request) {
     return NextResponse.json(payload);
   }
 
-  const endpoint = new URL('/api/sms/automation/pre-appointment', request.url);
+  const automationBaseUrl = String(
+    process.env.SMS_AUTOMATION_BASE_URL || 'https://sm-member-cancel.vercel.app',
+  ).trim();
+  const endpoint = new URL('/api/sms/automation/pre-appointment', automationBaseUrl);
   const automationToken = String(process.env.SMS_AUTOMATION_TOKEN || '').trim();
   const now = new Date().toISOString();
 

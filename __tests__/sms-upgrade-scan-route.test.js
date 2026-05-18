@@ -38,6 +38,7 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
     process.env.SMS_CRON_LOCATIONS = 'Bryant Park,Flatiron';
     delete process.env.SMS_CRON_LOCATIONS_PER_RUN;
     delete process.env.SMS_CRON_MAX_CANDIDATES;
+    delete process.env.SMS_AUTOMATION_BASE_URL;
     scanAppointments.mockReset();
     getRegistryCounts.mockClear();
   });
@@ -138,5 +139,49 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
     const body = await res.json();
     expect(body.candidateCount).toBe(1);
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses SMS_AUTOMATION_BASE_URL when set, ignoring the inbound request host', async () => {
+    process.env.SMS_AUTOMATION_BASE_URL = 'https://override.example.com';
+    scanAppointments.mockImplementation(async (_url, _headers, ctx) => {
+      if (String(ctx.locationId).includes('Bryant')) {
+        return {
+          appointments: [
+            { id: 'a1', clientId: 'c1', clientFirstName: 'Katherine', clientLastName: 'Lee', clientEmail: 'k@example.com', clientPhone: '+15551112222', locationId: 'Bryant Park', startOn: future(2) },
+          ],
+        };
+      }
+      return { appointments: [] };
+    });
+    globalThis.fetch = vi.fn(async () => ({ json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
+
+    const { GET } = await loadRoute();
+    await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const calledUrl = String(globalThis.fetch.mock.calls[0][0]);
+    expect(calledUrl).toBe('https://override.example.com/api/sms/automation/pre-appointment');
+  });
+
+  it('falls back to https://sm-member-cancel.vercel.app when SMS_AUTOMATION_BASE_URL is unset', async () => {
+    delete process.env.SMS_AUTOMATION_BASE_URL;
+    scanAppointments.mockImplementation(async (_url, _headers, ctx) => {
+      if (String(ctx.locationId).includes('Bryant')) {
+        return {
+          appointments: [
+            { id: 'a1', clientId: 'c1', clientFirstName: 'Katherine', clientLastName: 'Lee', clientEmail: 'k@example.com', clientPhone: '+15551112222', locationId: 'Bryant Park', startOn: future(2) },
+          ],
+        };
+      }
+      return { appointments: [] };
+    });
+    globalThis.fetch = vi.fn(async () => ({ json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
+
+    const { GET } = await loadRoute();
+    await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const calledUrl = String(globalThis.fetch.mock.calls[0][0]);
+    expect(calledUrl).toBe('https://sm-member-cancel.vercel.app/api/sms/automation/pre-appointment');
   });
 });
