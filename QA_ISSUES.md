@@ -173,6 +173,27 @@ Root cause: discovery candidates already carry a verified `clientId` from the sc
 
 ---
 
+### outbound-sms #10
+**Status:** IN PROGRESS (fix branch `fix/sms-cron-transport-vercel-protection`)
+**Severity:** total outage (zero outbound SMS sends for 5 days)
+**Discovered:** 2026-05-17 (daily zero-send health-check email fired after the May 12 success counter's 3-day Redis TTL expired)
+
+**Symptom:** Zero outbound SMS sends from `/api/cron/sms-upgrade-scan` from 2026-05-12 through 2026-05-17. Cron summary log showed `summary: {sent:0, errors:0, skippedByReason: {unknown: N}}` on every run that found candidates. No `sms-sent:YYYY-MM-DD` keys in Redis (TTL 3 days), no `[sms-metrics]` warnings, no `Pre-appointment automation error` logs, and the daily health-check `EMAIL_ESCALATION` alert email finally fired today.
+
+**Root cause:** The cron at `src/app/api/cron/sms-upgrade-scan/route.js:205` built its self-fetch endpoint using `new URL('/api/sms/automation/pre-appointment', request.url)`. For a Vercel-triggered cron, `request.url` resolves to the deployment-specific hostname `sm-member-cancel-<hash>-silver-mirror-projects.vercel.app`, which has Vercel Deployment Protection (SSO) enabled. Every self-fetch returned HTTP 401 with an HTML SSO challenge page (~14KB) before the function ran. The cron's response handler (`checkOneCandidate` at lines 113-145) called `res.json().catch(() => ({}))` without checking `res.ok`, so the unparseable HTML body became `{}`, `payload?.results?.[0]` was undefined, `val.status` defaulted to `'unknown'`, and the summary builder bucketed each candidate as a skip with reason `unknown` rather than as an error.
+
+Verified externally via curl: the deployment-specific URL and the team-scoped alias both return HTTP 401 with `_vercel_sso_nonce` cookie and `content-type: text/html`. The project alias `sm-member-cancel.vercel.app` returns HTTP 405 with `x-matched-path: /api/sms/automation/pre-appointment` header, proving the route is reachable on that hostname.
+
+**Introduced by:** commit `73e2fce` on 2026-05-12, the per-location appointment discovery rewrite that replaced random-registry sampling with HTTP self-fetches. Before that commit, the cron used direct in-process calls and never made an HTTP request, so the protected host was never a factor.
+
+**Fix:** route the self-fetch through `https://sm-member-cancel.vercel.app` (the project's stable public alias, not behind Deployment Protection). Implementation reads the base URL from `process.env.SMS_AUTOMATION_BASE_URL` with that hardcoded string as the fallback. Tests added in `__tests__/sms-upgrade-scan-route.test.js` cover both the env-var override path and the hardcoded fallback path.
+
+**Verify post-deploy:** within the next 10-minute cron tick, (1) Vercel runtime logs should show fresh `POST /api/sms/automation/pre-appointment` invocations (any status code is fine, presence proves the route is now reachable), (2) `node scripts/diag-sms-daily-counts.mjs` should return a non-zero `sms-sent:YYYY-MM-DD` count for today's date in ET, and (3) the next `[sms-upgrade-scan]` summary log should show real reasons in `skippedByReason` like `klaviyo_sms_not_subscribed` or `no_appointments_available`, not `unknown`. Daily zero-send health-check email should stop firing tomorrow morning (next scheduled run at 14:00 UTC). Once verified, change status to VERIFIED FIXED.
+
+The masking chain that hid this outage for 5 days is tracked separately as cross-cutting #2. See `docs/PLAN_sms-outage-fix_2026-05-17.md`.
+
+---
+
 ## Cancel bot issues
 
 ### cancel-bot #1
