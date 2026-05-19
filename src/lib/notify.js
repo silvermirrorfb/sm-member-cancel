@@ -323,15 +323,20 @@ Fastest Path Shared With Guest: Call (888) 677-0055
   }
 }
 
-// Generic ops/alerting email (e.g. the zero-outbound-SMS health check).
-// Goes to EMAIL_ESCALATION (falls back to EMAIL_TO). Safe no-op if SMTP unconfigured.
+// Generic ops/alerting email (e.g. the zero-outbound-SMS health check,
+// the inline sms-upgrade-scan HTTP failure alert). Goes to EMAIL_OPS_ALERTS
+// with a hardcoded fallback to matt@silvermirror.com so ops alerts can never
+// silently route to a customer-facing inbox. EMAIL_ESCALATION is intentionally
+// NOT consulted here; it routes cancel bot guest escalations to the
+// memberships team and ops alerts must not piggyback on that channel.
+// Safe no-op if SMTP unconfigured.
 async function sendOpsAlertEmail({ subject, text }) {
   const host = process.env.SMTP_HOST;
   const port = parseInt(process.env.SMTP_PORT || '587', 10);
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
   const from = process.env.EMAIL_FROM || 'info@silvermirror.com';
-  const to = process.env.EMAIL_ESCALATION || process.env.EMAIL_TO || 'matt@silvermirror.com';
+  const to = process.env.EMAIL_OPS_ALERTS || 'matt@silvermirror.com';
 
   if (!host || !user || !pass) {
     console.warn('SMTP not configured — ops alert email not sent:', subject);

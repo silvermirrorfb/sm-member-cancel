@@ -1,5 +1,74 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+const sendMail = vi.fn(async () => ({}));
+const createTransport = vi.fn(() => ({ sendMail }));
+
+vi.mock('nodemailer', () => ({
+  default: { createTransport },
+  createTransport,
+}));
+
+describe('sendOpsAlertEmail recipient routing (EMAIL_OPS_ALERTS split)', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.env.SMTP_HOST = 'smtp.test';
+    process.env.SMTP_USER = 'user';
+    process.env.SMTP_PASS = 'pass';
+    process.env.SMTP_PORT = '587';
+    process.env.EMAIL_FROM = 'info@test';
+    delete process.env.EMAIL_OPS_ALERTS;
+    delete process.env.EMAIL_ESCALATION;
+    delete process.env.EMAIL_TO;
+    sendMail.mockClear();
+    createTransport.mockClear();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('routes to EMAIL_OPS_ALERTS when set', async () => {
+    process.env.EMAIL_OPS_ALERTS = 'ops@example.com';
+    process.env.EMAIL_ESCALATION = 'guest-escalation@example.com';
+    process.env.EMAIL_TO = 'memberships@example.com';
+    vi.resetModules();
+    const { sendOpsAlertEmail } = await import('../src/lib/notify.js');
+
+    const result = await sendOpsAlertEmail({ subject: 'test', text: 'body' });
+
+    expect(result.sent).toBe(true);
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0].to).toBe('ops@example.com');
+  });
+
+  it('falls back to literal matt@silvermirror.com when EMAIL_OPS_ALERTS is unset', async () => {
+    // Even with EMAIL_ESCALATION and EMAIL_TO set, ops alerts must NOT borrow those channels.
+    process.env.EMAIL_ESCALATION = 'guest-escalation@example.com';
+    process.env.EMAIL_TO = 'memberships@example.com';
+    vi.resetModules();
+    const { sendOpsAlertEmail } = await import('../src/lib/notify.js');
+
+    const result = await sendOpsAlertEmail({ subject: 'test', text: 'body' });
+
+    expect(result.sent).toBe(true);
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0].to).toBe('matt@silvermirror.com');
+  });
+
+  it('does not consult EMAIL_ESCALATION even when EMAIL_OPS_ALERTS is unset', async () => {
+    process.env.EMAIL_ESCALATION = 'hello@silvermirror.com';
+    vi.resetModules();
+    const { sendOpsAlertEmail } = await import('../src/lib/notify.js');
+
+    await sendOpsAlertEmail({ subject: 'test', text: 'body' });
+
+    expect(sendMail.mock.calls[0][0].to).not.toBe('hello@silvermirror.com');
+    expect(sendMail.mock.calls[0][0].to).toBe('matt@silvermirror.com');
+  });
+});
+
 describe('P2-2: SMTP missing does not log PII', () => {
   const originalEnv = process.env;
   let consoleLogSpy;

@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 19, 2026 (cross-cutting #6 VERIFIED FIXED via preview failure-injection)
+**Last updated:** May 19, 2026 (cross-cutting #7: split EMAIL_OPS_ALERTS from EMAIL_ESCALATION)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -667,7 +667,30 @@ Result: `summary.errors` stayed at 0 throughout the outage. Vercel runtime logs 
 
 The daily zero-send alert cron at `sms-health-check` is intentionally untouched. It is correct. After this fix it becomes the backstop, not the primary signal.
 
-**Verification:** Verified 2026-05-19 via SSO-protected URL injection on preview deployment (branch `chore/test-observability-failure-injection`, now deleted): cron returned `summary.errors=1, summary.httpStatusCodes['401']=1, summary.sent=0, errorsByReason={"http_401":1}`; one ops alert email received at EMAIL_ESCALATION; second cron tick within the same hour produced the same JSON shape but no duplicate email (Redis SET NX dedupe held).
+**Verification:** Verified 2026-05-19 via SSO-protected URL injection on preview deployment (branch `chore/test-observability-failure-injection`, now deleted): cron returned `summary.errors=1, summary.httpStatusCodes['401']=1, summary.sent=0, errorsByReason={"http_401":1}`; one ops alert email received at EMAIL_ESCALATION (rerouted to matt@ at the time, see cross-cutting #7 for the subsequent split); second cron tick within the same hour produced the same JSON shape but no duplicate email (Redis SET NX dedupe held).
+
+---
+
+### cross-cutting #7
+**Status:** FIXED IN CODE 2026-05-19 (PR pending env var provisioning)
+**Severity:** misrouted guest escalation surfaced in owner's inbox
+**Discovered:** 2026-05-19
+
+**Symptom:** A cancel bot guest escalation email ("CANCELLED - Nicole Smith - Location Closure") arrived in matt@silvermirror.com on 2026-05-19. The memberships team did not receive it. The email should have routed to hello@silvermirror.com.
+
+**Root cause:** On 2026-05-19 the production EMAIL_ESCALATION env var was rerouted from hello@silvermirror.com to matt@silvermirror.com so that the new sms-upgrade-scan HTTP failure alerts and the daily zero-send alerts (see cross-cutting #1 and #6) would surface in Matt's private inbox. The reroute was too broad: EMAIL_ESCALATION is also consumed by `sendSummaryEmail` in `src/lib/notify.js` (lines around 235), where it controls cancel bot guest escalation CC routing for upset-sentiment sessions, reaction cases, location closures, and billing disputes. Every cancel bot escalation between the reroute and the discovery silently shifted from the memberships team to Matt.
+
+**Fix:** Splits ops alerts (`EMAIL_OPS_ALERTS`) from guest escalations (`EMAIL_ESCALATION`).
+- `sendOpsAlertEmail` in `src/lib/notify.js` now reads `EMAIL_OPS_ALERTS` exclusively, with a hardcoded literal fallback to `matt@silvermirror.com` (so ops alerts can never silently route to a customer-facing inbox if the env var is missing).
+- `sendSummaryEmail` continues to read `EMAIL_ESCALATION` unchanged; `EMAIL_REACTION_ALERTS` routing is untouched.
+- `.env.example` documents both vars with comments explaining the split.
+- 3 tests added in `__tests__/notify.test.js` covering: `EMAIL_OPS_ALERTS` set, `EMAIL_OPS_ALERTS` unset (literal fallback), and the explicit non-consultation of `EMAIL_ESCALATION`.
+
+**Post-merge env changes (Matt runs in Vercel):** add `EMAIL_OPS_ALERTS=matt@silvermirror.com` to production/preview/development; revert `EMAIL_ESCALATION` to `hello@silvermirror.com` in production/preview/development; trigger a production redeploy.
+
+**Stale doc references not updated in this fix (historical records):** `QA_ISSUES.md` cross-cutting #1 says the daily zero-send alert emails `EMAIL_ESCALATION`; cross-cutting #6 verification note above refers to "EMAIL_ESCALATION"; `docs/SESSION_HANDOFF_2026-05-16.md` and `docs/PLAN_sms-outage-fix_2026-05-17.md` reference `EMAIL_ESCALATION` as the ops recipient. After this fix, both `sms-health-check` and `sms-upgrade-scan` route through `sendOpsAlertEmail`, which now reads `EMAIL_OPS_ALERTS`. The historical docs were accurate at the time of writing and are not retroactively edited.
+
+**Verification plan:** After the env var changes, Matt sends a manual escalation through the cancel bot (or waits for an organic one) and confirms hello@/memberships@ receives the email rather than matt@. Separately, the next sms-health-check or sms-upgrade-scan ops alert continues to land in matt@.
 
 ---
 
