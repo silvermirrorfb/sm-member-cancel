@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 19, 2026 (cross-cutting #7: split EMAIL_OPS_ALERTS from EMAIL_ESCALATION)
+**Last updated:** May 19, 2026 (cancel-bot #24: HARD RULE against fabricated staff names and programs; cross-cutting #7: split EMAIL_OPS_ALERTS from EMAIL_ESCALATION)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -563,6 +563,39 @@ This is NOT a customer-harm bug. The existing flow is technically correct and PR
 30 new tests in `__tests__/claude.test.js` (`system prompt: first-offer positive emotional reframing rule`, `PR #28 coexists with PR #26 firm-refusal short-circuit`, `PR #28 does not regress any prior PR rule`, `no em dashes or en dashes in PR #28 edits`) covering: rule presence, permitted-not-required framing, customer-suggestion origin citation, journey-language anchors (healthier skin / self-care routine / invest / journey), the four suggested patterns, USE list, NOT USE list with all cross-references, every guardrail individually, each BAD example for each banned context, both GOOD example shapes (warmth + offer in same message for Cost and for Inconsistent Usage), the warmth-offered-once-then-dropped GOOD example with PR #26 short-circuit firing correctly, plus preservation tests for PR #5, PR #6, PR #13, PR #18, PR #22, PR #23, PR #24, PR #25, PR #26 (FIRM REFUSAL SHORT-CIRCUIT + CREDIT VISIBILITY DISCLAIMER), PR #27, and no em/en dashes in the new section. Total test count after this PR: 528 passing across the suite (was 498 before this PR).
 
 Touch: 3 files (`src/lib/system-prompt.txt`, `__tests__/claude.test.js`, `QA_ISSUES.md`). Closes the customer-suggestion implementation for the Fernanda May 4 2026 forward.
+
+---
+
+### cancel-bot #24
+**Status:** FIXED IN CODE 2026-05-19 (commit pending). Bump to VERIFIED FIXED after the next production session that hits a service-quality complaint comes through without a cross-location lead or invented connection program.
+**Severity:** trust erosion (the memberships team has to walk back a promise the bot made about a specific named person)
+**Discovered:** 2026-05-19 (Fernanda forwarded the CANCELLED Megan Bruns case to Travis and Matt)
+
+**Production case:** CANCELLED Megan Bruns, Navy Yard, 2026-05-18. Bot transcript excerpt:
+> "One option would be connecting you with Karen, our Experience Ambassador at Navy Yard. She's specifically trained to ensure members have consistently great experiences and could work with you directly on any service concerns."
+
+Followed by:
+> "Karen would definitely value hearing your perspective."
+
+**What actually happened (corrected during cross-reference review):** Karen IS in the `LOCATION LEADS ROSTER` at lines 428-438 of `src/lib/system-prompt.txt`, BUT she is the Bryant Park lead, NOT the Navy Yard lead. The correct Navy Yard lead per the same roster is Nique. So the bot's failure was cross-location lead assignment, not pure name invention. The "specifically trained to ensure members have consistently great experiences" framing and the "could work with you directly on any service concerns" outreach promise are both fabricated connection programs with no defined Silver Mirror process behind them.
+
+Fernanda's original flag asserted (a) no staff member named Karen at Navy Yard, (b) Experience Ambassador is not a role, (c) the promised feedback call has no execution path. Items (a) and (c) are correct as stated. Item (b) is technically incorrect against the system prompt as written (Experience Ambassador is documented for 6 leads, Support Ambassador for 4 more), which surfaces a separate question for Fernanda and Travis: is the Experience/Support Ambassador program operationally real, or is it prompt fiction that should be removed entirely? That question is OUT OF SCOPE for this PR and left as follow-up.
+
+**Distinct from PR #27 (`fix/escalation-cleanup-and-commitment-clarification`):** PR #27 and the broader `HARD RULE - NO FABRICATED ESCALATION` family swept "I've alerted our QA team," "escalated to engineering," "opened a ticket," etc. Those are fabricated DEPARTMENT escalations. This rule covers a sibling pattern: "Let me connect you with [named person] at [location]" handoffs that invent a specific human, a specific title, or a connection program. The two rule families share the same false-promise root cause but the BAD/GOOD example patterns differ enough to warrant a separate rule.
+
+**Fix (this PR, commit pending):** new `HARD RULE - NO FABRICATED STAFF NAMES, ROLES, OR CONNECTION PROGRAMS` in `src/lib/system-prompt.txt`, placed between `HARD RULE - NO FABRICATED ESCALATION` and `HARD RULE - NO DEFINED PROCESS HANDOFFS` (its closest siblings). Narrow scope per Matt's 2026-05-19 decision:
+- BANS cross-location lead assignment (a roster lead may not be claimed for any location other than the one listed in the roster).
+- BANS inventing a staff name when the roster does not list one for the location.
+- BANS inventing job titles ("Member Success Manager," "Regional Director," "Customer Experience Manager," "Member Care Coordinator," "Wellness Specialist," "Brand Manager," and the open-ended class of invented roles) outside the two documented titles (Experience Ambassador, Support Ambassador).
+- BANS named-person connection programs ("would love to hear from you," "I'll have [name] reach out to you directly," "I can connect you with [name] for a feedback call," "[name] would definitely value hearing your perspective").
+- PERMITS the existing decision-tree Lead recommendation offers for reasons 4, 7, 8, 9, 10, 11, 17, 18, 20 when the roster lists a lead for the member's location.
+- PRESERVES `HARD RULE #16` ("Use lead names from roster. Never generic.") and the `LOCATION LEADS ROSTER` itself.
+
+Five BAD examples (Megan Bruns transcript verbatim, invented role and name, invented role with soft outreach, correct roster name combined with fabricated connection program, correct location with named lead permitted for decision-tree path) and three GOOD examples (decision-tree lead recommendation at correct location, no-defined-process handoff for broader feedback ask, manager-call path without named lead). 8 new tests in `__tests__/system-prompt-no-fabricated-staff.test.js`: rule presence, Megan Bruns case citation (member name + date + location), cross-location ban, invented-title bans by listed example, fabricated-connection-program ban, fallback handoff phrase, LOCATION LEADS ROSTER preserved, decision-tree Lead recommendation offers still present.
+
+Touch: 3 files (`src/lib/system-prompt.txt`, `__tests__/system-prompt-no-fabricated-staff.test.js`, `QA_ISSUES.md`).
+
+**Open follow-up (separate work, not this PR):** Confirm with Fernanda and Travis whether Experience Ambassador / Support Ambassador is a real operational program or prompt-only fiction. If the latter, the roster (lines 428-438) and the 8 decision-tree Lead recommendation offers need a separate cross-cutting fix to either rename or remove. The narrow scope of this PR was chosen specifically to avoid making that call unilaterally.
 
 ---
 
