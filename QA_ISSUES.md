@@ -174,7 +174,7 @@ Root cause: discovery candidates already carry a verified `clientId` from the sc
 ---
 
 ### outbound-sms #10
-**Status:** IN PROGRESS (fix branch `fix/sms-cron-transport-vercel-protection`)
+**Status:** VERIFIED FIXED 2026-05-18 (PR #30 `fix/sms-cron-transport-vercel-protection`, merged to main `d5c04fe`)
 **Severity:** total outage (zero outbound SMS sends for 5 days)
 **Discovered:** 2026-05-17 (daily zero-send health-check email fired after the May 12 success counter's 3-day Redis TTL expired)
 
@@ -189,6 +189,8 @@ Verified externally via curl: the deployment-specific URL and the team-scoped al
 **Fix:** route the self-fetch through `https://sm-member-cancel.vercel.app` (the project's stable public alias, not behind Deployment Protection). Implementation reads the base URL from `process.env.SMS_AUTOMATION_BASE_URL` with that hardcoded string as the fallback. Tests added in `__tests__/sms-upgrade-scan-route.test.js` cover both the env-var override path and the hardcoded fallback path.
 
 **Verify post-deploy:** within the next 10-minute cron tick, (1) Vercel runtime logs should show fresh `POST /api/sms/automation/pre-appointment` invocations (any status code is fine, presence proves the route is now reachable), (2) `node scripts/diag-sms-daily-counts.mjs` should return a non-zero `sms-sent:YYYY-MM-DD` count for today's date in ET, and (3) the next `[sms-upgrade-scan]` summary log should show real reasons in `skippedByReason` like `klaviyo_sms_not_subscribed` or `no_appointments_available`, not `unknown`. Daily zero-send health-check email should stop firing tomorrow morning (next scheduled run at 14:00 UTC). Once verified, change status to VERIFIED FIXED.
+
+**Verified 2026-05-18:** 68 sends in Redis `sms-sent:2026-05-18` counter, 30+ POST hits to `/api/sms/automation/pre-appointment` 200s in 22:00-23:30 UTC, 20+ `sms-cooldown:*` keys present (success-path-only writes).
 
 The masking chain that hid this outage for 5 days is tracked separately as cross-cutting #2. See `docs/PLAN_sms-outage-fix_2026-05-17.md`.
 
