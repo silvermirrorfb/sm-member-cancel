@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 16, 2026 (first-offer positive emotional reframing, customer suggestion implementation)
+**Last updated:** May 18, 2026 (cross-cutting #6: sms-upgrade-scan masking chain fix)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -645,6 +645,29 @@ Multiple integrations silently no-op when env vars are missing instead of failin
 No fully-isolated staging environment. Every change ships to the one production project and runs against real guest data.
 
 **Documented (`docs/STAGING.md`):** the ways to verify a change without a real send or a real conversation - `dryRun: true` on `/api/sms/automation/pre-appointment` (full pipeline, no Twilio call); synthetic mode on `/api/qa/upgrade-check` (`QA_SYNTHETIC_MODE_TOKEN` + `syntheticProfile`/`syntheticAppointments`/`syntheticCandidates`, zero Boulevard calls); the conversational evals (cross-cutting #2); Vercel preview deployments (with the caveat that they share production env vars). **Still open:** a real `sm-member-cancel-staging` Vercel project with its own env vars (Boulevard sandbox, test Twilio number or `SMS_REQUIRE_MANUAL_LIVE_APPROVAL=true`, separate Redis namespace, separate Sentry project). That requires creating a new billable project and was intentionally not done unilaterally - it's a call for whoever owns the Vercel team. See `docs/STAGING.md` "The real gap."
+
+---
+
+### cross-cutting #6
+**Status:** IN PROGRESS 2026-05-18 (PR `fix/sms-cron-observability-masking`)
+**Severity:** detection gap that hid a 5-day prod outage
+**Discovered:** 2026-05-17
+
+**Symptom:** Outbound SMS outage that started May 12 (outbound-sms #10) ran undetected until May 17 when the daily zero-send alert finally fired.
+
+**Root cause:** `checkOneCandidate` in `src/app/api/cron/sms-upgrade-scan/route.js` had four compounding observability defects:
+1. `res.json().catch(() => ({}))` swallowed HTML responses into `{}`
+2. No `res.ok` check, so 401/403/500 were treated identically to 200
+3. `ok: true` was hardcoded in the `.then` arm regardless of HTTP status
+4. The summary builder bucketed candidates with no recognized reason into `skippedByReason["unknown"]` (a skip), not as errors
+
+Result: `summary.errors` stayed at 0 throughout the outage. Vercel runtime logs showed every cron run as "ok" with `skippedByReason: {unknown: N}`. The daily zero-send alert was the only structural signal, and it took 5 days to fire.
+
+**Fix:** PR `fix/sms-cron-observability-masking` rewrote `checkOneCandidate` to check `res.ok` before parsing, route HTTP failures into the errors bucket with reason `http_<status>`, return errors for JSON parse failures with reason `non_json_response`, added a `httpStatusCodes` histogram to the summary, elevated the summary log to `console.error` when `errors > 0`, and added an inline ops email alert (rate-limited to once per hour via Redis SET NX) when a single cron run shows `sent=0` and `errors>0`.
+
+The daily zero-send alert cron at `sms-health-check` is intentionally untouched. It is correct. After this fix it becomes the backstop, not the primary signal.
+
+**Verification:** see PR description for failure-injection test against a preview deployment.
 
 ---
 

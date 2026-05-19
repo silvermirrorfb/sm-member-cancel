@@ -1,12 +1,14 @@
 export const maxDuration = 300;
 
 import { NextResponse } from 'next/server';
+import { Redis } from '@upstash/redis';
 import {
   canonicalizeBoulevardLocationId,
   getBoulevardAuthContext,
   resolveBoulevardLocationInput,
   scanAppointments,
 } from '../../../../lib/boulevard';
+import { sendOpsAlertEmail } from '../../../../lib/notify';
 import { getRegistryCounts } from '../../../../lib/sms-member-registry';
 import { isWithinSendWindow, getNextWindowStartIso } from '../../../../lib/sms-window';
 
@@ -54,6 +56,44 @@ function pickRunLocationIds(allLocationIds, perRun, nowMs = Date.now()) {
   const slots = Math.max(1, Math.ceil(allLocationIds.length / perRun));
   const slot = Math.floor(nowMs / (10 * 60 * 1000)) % slots;
   return allLocationIds.slice(slot * perRun, slot * perRun + perRun);
+}
+
+let cachedAlertRedis = null;
+function getAlertRedis() {
+  if (cachedAlertRedis) return cachedAlertRedis;
+  const url = String(process.env.UPSTASH_REDIS_REST_URL || '').trim();
+  const token = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  if (!url || !token) return null;
+  cachedAlertRedis = new Redis({ url, token });
+  return cachedAlertRedis;
+}
+
+async function maybeAlertInlineFailure(summary) {
+  const redis = getAlertRedis();
+  const hourBucket = new Date().toISOString().slice(0, 13);
+  const alertKey = `sms-error-alert:${hourBucket}`;
+  if (redis) {
+    const set = await redis.set(alertKey, '1', { nx: true, ex: 3600 });
+    if (!set) return false;
+  }
+  const subject = `[Silver Mirror] SMS cron showing HTTP errors with zero sends`;
+  const text = [
+    `The sms-upgrade-scan cron just completed a run with summary.sent=0 and summary.errors=${summary.errors}.`,
+    '',
+    `Total candidates: ${summary.total}`,
+    `Sent: ${summary.sent}`,
+    `Skipped: ${summary.skipped}`,
+    `Errors: ${summary.errors}`,
+    `errorsByReason: ${JSON.stringify(summary.errorsByReason || {})}`,
+    `skippedByReason: ${JSON.stringify(summary.skippedByReason || {})}`,
+    `httpStatusCodes: ${JSON.stringify(summary.httpStatusCodes || {})}`,
+    '',
+    'This alert is rate-limited to once per hour. Check Vercel logs for [sms-upgrade-scan] entries at error level.',
+    '',
+    'See docs/outbound-sms-system-and-issues.md and QA_ISSUES.md (outbound-sms section).',
+  ].join('\n');
+  const result = await sendOpsAlertEmail({ subject, text });
+  return result?.sent === true;
 }
 
 function dedupKeyForAppointment(a) {
@@ -110,38 +150,62 @@ async function discoverCandidates(auth, runLocationMap, nowMs) {
   return candidates;
 }
 
-function checkOneCandidate(candidate, endpoint, automationToken, now) {
-  return fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(automationToken ? { 'x-automation-token': automationToken } : {}),
-    },
-    body: JSON.stringify({
-      dryRun: false,
-      windowHours: DISCOVERY_WINDOW_HOURS,
-      candidates: [candidate],
-      trigger: 'vercel-cron-sms-upgrade-scan',
-      now,
-    }),
-    cache: 'no-store',
-  })
-    .then(res => res.json().catch(() => ({})))
-    .then(payload => {
-      const r = payload?.results?.[0] || {};
+async function checkOneCandidate(candidate, endpoint, automationToken, now) {
+  const candidateName = `${candidate.firstName} ${candidate.lastName}`.trim();
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(automationToken ? { 'x-automation-token': automationToken } : {}),
+      },
+      body: JSON.stringify({
+        dryRun: false,
+        windowHours: DISCOVERY_WINDOW_HOURS,
+        candidates: [candidate],
+        trigger: 'vercel-cron-sms-upgrade-scan',
+        now,
+      }),
+      cache: 'no-store',
+    });
+    if (!res.ok) {
       return {
-        candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
-        status: r.status || 'unknown',
-        reason: r.reason || r.offerKind || null,
-        ok: true,
+        candidate: candidateName,
+        status: 'error',
+        reason: `http_${res.status}`,
+        httpStatus: res.status,
+        ok: false,
       };
-    })
-    .catch(err => ({
-      candidate: `${candidate.firstName} ${candidate.lastName}`.trim(),
+    }
+    let payload = null;
+    try {
+      payload = await res.json();
+    } catch (parseErr) {
+      return {
+        candidate: candidateName,
+        status: 'error',
+        reason: 'non_json_response',
+        httpStatus: res.status,
+        ok: false,
+      };
+    }
+    const r = payload?.results?.[0] || {};
+    return {
+      candidate: candidateName,
+      status: r.status || 'unknown',
+      reason: r.reason || r.offerKind || null,
+      httpStatus: res.status,
+      ok: true,
+    };
+  } catch (err) {
+    return {
+      candidate: candidateName,
       status: 'error',
-      reason: err.message,
+      reason: err?.message || 'fetch_failed',
+      httpStatus: null,
       ok: false,
-    }));
+    };
+  }
 }
 
 export async function GET(request) {
@@ -227,11 +291,26 @@ export async function GET(request) {
     }
   }
 
-  const summary = { total: allResults.length, sent: 0, skipped: 0, errors: 0, skippedByReason: {} };
+  const summary = {
+    total: allResults.length,
+    sent: 0,
+    skipped: 0,
+    errors: 0,
+    skippedByReason: {},
+    errorsByReason: {},
+    httpStatusCodes: {},
+  };
   for (const val of allResults) {
+    if (val.httpStatus != null) {
+      const code = String(val.httpStatus);
+      summary.httpStatusCodes[code] = (summary.httpStatusCodes[code] || 0) + 1;
+    }
     if (val.status === 'sent') summary.sent++;
-    else if (val.status === 'error' || !val.ok) summary.errors++;
-    else {
+    else if (val.status === 'error' || !val.ok) {
+      summary.errors++;
+      const reason = val.reason || 'unknown';
+      summary.errorsByReason[reason] = (summary.errorsByReason[reason] || 0) + 1;
+    } else {
       summary.skipped++;
       const reason = val.reason || 'unknown';
       summary.skippedByReason[reason] = (summary.skippedByReason[reason] || 0) + 1;
@@ -246,6 +325,16 @@ export async function GET(request) {
     summary,
     results: allResults,
   };
-  console.log('[sms-upgrade-scan]', JSON.stringify({ runLocations: runLocationIds, candidateCount: candidates.length, summary }));
+  const summaryLogPayload = { runLocations: runLocationIds, candidateCount: candidates.length, summary };
+  if (summary.errors > 0) {
+    console.error('[sms-upgrade-scan]', JSON.stringify(summaryLogPayload));
+  } else {
+    console.log('[sms-upgrade-scan]', JSON.stringify(summaryLogPayload));
+  }
+  if (summary.sent === 0 && summary.errors > 0) {
+    await maybeAlertInlineFailure(summary).catch(err => {
+      console.error('[sms-upgrade-scan] inline alert failed:', err?.message || err);
+    });
+  }
   return NextResponse.json(payload);
 }

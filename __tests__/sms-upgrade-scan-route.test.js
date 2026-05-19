@@ -2,6 +2,10 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
 const scanAppointments = vi.fn();
 const getRegistryCounts = vi.fn(async () => ({}));
+const sendOpsAlertEmail = vi.fn(async () => ({ sent: true }));
+const redisSet = vi.fn();
+function RedisCtor() { return { set: redisSet }; }
+const RedisMock = vi.fn(RedisCtor);
 
 vi.mock('../src/lib/boulevard.js', () => ({
   scanAppointments,
@@ -17,6 +21,14 @@ vi.mock('../src/lib/sms-member-registry.js', () => ({
 vi.mock('../src/lib/sms-window.js', () => ({
   isWithinSendWindow: () => ({ allowed: true, timeZone: 'America/New_York', hour: 13, startHour: 9, endHour: 19 }),
   getNextWindowStartIso: () => new Date().toISOString(),
+}));
+
+vi.mock('../src/lib/notify.js', () => ({
+  sendOpsAlertEmail,
+}));
+
+vi.mock('@upstash/redis', () => ({
+  Redis: RedisMock,
 }));
 
 function future(hours) {
@@ -39,8 +51,13 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
     delete process.env.SMS_CRON_LOCATIONS_PER_RUN;
     delete process.env.SMS_CRON_MAX_CANDIDATES;
     delete process.env.SMS_AUTOMATION_BASE_URL;
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
     scanAppointments.mockReset();
     getRegistryCounts.mockClear();
+    sendOpsAlertEmail.mockClear();
+    redisSet.mockReset();
+    RedisMock.mockClear();
   });
 
   afterEach(() => {
@@ -68,7 +85,7 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
       const results = call === 1
         ? [{ status: 'sent', offerKind: 'addon' }]
         : [{ status: 'skipped', reason: 'klaviyo_sms_not_subscribed' }];
-      return { json: async () => ({ ok: true, results }) };
+      return { ok: true, status: 200, json: async () => ({ ok: true, results }) };
     });
 
     const { GET } = await loadRoute();
@@ -132,7 +149,7 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
       }
       return { appointments: [] };
     });
-    globalThis.fetch = vi.fn(async () => ({ json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
+    globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
 
     const { GET } = await loadRoute();
     const res = await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
@@ -153,7 +170,7 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
       }
       return { appointments: [] };
     });
-    globalThis.fetch = vi.fn(async () => ({ json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
+    globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
 
     const { GET } = await loadRoute();
     await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
@@ -175,7 +192,7 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
       }
       return { appointments: [] };
     });
-    globalThis.fetch = vi.fn(async () => ({ json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
+    globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true, results: [{ status: 'sent' }] }) }));
 
     const { GET } = await loadRoute();
     await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
@@ -183,5 +200,104 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     const calledUrl = String(globalThis.fetch.mock.calls[0][0]);
     expect(calledUrl).toBe('https://sm-member-cancel.vercel.app/api/sms/automation/pre-appointment');
+  });
+
+  it('buckets HTTP 401 response as error with reason http_401', async () => {
+    scanAppointments.mockImplementation(async (_url, _headers, ctx) => {
+      if (String(ctx.locationId).includes('Bryant')) {
+        return {
+          appointments: [
+            { id: 'a1', clientId: 'c1', clientFirstName: 'Katherine', clientLastName: 'Lee', clientEmail: 'k@example.com', clientPhone: '+15551112222', locationId: 'Bryant Park', startOn: future(2) },
+          ],
+        };
+      }
+      return { appointments: [] };
+    });
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) }));
+
+    const { GET } = await loadRoute();
+    const res = await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
+    const body = await res.json();
+
+    expect(body.summary.sent).toBe(0);
+    expect(body.summary.errors).toBe(1);
+    expect(body.summary.errorsByReason).toEqual({ http_401: 1 });
+    expect(body.summary.httpStatusCodes).toEqual({ '401': 1 });
+  });
+
+  it('buckets HTTP 500 response as error with reason http_500', async () => {
+    scanAppointments.mockImplementation(async (_url, _headers, ctx) => {
+      if (String(ctx.locationId).includes('Bryant')) {
+        return {
+          appointments: [
+            { id: 'a1', clientId: 'c1', clientFirstName: 'Katherine', clientLastName: 'Lee', clientEmail: 'k@example.com', clientPhone: '+15551112222', locationId: 'Bryant Park', startOn: future(2) },
+          ],
+        };
+      }
+      return { appointments: [] };
+    });
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) }));
+
+    const { GET } = await loadRoute();
+    const res = await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
+    const body = await res.json();
+
+    expect(body.summary.errors).toBe(1);
+    expect(body.summary.errorsByReason).toEqual({ http_500: 1 });
+    expect(body.summary.httpStatusCodes).toEqual({ '500': 1 });
+  });
+
+  it('buckets non-JSON response as error with reason non_json_response', async () => {
+    scanAppointments.mockImplementation(async (_url, _headers, ctx) => {
+      if (String(ctx.locationId).includes('Bryant')) {
+        return {
+          appointments: [
+            { id: 'a1', clientId: 'c1', clientFirstName: 'Katherine', clientLastName: 'Lee', clientEmail: 'k@example.com', clientPhone: '+15551112222', locationId: 'Bryant Park', startOn: future(2) },
+          ],
+        };
+      }
+      return { appointments: [] };
+    });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new Error('Unexpected token <'); },
+    }));
+
+    const { GET } = await loadRoute();
+    const res = await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
+    const body = await res.json();
+
+    expect(body.summary.errors).toBe(1);
+    expect(body.summary.errorsByReason).toEqual({ non_json_response: 1 });
+  });
+
+  it('fires inline alert once per hour when sent=0 and errors>0', async () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://r.test';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'tok';
+
+    scanAppointments.mockImplementation(async (_url, _headers, ctx) => {
+      if (String(ctx.locationId).includes('Bryant')) {
+        return {
+          appointments: [
+            { id: 'a1', clientId: 'c1', clientFirstName: 'Katherine', clientLastName: 'Lee', clientEmail: 'k@example.com', clientPhone: '+15551112222', locationId: 'Bryant Park', startOn: future(2) },
+          ],
+        };
+      }
+      return { appointments: [] };
+    });
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) }));
+    // First SET NX wins, second loses (key already set within the hour bucket).
+    redisSet.mockResolvedValueOnce('OK').mockResolvedValueOnce(null);
+
+    const { GET } = await loadRoute();
+    await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
+    await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
+
+    expect(redisSet).toHaveBeenCalledTimes(2);
+    expect(sendOpsAlertEmail).toHaveBeenCalledTimes(1);
+    const firstCall = redisSet.mock.calls[0];
+    expect(firstCall[0]).toMatch(/^sms-error-alert:/);
+    expect(firstCall[2]).toEqual({ nx: true, ex: 3600 });
   });
 });
