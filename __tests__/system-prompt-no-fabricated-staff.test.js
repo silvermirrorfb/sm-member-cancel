@@ -75,22 +75,12 @@ describe('cancel-bot #24: HARD RULE against fabricated staff names, roles, and c
     expect(prompt).toContain('Someone will follow up with you about next steps');
   });
 
-  it('preserves the existing LOCATION LEADS ROSTER (narrow scope, do not delete the roster)', () => {
+  it('preserves the LOCATION LEADS ROSTER as internal data (do not delete the roster)', () => {
     const prompt = readSystemPrompt();
-    // HARD RULE #16 still requires roster-based lead names. The narrow scope of
-    // this fix does not remove the roster; future cross-cutting work may.
+    // The roster itself stays in the prompt as internal reference data.
+    // HARD RULE #16 was rewritten in the follow-up PR to mark it internal-only.
     expect(prompt).toContain('LOCATION LEADS ROSTER');
     expect(prompt).toContain('Navy Yard: Nique');
     expect(prompt).toContain('Bryant Park: Karen');
-    expect(prompt).toMatch(/Use lead names from roster\. Never generic\./);
-  });
-
-  it('does not contradict the existing decision-tree Lead recommendation offers', () => {
-    const prompt = readSystemPrompt();
-    // Sanity check: the eight decision-tree paths that call for "Lead
-    // recommendation" must still be present in the prompt.
-    expect(prompt).toMatch(/4\. New Provider: Lead recommendation/);
-    expect(prompt).toMatch(/7\. Repetitive: Free add-on . Lead recommendation/);
-    expect(prompt).toMatch(/9\. No Results: .* Lead recommendation/);
   });
 });

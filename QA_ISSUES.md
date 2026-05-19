@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 19, 2026 (cancel-bot #24: HARD RULE against fabricated staff names and programs; cross-cutting #7: split EMAIL_OPS_ALERTS from EMAIL_ESCALATION)
+**Last updated:** May 19, 2026 (cancel-bot #24 follow-up: named-lead retention play removed from customer-facing flow after Travis operational clarification; cross-cutting #7: split EMAIL_OPS_ALERTS from EMAIL_ESCALATION)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -595,7 +595,18 @@ Five BAD examples (Megan Bruns transcript verbatim, invented role and name, inve
 
 Touch: 3 files (`src/lib/system-prompt.txt`, `__tests__/system-prompt-no-fabricated-staff.test.js`, `QA_ISSUES.md`).
 
-**Open follow-up (separate work, not this PR):** Confirm with Fernanda and Travis whether Experience Ambassador / Support Ambassador is a real operational program or prompt-only fiction. If the latter, the roster (lines 428-438) and the 8 decision-tree Lead recommendation offers need a separate cross-cutting fix to either rename or remove. The narrow scope of this PR was chosen specifically to avoid making that call unilaterally.
+**Open follow-up RESOLVED 2026-05-19 (Travis):** Travis (Director of Operations) confirmed: "Those are real people, but they act as lead estheticians to train our staff, they're not really consumer facing from that point of view." So the roster names ARE real internal staff, but Experience Ambassador / Support Ambassador are internal training-team designations with no operational member-outreach process behind them. The bot was using these as a customer-facing retention play that does not exist operationally.
+
+**Follow-up PR (commit pending) addresses the broader correction:**
+- Strips "(Experience Ambassador)" and "(Support Ambassador)" from any customer-facing path (the roster data at lines 428-438 of `src/lib/system-prompt.txt` stays as internal reference data).
+- Removes "Lead recommendation" as a retention offer from every decision-tree path where it appeared: Reasons 4 (New Provider), 7 (Repetitive), 8 (Esthetician Turnover), 9 (No Results), 10 (No Personalized Plan), 11 (Reaction), 13 (Inexperienced Esthetician), 17 (Medical), 18 (Inconsistent Experience), 20 (Lack of Value). Also strips "Free add-on with lead," "Free facial with lead," and "Lead for calming" qualifiers wherever they appeared.
+- Adds new `HARD RULE - SERVICE QUALITY DISCOVERY STEP` for vague service-quality complaints (Reasons 12 Front Desk Issues, 13 Inexperienced Esthetician, 18 Inconsistent Experience): bot asks ONE open-ended follow-up before retention or handoff. If the member declines, bot does not ask again.
+- Rewrites HARD RULE #16. Old: "Use lead names from roster. Never generic." New: marks the LOCATION LEADS ROSTER as internal-only, bans naming specific leads in member-facing output, bans surfacing the two titles in member-facing output, bans named-lead connection offers. Cites Travis 2026-05-19 by date.
+- Updates the 244978f HARD RULE PERMITTED section (removes the two named-lead allowances) and GOOD examples (no longer recommend "Vanessa, our Experience Ambassador at Flatiron"). The 244978f rule itself is preserved.
+- 10 new tests in `__tests__/system-prompt-no-named-leads.test.js`: "Lead recommendation" removed from decision tree, "with lead" qualifiers removed, HARD RULE #16 rewritten, SERVICE QUALITY DISCOVERY STEP added, PERMITTED section updated, GOOD examples updated, all 20 reasons preserved, service-quality reasons reference the discovery rule, roster preserved as internal data, 244978f rule preserved.
+- 1 test removed and 1 updated in `__tests__/system-prompt-no-fabricated-staff.test.js` (the "preserves decision-tree Lead recommendation offers" assertion and the "Use lead names from roster" assertion are now obsolete).
+
+Net effect on the cancellation flow: vague service-quality complaints now route through a discovery question + decision-tree offer that does not involve a named human; structured complaints with specifics route through the same decision-tree offers without a named lead. The memberships team handles all named-staff follow-up downstream of the session summary email. Test suite: 554 passing (was 545 after 244978f; net +9 from this PR after offsetting removed assertions).
 
 ---
 
