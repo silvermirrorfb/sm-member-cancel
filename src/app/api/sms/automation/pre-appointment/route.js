@@ -851,7 +851,7 @@ export async function POST(request) {
         }
       } catch (e) {
         // Fail open: don't block a legitimate send if Redis flaps.
-        console.warn('[pre-appointment] stop-set check error:', e.message);
+        console.error('[pre-appointment] stop-set check error:', e?.message, e?.stack);
       }
       if (onStopSet) {
         results.push({
