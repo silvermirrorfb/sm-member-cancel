@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 18, 2026 (cross-cutting #6: sms-upgrade-scan masking chain fix)
+**Last updated:** May 19, 2026 (cross-cutting #6 VERIFIED FIXED via preview failure-injection)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -649,7 +649,7 @@ No fully-isolated staging environment. Every change ships to the one production 
 ---
 
 ### cross-cutting #6
-**Status:** IN PROGRESS 2026-05-18 (PR `fix/sms-cron-observability-masking`)
+**Status:** VERIFIED FIXED 2026-05-19 (PR #31 `fix/sms-cron-observability-masking`, merged to main `1bb7d96`)
 **Severity:** detection gap that hid a 5-day prod outage
 **Discovered:** 2026-05-17
 
@@ -667,7 +667,7 @@ Result: `summary.errors` stayed at 0 throughout the outage. Vercel runtime logs 
 
 The daily zero-send alert cron at `sms-health-check` is intentionally untouched. It is correct. After this fix it becomes the backstop, not the primary signal.
 
-**Verification:** see PR description for failure-injection test against a preview deployment.
+**Verification:** Verified 2026-05-19 via SSO-protected URL injection on preview deployment (branch `chore/test-observability-failure-injection`, now deleted): cron returned `summary.errors=1, summary.httpStatusCodes['401']=1, summary.sent=0, errorsByReason={"http_401":1}`; one ops alert email received at EMAIL_ESCALATION; second cron tick within the same hour produced the same JSON shape but no duplicate email (Redis SET NX dedupe held).
 
 ---
 
