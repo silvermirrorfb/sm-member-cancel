@@ -24,7 +24,10 @@ const PREP_BUFFER_50MIN = Number(process.env.PREP_BUFFER_50MIN || 10);
 const PREP_BUFFER_90MIN = Number(process.env.PREP_BUFFER_90MIN || 10);
 const SMS_ADDON_MIN_GAP_MINUTES = Number(process.env.SMS_ADDON_MIN_GAP_MINUTES || 5);
 const ENABLE_UPGRADE_MUTATION = process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
-const ENABLE_CANCEL_REBOOK_FALLBACK = process.env.BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK === 'true';
+// Production SMS must never cancel an existing booking as an automatic fallback.
+const ENABLE_CANCEL_REBOOK_FALLBACK =
+  process.env.NODE_ENV !== 'production' &&
+  process.env.BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK === 'true';
 const UUID_V4_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ADDON_SERVICE_ID_ENV_BY_CODE = Object.freeze({
   antioxidant_peel: 'BOULEVARD_ADDON_SERVICE_ID_ANTIOXIDANT_PEEL',
