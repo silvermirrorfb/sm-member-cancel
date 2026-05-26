@@ -117,6 +117,42 @@ const DETECTORS = [
 const ADDRESS_CONTEXT_RE =
   /\b(address|street|st\.?|avenue|ave\.?|road|rd\.?|building|apt|apartment|unit|floor|zip code|postal code)\b/i;
 
+// Location aliases per Matt's 2026-05-26 spec. Ordered: more-specific aliases
+// first so "Upper East Side" wins over a partial "East". Match is
+// case-insensitive. If multiple locations match, the first one in the list
+// wins and a console warning is logged.
+const LOCATION_ALIASES = [
+  { name: 'Bryant Park', pattern: /\bbryant park\b/i },
+  { name: 'Manhattan West', pattern: /\bmanhattan west\b/i },
+  { name: 'Upper East Side', pattern: /\b(upper east side|UES)\b/i },
+  { name: 'Upper West Side', pattern: /\b(upper west side|UWS)\b/i },
+  { name: 'Coral Gables', pattern: /\bcoral gables\b/i },
+  { name: 'Dupont Circle', pattern: /\bdupont(?:\s+circle)?\b/i },
+  { name: 'Penn Quarter', pattern: /\bpenn quarter\b/i },
+  { name: 'Navy Yard', pattern: /\bnavy yard\b/i },
+  { name: 'Flatiron', pattern: /\bflatiron\b/i },
+  { name: 'Brickell', pattern: /\bbrickell\b/i },
+];
+
+/**
+ * Best-effort location extraction from free-form user text. Returns a
+ * canonical location name or null. Per Matt's 2026-05-26 spec, if a message
+ * mentions multiple locations the first listed in LOCATION_ALIASES wins and
+ * a warning is logged.
+ */
+export function extractLocationFromMessage(message) {
+  if (typeof message !== 'string' || !message.trim()) return null;
+  const matches = LOCATION_ALIASES.filter((loc) => loc.pattern.test(message));
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    console.warn(
+      'booking-error-telemetry: multiple locations matched in message; using first',
+      { matched: matches.map((m) => m.name), used: matches[0].name },
+    );
+  }
+  return matches[0].name;
+}
+
 /**
  * Returns { subcategory } if the user message matches a known booking-error
  * symptom, else null. Pure function; no side effects.
@@ -145,19 +181,38 @@ export function detectBookingError(rawMessage) {
 // PII scrubbing
 // ----------------------------------------------------------------------------
 
+// Card number: any 13-19 digit sequence with optional space/dash separators.
+// Covers Visa (16), Mastercard (16), Amex (15), Discover (16), JCB (16-19),
+// Diners (14). Anchored to non-digit context so phone-like 10-digit numbers
+// (scrubbed separately) don't slip through. Per /codex review 2026-05-26:
+// this scrubber MUST exist because card_payment is one of the most likely
+// firing categories and guests routinely paste their card number.
+const CARD_NUMBER_RE = /(?<!\d)(?:\d[ \-]?){13,19}(?!\d)/g;
+// CVV / CVC: 3-4 digits in proximity to "cvv", "cvc", "security code",
+// "card code", "verification code". Bounded to a small window so we don't
+// scrub unrelated 3-4 digit runs (years, suite numbers).
+const CVV_RE = /\b(cvv|cvc|security code|card code|verification code)\b[^\d]{0,8}\d{3,4}\b/gi;
 const PHONE_RE =
   /(\+?\d{1,2}[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b/g;
 const EMAIL_RE = /\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g;
 
 /**
- * Strips phone numbers and email addresses from a free-form text field.
+ * Strips phone numbers, email addresses, credit card PANs, and CVVs from a
+ * free-form text field. Order matters: card numbers are scrubbed before
+ * phones (a 16-digit card has a 10-digit suffix that would otherwise match
+ * the phone regex).
+ *
  * Names typed by the user in free-form text are not scrubbed (too brittle to
  * detect reliably); name FIELDS from the session profile are simply not
  * included in the event payload. See PII rules in the file header.
  */
 export function scrubPII(text) {
   if (typeof text !== 'string') return '';
-  return text.replace(PHONE_RE, '[redacted-phone]').replace(EMAIL_RE, '[redacted-email]');
+  return text
+    .replace(CARD_NUMBER_RE, '[redacted-card]')
+    .replace(CVV_RE, '[redacted-cvv]')
+    .replace(PHONE_RE, '[redacted-phone]')
+    .replace(EMAIL_RE, '[redacted-email]');
 }
 
 // ----------------------------------------------------------------------------
@@ -274,9 +329,16 @@ export async function recordBookingError({
     const extras = {
       session_id: sessionId,
       user_message: scrubPII(userMessage || ''),
-      bot_response: scrubPII(botResponse || ''),
       timestamp: new Date().toISOString(),
     };
+    // bot_response is included only when known. Per /codex review 2026-05-26
+    // P1 #2, we fire on detection (before the bot has responded) so multiple
+    // early-return chat-handler paths still emit events. The full transcript
+    // is correlatable via session_id in the Cancellations Sheet, so an empty
+    // bot_response here is acceptable.
+    if (botResponse && typeof botResponse === 'string' && botResponse.trim()) {
+      extras.bot_response = scrubPII(botResponse);
+    }
     if (location && typeof location === 'string') {
       extras.location = location;
     }

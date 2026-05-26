@@ -3,6 +3,7 @@ import {
   detectBookingError,
   scrubPII,
   recordBookingError,
+  extractLocationFromMessage,
   SUBCATEGORIES,
   __setRedisForTests,
   __setCaptureMessageForTests,
@@ -94,6 +95,57 @@ describe('detectBookingError: one match per symptom category', () => {
 });
 
 // ----------------------------------------------------------------------------
+// Location extraction (codex P2 #3 follow-up per Matt 2026-05-26)
+// ----------------------------------------------------------------------------
+
+describe('extractLocationFromMessage', () => {
+  it('extracts "Flatiron" from "Flatiron promo code invalid"', () => {
+    expect(extractLocationFromMessage('Flatiron promo code invalid')).toBe('Flatiron');
+  });
+
+  it('extracts "Upper East Side" from "Why won\'t UES let me book"', () => {
+    expect(extractLocationFromMessage("Why won't UES let me book")).toBe('Upper East Side');
+    expect(extractLocationFromMessage('UWS site is broken')).toBe('Upper West Side');
+  });
+
+  it('returns null when no location is mentioned', () => {
+    expect(extractLocationFromMessage('My card was declined')).toBeNull();
+    expect(extractLocationFromMessage('promo code invalid')).toBeNull();
+  });
+
+  it('is case-insensitive', () => {
+    expect(extractLocationFromMessage('FLATIRON site is down')).toBe('Flatiron');
+    expect(extractLocationFromMessage('the bryant park widget is broken')).toBe('Bryant Park');
+  });
+
+  it('matches every documented location alias', () => {
+    expect(extractLocationFromMessage('Bryant Park promo code invalid')).toBe('Bryant Park');
+    expect(extractLocationFromMessage('Manhattan West site down')).toBe('Manhattan West');
+    expect(extractLocationFromMessage('Coral Gables card declined')).toBe('Coral Gables');
+    expect(extractLocationFromMessage('Dupont Circle can\'t book')).toBe('Dupont Circle');
+    expect(extractLocationFromMessage('At Dupont my code is invalid')).toBe('Dupont Circle');
+    expect(extractLocationFromMessage('Penn Quarter site won\'t load')).toBe('Penn Quarter');
+    expect(extractLocationFromMessage('Navy Yard payment failed')).toBe('Navy Yard');
+    expect(extractLocationFromMessage('Brickell promo not working')).toBe('Brickell');
+  });
+
+  it('returns the FIRST listed location when a message mentions multiple', () => {
+    // LOCATION_ALIASES order: Bryant Park > Manhattan West > UES > UWS >
+    // Coral Gables > Dupont > Penn Quarter > Navy Yard > Flatiron > Brickell.
+    expect(
+      extractLocationFromMessage('Bryant Park and Flatiron both have the same issue'),
+    ).toBe('Bryant Park');
+  });
+
+  it('returns null on empty / non-string input', () => {
+    expect(extractLocationFromMessage('')).toBeNull();
+    expect(extractLocationFromMessage(null)).toBeNull();
+    expect(extractLocationFromMessage(undefined)).toBeNull();
+    expect(extractLocationFromMessage(123)).toBeNull();
+  });
+});
+
+// ----------------------------------------------------------------------------
 // PII scrubbing (acceptance criterion #9.4)
 // ----------------------------------------------------------------------------
 
@@ -108,6 +160,30 @@ describe('scrubPII', () => {
   it('redacts email addresses', () => {
     expect(scrubPII('Email me at jane.doe@example.com please')).toContain('[redacted-email]');
     expect(scrubPII('hello@silvermirror.com is the way')).toContain('[redacted-email]');
+  });
+
+  it('redacts credit card numbers in common formats (per /codex review P1)', () => {
+    // 16-digit Visa/MC/Discover, various separators
+    expect(scrubPII('Card 4111 1111 1111 1111 was declined')).toContain('[redacted-card]');
+    expect(scrubPII('Card 4111-1111-1111-1111 declined')).toContain('[redacted-card]');
+    expect(scrubPII('Card 4111111111111111 declined')).toContain('[redacted-card]');
+    // 15-digit Amex
+    expect(scrubPII('Amex 3782 822463 10005 declined')).toContain('[redacted-card]');
+    // The original digits must NOT survive in any form
+    expect(scrubPII('Card 4111 1111 1111 1111 declined')).not.toMatch(/4111.{0,4}1111/);
+  });
+
+  it('redacts CVV/CVC when in context', () => {
+    expect(scrubPII('cvv 123')).toContain('[redacted-cvv]');
+    expect(scrubPII('CVC: 4567')).toContain('[redacted-cvv]');
+    expect(scrubPII('security code is 999')).toContain('[redacted-cvv]');
+    expect(scrubPII('verification code 042')).toContain('[redacted-cvv]');
+  });
+
+  it('leaves benign 3-4 digit runs alone (years, suite numbers)', () => {
+    // CVV scrubber must require context; bare 3-4 digit runs are not scrubbed.
+    expect(scrubPII('I joined in 2024')).toBe('I joined in 2024');
+    expect(scrubPII('Suite 405')).toBe('Suite 405');
   });
 
   it('leaves benign text intact', () => {
@@ -180,9 +256,38 @@ describe('recordBookingError', () => {
     expect(opts.extra.user_message).toBe('My card keeps getting rejected');
     expect(opts.extra.location).toBe('Flatiron');
     expect(typeof opts.extra.timestamp).toBe('string');
-    // bot_response is scrubbed: the phone number is redacted.
+    // bot_response is included only when provided; here it is, scrubbed.
     expect(opts.extra.bot_response).not.toContain('888');
     expect(opts.extra.bot_response).toContain('[redacted-phone]');
+  });
+
+  it('omits bot_response from extras when not provided (post /codex P1 #2 fix)', async () => {
+    // The chat route now fires on detection (before bot has responded), so
+    // botResponse is intentionally not passed. The event must still fire and
+    // the extras object must NOT carry a bot_response key (omitted, not "").
+    const result = await recordBookingError({
+      sessionId: 'sess-no-botresp-1',
+      userMessage: 'card declined',
+      subcategory: SUBCATEGORIES.CARD_PAYMENT,
+    });
+    expect(result.fired).toBe(true);
+    const { extra } = captured[0].opts;
+    expect(extra).not.toHaveProperty('bot_response');
+    expect(extra.session_id).toBe('sess-no-botresp-1');
+    expect(extra.user_message).toBe('card declined');
+  });
+
+  it('scrubs credit card PAN and CVV from user_message before sending to Sentry (per /codex review P1 #1)', async () => {
+    await recordBookingError({
+      sessionId: 'sess-pci-1',
+      userMessage: 'Card declined: 4111 1111 1111 1111 cvv 123',
+      subcategory: SUBCATEGORIES.CARD_PAYMENT,
+    });
+    const { extra } = captured[0].opts;
+    expect(extra.user_message).not.toMatch(/4111/);
+    expect(extra.user_message).not.toMatch(/1111 1111/);
+    expect(extra.user_message).toContain('[redacted-card]');
+    expect(extra.user_message).toContain('[redacted-cvv]');
   });
 
   it('rate-limits: second call with same session+subcategory does NOT fire', async () => {
