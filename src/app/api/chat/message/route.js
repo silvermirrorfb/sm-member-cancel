@@ -17,6 +17,11 @@ import {
     reverifyAndApplyUpgradeForProfile,
 } from '../../../../lib/boulevard';
 import { logChatMessages, logSupportIncident } from '../../../../lib/notify';
+import {
+    detectBookingError,
+    recordBookingError,
+    extractLocationFromMessage,
+} from '../../../../lib/booking-error-telemetry';
 import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
@@ -685,6 +690,37 @@ export async function POST(request) {
 
       // Sanitize user input \u2014 strip system tags to prevent injection
       const sanitizedMessage = stripAllSystemTags(message);
+      // Booking-error telemetry: classify the inbound message against the
+      // six known production-bug symptom categories so engineering gets a
+      // Sentry signal when bots route guests to phone/email for booking
+      // problems. Fire is silent and does not change user-facing behavior.
+      // Per /codex review 2026-05-26 P1 #2, fire right after detection (not
+      // at the tail return) so multiple early-return paths (pause-credit
+      // FAQ, unresolved-issue escalation, support-incident fast path) still
+      // emit events. bot_response is omitted from the payload at this
+      // point \u2014 engineers correlate via session_id to the Cancellations
+      // Sheet transcript. await is intentional: Vercel serverless can
+      // freeze the invocation on response return, dropping fire-and-forget
+      // promises (codex P2 #4). recordBookingError is internally fail-safe
+      // so the await never throws.
+      const bookingErrorDetection = detectBookingError(sanitizedMessage);
+      if (bookingErrorDetection) {
+            // Location priority per Matt 2026-05-26: memberProfile > text
+            // extraction > null. Covers identified members AND anonymous
+            // messages that name a location (e.g., "Flatiron promo code
+            // invalid").
+            const profileLocation =
+                  session.memberProfile?.location ||
+                  session.memberProfile?.home_location ||
+                  null;
+            const location = profileLocation || extractLocationFromMessage(sanitizedMessage);
+            await recordBookingError({
+                  sessionId,
+                  userMessage: sanitizedMessage,
+                  location,
+                  subcategory: bookingErrorDetection.subcategory,
+            });
+      }
       const userFingerprint = normalizeUserTurnFingerprint(sanitizedMessage);
       const lastProcessedUserAtMs = session.lastProcessedUserAt
         ? new Date(session.lastProcessedUserAt).getTime()
