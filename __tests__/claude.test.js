@@ -1923,6 +1923,46 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
   });
 });
 
+describe('system prompt: Phase 3 already-tried-channel escalates to memberships team not phone', () => {
+  function alreadyAttemptedChannelSection() {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - ALREADY ATTEMPTED CHANNEL:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING:', ruleStart);
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(nextRuleStart).toBeGreaterThan(ruleStart);
+    return prompt.slice(ruleStart, nextRuleStart);
+  }
+
+  it('the rule exists and contains the standard handoff phrase', () => {
+    const section = alreadyAttemptedChannelSection();
+    expect(section).toMatch(/flagging this for our memberships team to review/i);
+    expect(section).toMatch(/Someone will follow up with you about next steps/i);
+  });
+
+  it('the phone-attempted block explicitly bans suggesting (888) 677-0055 as a next step', () => {
+    const section = alreadyAttemptedChannelSection();
+    expect(section).toMatch(/do NOT suggest calling \(888\) 677-0055/i);
+  });
+
+  it('every GOOD example in the rule routes to memberships team, never to (888) 677-0055', () => {
+    const section = alreadyAttemptedChannelSection();
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|Example BAD|HARD RULE -|$)/g) || [];
+    expect(goodExamples.length).toBeGreaterThanOrEqual(3);
+    for (const good of goodExamples) {
+      expect(good).toMatch(/memberships team/i);
+      expect(good).not.toMatch(/\(888\) 677-0055/);
+      expect(good).not.toMatch(/888-677-0055/);
+    }
+  });
+
+  it('the GOOD examples do not redirect to email when the member already tried email', () => {
+    const section = alreadyAttemptedChannelSection();
+    const goodAfterEmailAttempt = section.match(/Member: "I've been trying to cancel via email[\s\S]*?(?=Example|HARD RULE -|$)/);
+    expect(goodAfterEmailAttempt).not.toBeNull();
+    expect(goodAfterEmailAttempt[0]).not.toMatch(/memberships@silvermirror\.com|hello@silvermirror\.com/i);
+  });
+});
+
 describe('system prompt: Phase 2 three-category member discount structure', () => {
   it('MEMBER PERKS section presents the three discount tiers as distinct lines', () => {
     const prompt = getSystemPrompt();
