@@ -4278,20 +4278,20 @@ function formatProfileForPrompt(profile) {
     `Name: ${profile.name}`, `Email: ${profile.email}`, `Phone: ${profile.phone || 'Not provided'}`,
     `Location: ${profile.location || 'UNKNOWN'}`,
     `Client Record Created: ${profile.clientSince || 'UNKNOWN'}`,
-    `Membership Tier: ${profile.tier ? `${profile.tier}-Minute (known)` : 'UNKNOWN — do not state tier'}`,
-    `Monthly Rate: ${isFiniteNumber(profile.monthlyRate) && profile.monthlyRate > 0 ? `$${profile.monthlyRate}/month` : 'UNKNOWN — do not state monthly rate'}`,
-    `Member Since: ${profile.memberSince || 'UNKNOWN — do not state join date/tenure'}`,
-    `Tenure: ${isFiniteNumber(profile.tenureMonths) ? (profile.tenureMonths === 0 ? 'Less than 1 month (just joined)' : `${profile.tenureMonths} months`) : 'UNKNOWN — do not state tenure'}`,
+    `Membership Tier: ${profile.tier ? `${profile.tier}-Minute (known)` : 'UNKNOWN, do not state tier'}`,
+    `Monthly Rate: ${isFiniteNumber(profile.monthlyRate) && profile.monthlyRate > 0 ? `$${profile.monthlyRate}/month` : 'UNKNOWN, do not state monthly rate'}`,
+    `Member Since: ${profile.memberSince || 'UNKNOWN, do not state join date/tenure'}`,
+    `Tenure: ${isFiniteNumber(profile.tenureMonths) ? (profile.tenureMonths === 0 ? 'Less than 1 month (just joined)' : `${profile.tenureMonths} months`) : 'UNKNOWN, do not state tenure'}`,
     `Next Charge Date: ${profile.nextChargeDate || 'UNKNOWN'}`,
     `Account Status: ${profile.accountStatus || 'UNKNOWN'}`,
     `Appointment Count: ${isFiniteNumber(profile.appointmentCount) ? profile.appointmentCount : 'UNKNOWN'}`,
     '',
     `Current New-Member Rate: ${isFiniteNumber(c.currentNewMemberRate) ? `$${c.currentNewMemberRate}/month` : 'UNKNOWN'}`,
-    `Rate Difference: ${isFiniteNumber(c.rateDiff) ? (c.rateDiff > 0 ? `$${c.rateDiff}/month ($${c.rateLockAnnual}/year) in grandfathered savings` : 'Rate matches current pricing') : 'UNKNOWN — do not mention rate lock savings'}`,
+    `Rate Difference: ${isFiniteNumber(c.rateDiff) ? (c.rateDiff > 0 ? `$${c.rateDiff}/month ($${c.rateLockAnnual}/year) in grandfathered savings` : 'Rate matches current pricing') : 'UNKNOWN, do not mention rate lock savings'}`,
     `Total Membership Dues Paid: ${isFiniteNumber(profile.totalDuesPaid) ? `$${profile.totalDuesPaid}` : 'UNKNOWN'}`,
     `Total Retail Purchases: ${isFiniteNumber(profile.totalRetailPurchases) ? `$${profile.totalRetailPurchases}` : 'UNKNOWN'}`,
     `Total Add-on Purchases: ${isFiniteNumber(profile.totalAddonPurchases) ? `$${profile.totalAddonPurchases}` : 'UNKNOWN'}`,
-    `Member Discount Savings: ${isFiniteNumber(c.memberDiscountSavingsTotal) ? `$${c.memberDiscountSavingsTotal}${c.discountSavingsConfidence === 'estimated_simple_20pct' ? ' (estimated as 20% of known spend)' : (c.discountSavingsConfidence === 'estimated' ? ' (estimated from known purchase totals)' : '')}` : 'UNKNOWN — do not mention total discount savings'}`,
+    `Member Discount Savings: ${isFiniteNumber(c.memberDiscountSavingsTotal) ? `$${c.memberDiscountSavingsTotal}${c.discountSavingsConfidence === 'estimated_simple_20pct' ? ' (estimated as 20% of known spend)' : (c.discountSavingsConfidence === 'estimated' ? ' (estimated from known purchase totals)' : '')}` : 'UNKNOWN, do not mention total discount savings'}`,
     `Service Discount Savings: ${isFiniteNumber(c.serviceDiscountSavings) ? `$${c.serviceDiscountSavings}` : 'UNKNOWN'}`,
     `Retail Discount Savings: ${isFiniteNumber(c.retailDiscountSavings) ? `$${c.retailDiscountSavings}` : 'UNKNOWN'}`,
     `Add-on Discount Savings: ${isFiniteNumber(c.addonDiscountSavings) ? `$${c.addonDiscountSavings}` : 'UNKNOWN'}`,
@@ -4302,21 +4302,32 @@ function formatProfileForPrompt(profile) {
     `Average Visits/Month: ${isFiniteNumber(profile.avgVisitsPerMonth) ? profile.avgVisitsPerMonth : 'UNKNOWN'}`,
     `Last Visit: ${profile.lastVisitDate || 'Unknown'}`, `Most Purchased Add-on: ${profile.mostPurchasedAddon || 'None'}`,
     `Upcoming Appointments: ${profile.upcomingAppointments.length > 0 ? profile.upcomingAppointments.join(', ') : 'None'}`,
-    '', `Walk-in Savings: ${isFiniteNumber(c.walkinSavings) ? `$${c.walkinSavings} saved vs. walk-in pricing` : 'UNKNOWN — do not mention walk-in savings'}`,
+    '', `Walk-in Savings: ${isFiniteNumber(c.walkinSavings) ? `$${c.walkinSavings} saved vs. walk-in pricing` : 'UNKNOWN, do not mention walk-in savings'}`,
     `Walk-in Price for Tier: ${isFiniteNumber(c.walkinPrice) ? `$${c.walkinPrice}/facial` : 'UNKNOWN'}`,
-    '', `Loyalty Points: ${profile.loyaltyEnrolled === true && isFiniteNumber(profile.loyaltyPoints) ? `${profile.loyaltyPoints} points` : 'UNKNOWN — do not mention loyalty points'}`,
+    '', `Loyalty Points: ${profile.loyaltyEnrolled === true && isFiniteNumber(profile.loyaltyPoints) ? `${profile.loyaltyPoints} points` : 'UNKNOWN, do not mention loyalty points'}`,
   ];
-  if (c.loyaltyRedeemable) lines.push(`Loyalty Redeemable: ${c.loyaltyRedeemable.service} (${c.loyaltyRedeemable.points} points = $${c.loyaltyRedeemable.value} value)`);
+  // Loyalty redemption: strip the "= $XX value" retail-equivalent annotation per
+  // HARD RULE - NO PERK DOLLAR VALUES. The point cost and service name are
+  // operational truth; the dollar value is unverified retail-equivalent and the
+  // same source-of-truth risk that motivated the static-table strip in Phase 4
+  // of the decision audit (commit 5980dbc) applies here.
+  if (c.loyaltyRedeemable) lines.push(`Loyalty Redeemable: ${c.loyaltyRedeemable.service} (${c.loyaltyRedeemable.points} points)`);
   if (c.loyaltyNextTier) lines.push(`Next Loyalty Tier: ${c.loyaltyNextTier.pointsNeeded} more points for ${c.loyaltyNextTier.service}`);
   lines.push('', `Unused Credits: ${isFiniteNumber(profile.unusedCredits) ? profile.unusedCredits : 'UNKNOWN'}`);
   if (profile.lastBillDate) lines.push(`Last Bill Date: ${profile.lastBillDate} (credits expire 90 days after this)`);
   lines.push('', `Perks Already Claimed: ${profile.perksClaimed.length > 0 ? profile.perksClaimed.join(', ') : 'None'}`);
+  // Next perk milestone: strip the "($XX value)" annotation per HARD RULE - NO PERK
+  // DOLLAR VALUES. The perk NAME and MONTH are operational truth; the dollar value
+  // is unverified and the same risk that motivated the Phase 4 static-table strip
+  // (commit 5980dbc) applies to the runtime-injected version. Enhancement Credit
+  // dollar amounts are preserved because they live inside the perk NAME field
+  // (e.g., "$50 Enhancement Credit") which IS the perk identity, not an annotation.
+  // Em dashes in the perk name (from the PERK_MILESTONES source table) are
+  // defensively replaced with commas so the injected profile complies with the
+  // global no-em-dash rule the prompt enforces.
   if (c.nextPerk && isFiniteNumber(profile.tenureMonths)) {
-    if (isFiniteNumber(c.nextPerk.value) && c.nextPerk.value > 0) {
-      lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name} ($${c.nextPerk.value} value)`);
-    } else {
-      lines.push(`Next Perk Milestone: Month ${c.nextPerk.month} — ${c.nextPerk.name}`);
-    }
+    const safeName = String(c.nextPerk.name || '').replace(/\s+[–—]\s+/g, ', ');
+    lines.push(`Next Perk Milestone: Month ${c.nextPerk.month}, ${safeName}`);
     lines.push(`Months Until Next Perk: ${c.nextPerk.month - profile.tenureMonths}`);
   }
   return lines.join('\n');
