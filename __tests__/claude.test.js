@@ -2396,3 +2396,173 @@ describe('system prompt: Phase 1 finance-team / memberships-team billing dispute
     }
   });
 });
+
+describe('system prompt: HARD RULE - PREGNANCY AND MEDICAL SAFETY CLAIMS (QA sweep 2026-05-28 A5.1)', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - PREGNANCY AND MEDICAL SAFETY CLAIMS:');
+    const end = prompt.indexOf('KNOWLEDGE BASE: SKINCARE ADVICE', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the rule exists with required structure', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/explicit pregnancy-safe list/i);
+    expect(section).toMatch(/Triggers/i);
+    expect(section).toMatch(/Banned phrasings/i);
+    expect(section).toMatch(/What the bot MAY say/i);
+    expect(section).toMatch(/Example BAD/);
+    expect(section).toMatch(/Example GOOD/);
+  });
+
+  it('cites the 2026-05-28 QA sweep dermaplaning regression', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/2026-05-28 QA sweep/);
+    expect(section).toMatch(/dermaplaning/i);
+    expect(section).toMatch(/Yes, dermaplaning is safe during pregnancy/);
+  });
+
+  it('explicit pregnancy-safe list names only the four pre-cleared items', () => {
+    const section = ruleSection();
+    const listStart = section.indexOf('The explicit pregnancy-safe list');
+    const listEnd = section.indexOf('For ANY other service', listStart);
+    expect(listStart).toBeGreaterThan(-1);
+    expect(listEnd).toBeGreaterThan(listStart);
+    const list = section.slice(listStart, listEnd);
+    expect(list).toMatch(/Sensitive Skin Facial/);
+    expect(list).toMatch(/Signature Facial/);
+    expect(list).toMatch(/Lymphatic Facial/);
+    expect(list).toMatch(/Custom Jelly Mask/);
+    // Dermaplaning explicitly NOT on the list
+    expect(list).not.toMatch(/Dermaplaning/i);
+  });
+
+  it('banned phrasings include the canonical "Yes, X is safe during pregnancy" form', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Yes, \[service\] is safe during pregnancy/);
+    expect(section).toMatch(/\[service\] is pregnancy-safe/);
+    expect(section).toMatch(/no chemicals involved, so it's safe/);
+  });
+
+  it('banned phrasings include the D2 third-party authority-cave pattern (QA sweep 2026-05-28 D2)', () => {
+    const section = ruleSection();
+    // The D2 failure: bot accepted "my dermatologist cleared it" and confirmed safety.
+    expect(section).toMatch(/Accepting a third-party authority claim as sufficient/);
+    expect(section).toMatch(/since your \[dermatologist \/ OB \/ doctor \/ midwife \/ provider\] has already cleared it for you specifically, you're all set/);
+    expect(section).toMatch(/if your \[provider\] said it's fine, you're good to go/);
+    // The required redirect: acknowledge without ratifying, route to esthetician
+    expect(section).toMatch(/please share that with your esthetician at the start of your appointment/);
+    expect(section).toMatch(/I am not able to confirm medical safety on the bot's authority either way/);
+  });
+
+  it('GOOD examples route to confirming with esthetician / qualified provider', () => {
+    const section = ruleSection();
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|Example BAD|This rule|HARD RULE|---)/g) || [];
+    expect(goodExamples.length).toBeGreaterThanOrEqual(2);
+    // The dermaplaning GOOD example must route to esthetician/medical provider
+    const dermGood = goodExamples.find(ex => /dermaplaning/i.test(ex));
+    expect(dermGood).toBeDefined();
+    expect(dermGood).toMatch(/qualified medical provider|esthetician/i);
+    expect(dermGood).not.toMatch(/Yes,.*safe during pregnancy/i);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+});
+
+describe('system prompt: HARD RULE - BI-MONTHLY PRESERVES ALL MEMBER BENEFITS (QA sweep 2026-05-28 A6)', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - BI-MONTHLY PRESERVES ALL MEMBER BENEFITS:');
+    const end = prompt.indexOf('\n18. FALLBACK:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the rule exists with required structure', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/BILLING-FREQUENCY change only/i);
+    expect(section).toMatch(/What stays the same on bi-monthly/i);
+    expect(section).toMatch(/What actually changes on bi-monthly/i);
+    expect(section).toMatch(/Banned phrasings/i);
+    expect(section).toMatch(/Example BAD/);
+    expect(section).toMatch(/Example GOOD/);
+  });
+
+  it('cites the 2026-05-28 QA sweep bi-monthly perk-exclusion regression', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/20% off add-ons, products, loyalty points, and milestone rewards that bi-monthly doesn't include/);
+  });
+
+  it('"What stays the same" list covers all member benefits', () => {
+    const section = ruleSection();
+    const staysIdx = section.indexOf('What stays the same on bi-monthly');
+    const changesIdx = section.indexOf('What actually changes on bi-monthly', staysIdx);
+    expect(staysIdx).toBeGreaterThan(-1);
+    expect(changesIdx).toBeGreaterThan(staysIdx);
+    const staysBlock = section.slice(staysIdx, changesIdx);
+    expect(staysBlock).toMatch(/20% off services/);
+    expect(staysBlock).toMatch(/20% off Silver Mirror products/);
+    expect(staysBlock).toMatch(/10% off non-Silver Mirror retail/);
+    expect(staysBlock).toMatch(/Loyalty Points Program/);
+    expect(staysBlock).toMatch(/Milestone Rewards/);
+    expect(staysBlock).toMatch(/Exclusive Member Events/);
+  });
+
+  it('"What actually changes" list names the four real differences including the billed-amount change', () => {
+    const section = ruleSection();
+    const changesIdx = section.indexOf('What actually changes on bi-monthly');
+    const bannedIdx = section.indexOf('Banned phrasings', changesIdx);
+    expect(changesIdx).toBeGreaterThan(-1);
+    expect(bannedIdx).toBeGreaterThan(changesIdx);
+    const changesBlock = section.slice(changesIdx, bannedIdx);
+    expect(changesBlock).toMatch(/Billing schedule shifts/);
+    expect(changesBlock).toMatch(/One included facial per billing cycle/);
+    expect(changesBlock).toMatch(/3-billing-cycle commitment/);
+    // Post-codex P2: the bot must disclose the per-cycle dollar amount change
+    expect(changesBlock).toMatch(/BILLED AMOUNT per charge becomes the fixed bi-monthly rate/);
+    expect(changesBlock).toMatch(/grandfathered monthly rate is REPLACED/);
+    expect(changesBlock).toMatch(/50-minute member.*goes UP to \$169/);
+    expect(changesBlock).toMatch(/MUST disclose the billed-amount change/);
+  });
+
+  it('GOOD example covering pregnancy sourcing distinguishes catalog vs concern-mapping label', () => {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - PREGNANCY AND MEDICAL SAFETY CLAIMS:');
+    const end = prompt.indexOf('KNOWLEDGE BASE: SKINCARE ADVICE', start);
+    const section = prompt.slice(start, end);
+    // Pregnancy sourcing GOOD example should NOT claim Signature is catalog-labeled pregnancy-safe
+    expect(section).toMatch(/Sensitive Skin Facial and Lymphatic Facial are explicitly labeled pregnancy-safe in our service catalog/);
+    expect(section).toMatch(/Signature Facial is also listed as a confirmed-safe option in our skin-concern mapping/);
+    expect(section).not.toMatch(/Sensitive Skin Facial, Signature Facial, or Lymphatic Facial, which are explicitly pregnancy-safe in our catalog/);
+  });
+
+  it('banned phrasings cover the canonical fabricated-exclusion forms', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Bi-monthly doesn't include/);
+    expect(section).toMatch(/Monthly memberships include.*that bi-monthly doesn't/);
+    expect(section).toMatch(/stripped-down/);
+    expect(section).toMatch(/more limited than monthly/);
+  });
+
+  it('GOOD examples explicitly preserve perks in their wording', () => {
+    const section = ruleSection();
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|Example BAD|$)/g) || [];
+    expect(goodExamples.length).toBeGreaterThanOrEqual(2);
+    for (const good of goodExamples) {
+      expect(good).toMatch(/member benefits|perks/i);
+      expect(good).not.toMatch(/bi-monthly doesn't include/i);
+      expect(good).not.toMatch(/that bi-monthly doesn't/i);
+    }
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+});
