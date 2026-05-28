@@ -558,35 +558,51 @@ function namesLikelyMatch(requestedName, candidateFirstName, candidateLastName) 
   if (reqFirst === candFirst && candTokens.includes(reqLast)) return true;
   if (candFirst === reqFirst && reqTokens.includes(candLast)) return true;
 
-  // Hyphenated last names: Boulevard sometimes stores "Hamrick-Down" as
-  // "Hamrick Down" (tokenized to two tokens) or as "Hamrick" alone, and
-  // search comes in either form. Match if first name aligns AND the
-  // hyphen-split parts of either side overlap with the other side's
-  // last-name tokens.
+  // Hyphenated last names. Only match when:
+  //   a) Both sides hyphenated and any part overlaps (hyphen-on-hyphen drift)
+  //   b) Both sides effectively have the same multi-part last name, just one
+  //      side uses hyphen and the other uses space ("Hamrick-Down" vs
+  //      "Hamrick Down"): require all parts overlap.
+  //   c) Bare-side last name equals the FIRST PART of the hyphenated side
+  //      (the informal short-form convention: "Hamrick-Down" -> "Hamrick").
+  //      Codex flagged that the previous "any-part overlap" rule matched
+  //      "Smith" against "O'Brien-Smith", which is a different surname.
+  //      First-part-only is the safer cultural convention.
   if (reqFirst === candFirst) {
     const reqLastParts = hyphenSplit(reqLast);
     const candLastParts = hyphenSplit(candLast);
     const reqLastTokens = reqTokens.slice(1);
     const candLastTokens = candTokens.slice(1);
-    if (reqLastParts.length > 1) {
-      const set = new Set(reqLastParts);
-      if (candLastTokens.some(t => set.has(t))) return true;
+    if (reqLastParts.length > 1 && candLastParts.length > 1) {
+      const reqSet = new Set(reqLastParts);
+      if (candLastParts.some(p => reqSet.has(p))) return true;
     }
-    if (candLastParts.length > 1) {
-      const set = new Set(candLastParts);
-      if (reqLastTokens.some(t => set.has(t))) return true;
+    if (reqLastParts.length > 1 && candLastTokens.length >= 2) {
+      const reqSet = new Set(reqLastParts);
+      if (candLastTokens.every(t => reqSet.has(t))) return true;
     }
+    if (candLastParts.length > 1 && reqLastTokens.length >= 2) {
+      const candSet = new Set(candLastParts);
+      if (reqLastTokens.every(t => candSet.has(t))) return true;
+    }
+    // Bare-side match against the FIRST part of the hyphenated side.
+    if (reqLastParts.length > 1 && candLast === reqLastParts[0]) return true;
+    if (candLastParts.length > 1 && reqLast === candLastParts[0]) return true;
   }
 
-  // Strict fuzzy. Two rules:
-  //   1) Same FIRST exact + close LAST (lev<=2). Catches common surname typos
-  //      and Boulevard rename drift. "Maureen Golga" vs "Maureen Golgs" matches
-  //      (lev=1); "Maureen Golga" vs "Maureen Gomez" (lev=3) does NOT.
-  //   2) Same LAST exact + close FIRST, with length-aware threshold:
-  //      lev<=1 always, lev=2 only when the longer first name is >=5 chars.
-  //      This lets "Sofia"/"Sophia" (lev=2, len 5/6) match while rejecting
-  //      "Sam"/"Pat" (lev=2, len 3/3) which are clearly different people.
-  if (reqFirst === candFirst && levenshtein(reqLast, candLast) <= 2) return true;
+  // Strict fuzzy. Both rules now length-aware (per codex P1):
+  //   1) Same FIRST exact + close LAST. lev<=1 always; lev=2 only when the
+  //      longer last name is >=5 chars. Catches "Maureen Golga"/"Maureen
+  //      Golgs" (lev=1) and "Catherine Hamrik"/"Catherine Hamrick" (lev=1,
+  //      len 7), while rejecting "Amy Li"/"Amy Wu" (lev=2, len 2).
+  //   2) Same LAST exact + close FIRST, with the same length-aware threshold.
+  //      Lets "Sofia"/"Sophia" (lev=2, len 5/6) match while rejecting
+  //      "Sam"/"Pat" (lev=2, len 3/3).
+  if (reqFirst === candFirst) {
+    const lastLev = levenshtein(reqLast, candLast);
+    if (lastLev <= 1) return true;
+    if (lastLev <= 2 && Math.max(reqLast.length, candLast.length) >= 5) return true;
+  }
   if (reqLast === candLast) {
     const firstLev = levenshtein(reqFirst, candFirst);
     if (firstLev <= 1) return true;

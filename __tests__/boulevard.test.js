@@ -2387,5 +2387,22 @@ describe('namesLikelyMatch edge cases (Bug 3)', () => {
       // to a safer path (phone/email/disambiguation prompt).
       expect(namesLikelyMatch('Catherine', 'Catherine', 'Hamrick')).toBe(false);
     });
+
+    it('rejects short, unrelated surnames under same-first rule (codex P1)', () => {
+      // lev("li","wu")=2 but len=2; without length-awareness this matched.
+      expect(namesLikelyMatch('Amy Li', 'Amy', 'Wu')).toBe(false);
+      // lev("li","lu")=1 is still a typo and SHOULD match (single char).
+      expect(namesLikelyMatch('Amy Li', 'Amy', 'Lu')).toBe(true);
+    });
+
+    it('rejects bare surname against hyphenated where bare is NOT the first part (codex P1)', () => {
+      // "Smith" must not match "O'Brien-Smith" -- different family. The
+      // first-part-only rule preserves the legitimate "Hamrick-Down" ->
+      // "Hamrick" short-form match while blocking this case.
+      expect(namesLikelyMatch('John Smith', 'John', "O'Brien-Smith")).toBe(false);
+      expect(namesLikelyMatch("John O'Brien-Smith", 'John', 'Smith')).toBe(false);
+      // Sanity: the first-part form still matches.
+      expect(namesLikelyMatch("John O'Brien-Smith", 'John', "O'Brien")).toBe(true);
+    });
   });
 });
