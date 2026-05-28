@@ -1923,6 +1923,107 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
   });
 });
 
+describe('system prompt: Phase 4 perk dollar values stripped + HARD RULE banning quoted amounts', () => {
+  it('MEMBER PERKS MILESTONES table has no "$XX value" annotations', () => {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('MEMBER PERKS MILESTONES:');
+    const end = prompt.indexOf('HARD RULE - MILESTONE DISCUSSION SCOPE:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const table = prompt.slice(start, end);
+    expect(table).not.toMatch(/\$\d+ value/);
+    expect(table).not.toMatch(/\$\d+\+ value/);
+    expect(table).not.toMatch(/\$\d+-\$\d+/);
+    // Perk names and timing still present
+    expect(table).toMatch(/Month 2: Moisturizer/);
+    expect(table).toMatch(/Month 4: Hyaluronic Acid Serum/);
+    expect(table).toMatch(/Month 9: Cleanser/);
+    expect(table).toMatch(/Month 12: Foundational Formulas Bundle/);
+    // Enhancement Credit dollar amounts preserved (they ARE the perk)
+    expect(table).toMatch(/Month 22: \$50 Enhancement Credit/);
+    expect(table).toMatch(/Month 42: Year 3\.5 Mid-Year, \$50 Enhancement Credit/);
+  });
+
+  it('LOYALTY POINTS redemption list has no value annotations', () => {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('LOYALTY POINTS:');
+    const end = prompt.indexOf('FACIAL PACKAGES (alternative to membership)', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = prompt.slice(start, end);
+    expect(section).not.toMatch(/\$\d+ value/);
+    expect(section).toMatch(/500 pts: Extra Extractions/);
+    expect(section).toMatch(/8,000 pts: Premier Contour Facial/);
+  });
+
+  it('Benjamin GOOD example no longer quotes "worth $77" for the Month 4 perk', () => {
+    const prompt = getSystemPrompt();
+    const benjaminIdx = prompt.indexOf('Example GOOD response: User says "Unless you give me free months');
+    expect(benjaminIdx).toBeGreaterThan(-1);
+    const benjamin = prompt.slice(benjaminIdx, benjaminIdx + 1000);
+    expect(benjamin).not.toMatch(/Hyaluronic Acid Serum worth \$77/);
+    expect(benjamin).toMatch(/Hyaluronic Acid Serum/); // perk name preserved
+    expect(benjamin).toMatch(/Month 4 perk/); // timing preserved
+  });
+
+  it('Christina BAD example no longer quotes "$41 value" for the Month 9 perk', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - CREDIT VISIBILITY DISCLAIMER:', ruleStart);
+    const section = prompt.slice(ruleStart, nextRuleStart);
+    expect(section).not.toMatch(/Cleanser, \$41 value/);
+    expect(section).toMatch(/Month 9 perk \(Cleanser\)/);
+  });
+
+  it('Zoe BAD enumeration in MILESTONE DISCUSSION SCOPE no longer quotes dollar values', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - MILESTONE DISCUSSION SCOPE:');
+    const ruleEnd = prompt.indexOf('HARD RULE - NO PERK DOLLAR VALUES:', ruleStart);
+    const section = prompt.slice(ruleStart, ruleEnd);
+    expect(section).not.toMatch(/Month 2 Moisturizer \(\$65 value\)/);
+    expect(section).not.toMatch(/\$77 value/);
+    expect(section).not.toMatch(/\$183 value/);
+    expect(section).toMatch(/Month 2 Moisturizer, Month 4 Hyaluronic Acid Serum/);
+  });
+
+  it('HARD RULE - NO PERK DOLLAR VALUES exists with required structure', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - NO PERK DOLLAR VALUES:');
+    const ruleEnd = prompt.indexOf('COMPUTED VALUES:', ruleStart);
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(ruleEnd).toBeGreaterThan(ruleStart);
+    const rule = prompt.slice(ruleStart, ruleEnd);
+    expect(rule).toMatch(/MUST NOT quote specific dollar values/i);
+    expect(rule).toMatch(/Triggers/i);
+    expect(rule).toMatch(/What the bot MAY say/i);
+    expect(rule).toMatch(/What the bot MUST NOT say/i);
+    expect(rule).toMatch(/\$50 Enhancement Credit/); // exception documented
+    expect(rule).toMatch(/Example BAD/);
+    expect(rule).toMatch(/Example GOOD/);
+  });
+
+  it('HARD RULE - NO PERK DOLLAR VALUES has no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - NO PERK DOLLAR VALUES:');
+    const ruleEnd = prompt.indexOf('COMPUTED VALUES:', ruleStart);
+    const rule = prompt.slice(ruleStart, ruleEnd);
+    expect(rule).not.toMatch(/[–—]/);
+  });
+
+  it('global scan: no "$XX value" tied to a perk name in any non-banned-list region', () => {
+    const prompt = getSystemPrompt();
+    // Scan the whole prompt for the pattern "(\$XX value)" or "worth \$XX"
+    // and assert any match sits inside a banned-list block or an "Example BAD" block.
+    const valueMatches = [...prompt.matchAll(/\(\$\d+(?:\+|-\$\d+)? value\)|worth \$\d+/g)];
+    for (const match of valueMatches) {
+      const before = prompt.slice(Math.max(0, match.index - 500), match.index);
+      const inBannedRegion =
+        /Example BAD|BANNED|MUST NOT|banned/i.test(before);
+      expect(inBannedRegion).toBe(true);
+    }
+  });
+});
+
 describe('system prompt: Phase 3 already-tried-channel escalates to memberships team not phone', () => {
   function alreadyAttemptedChannelSection() {
     const prompt = getSystemPrompt();
