@@ -1923,6 +1923,84 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
   });
 });
 
+describe('system prompt: Phase 5 HARD RULE - NO HUMAN-TEAM SLA PROMISES', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - NO HUMAN-TEAM SLA PROMISES:');
+    const end = prompt.indexOf('HARD RULE - NO FABRICATED STAFF NAMES, ROLES, OR CONNECTION PROGRAMS:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the umbrella rule exists with the required structure', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Banned timeline patterns/i);
+    expect(section).toMatch(/Banned outcome patterns/i);
+    expect(section).toMatch(/Banned action patterns/i);
+    expect(section).toMatch(/GOOD pattern/i);
+    expect(section).toMatch(/What this rule DOES allow/i);
+    expect(section).toMatch(/Cross-references/i);
+  });
+
+  it('banned timeline list includes the Sindhura "within 24 to 48 hours" pattern and other common windows', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/within 24 hours/);
+    expect(section).toMatch(/within 48 hours/);
+    expect(section).toMatch(/within 24 to 48 hours/);
+    expect(section).toMatch(/by tomorrow/);
+    expect(section).toMatch(/by end of (day|week)/);
+  });
+
+  it('the GOOD pattern section contains the canonical "Someone will follow up" phrasing', () => {
+    const section = ruleSection();
+    const goodPatternIdx = section.indexOf('GOOD pattern');
+    const allowIdx = section.indexOf('What this rule DOES allow', goodPatternIdx);
+    expect(goodPatternIdx).toBeGreaterThan(-1);
+    expect(allowIdx).toBeGreaterThan(goodPatternIdx);
+    const goodPatternBlock = section.slice(goodPatternIdx, allowIdx);
+    expect(goodPatternBlock).toMatch(/Someone will follow up with you about next steps/);
+    expect(goodPatternBlock).toMatch(/will follow up/);
+  });
+
+  it('Sindhura BAD/GOOD example pair is present', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Sindhura case/);
+    expect(section).toMatch(/My credits disappeared during my pause/);
+    expect(section).toMatch(/within 24 to 48 hours to resolve this/);
+    const goodMatches = section.match(/Example GOOD \(Sindhura case[\s\S]*?(?=Example|HARD RULE)/);
+    expect(goodMatches).not.toBeNull();
+    expect(goodMatches[0]).toMatch(/Someone will follow up with you about next steps/);
+    expect(goodMatches[0]).not.toMatch(/within 24/);
+  });
+
+  it('rule allows defined policies (30-day processing, 90-day credit validity)', () => {
+    const section = ruleSection();
+    const allowIdx = section.indexOf('What this rule DOES allow');
+    const crossIdx = section.indexOf('Cross-references', allowIdx);
+    const allowBlock = section.slice(allowIdx, crossIdx);
+    expect(allowBlock).toMatch(/30 days/);
+    expect(allowBlock).toMatch(/90 days/);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('global scan: every "within 24" or "within 48" reference sits inside a banned-list, BAD example, or rule body context', () => {
+    const prompt = getSystemPrompt();
+    const matches = [...prompt.matchAll(/within (24|48|24 to 48|24-48) hours?/gi)];
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      const before = prompt.slice(Math.max(0, match.index - 600), match.index);
+      const inAcceptableContext =
+        /Example BAD|Banned|MUST NOT|MUST not|no specific/i.test(before);
+      expect(inAcceptableContext).toBe(true);
+    }
+  });
+});
+
 describe('system prompt: Phase 4 perk dollar values stripped + HARD RULE banning quoted amounts', () => {
   it('MEMBER PERKS MILESTONES table has no "$XX value" annotations', () => {
     const prompt = getSystemPrompt();
