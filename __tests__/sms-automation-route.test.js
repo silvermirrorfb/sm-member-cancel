@@ -620,6 +620,7 @@ describe('sms automation route', () => {
   });
 
   it('supports add-on offers with non-member pricing', async () => {
+    process.env.SMS_ENABLE_ADDON_FALLBACK = 'true'; // add-on offers require the env kill switch ON
     mockLookupMember.mockResolvedValue({
       clientId: 'client-9',
       phone: '+19175550000',
@@ -677,6 +678,7 @@ describe('sms automation route', () => {
   });
 
   it('uses the refined add-on copy for Lip Plump and Scrub', async () => {
+    process.env.SMS_ENABLE_ADDON_FALLBACK = 'true'; // add-on offers require the env kill switch ON
     mockLookupMember.mockResolvedValue({
       clientId: 'client-10',
       phone: '+19175550001',
@@ -937,18 +939,28 @@ describe('sms automation route', () => {
     expect(body.results[0].offerKind).not.toBe('addon');
   });
 
-  it('with enableAddonFallback=true in body: explicit offerType=addon still proceeds (regression)', async () => {
-    process.env.SMS_ENABLE_ADDON_FALLBACK = 'false'; // env says off
+  it('with enableAddonFallback=true in body but env=false: addon stays blocked (kill switch cannot be bypassed by a request flag)', async () => {
+    process.env.SMS_ENABLE_ADDON_FALLBACK = 'false'; // kill switch off
     mockHappyAddonPath();
-    const res = await POST(buildExplicitAddonRequest({ enableAddonFallback: true })); // body override wins
+    const res = await POST(buildExplicitAddonRequest({ enableAddonFallback: true })); // body flag must NOT re-enable
     const body = await res.json();
     expect(res.status).toBe(200);
-    expect(body.results[0].status).toBe('dry_run');
-    expect(body.results[0].offerKind).toBe('addon');
+    expect(body.results[0].offerKind).not.toBe('addon');
+    expect(body.results[0].status).toBe('skipped');
   });
 
-  it('with SMS_ENABLE_ADDON_FALLBACK unset: existing default (true) still allows addon (regression)', async () => {
+  it('with SMS_ENABLE_ADDON_FALLBACK unset: addon is OFF (fail-closed default)', async () => {
     delete process.env.SMS_ENABLE_ADDON_FALLBACK;
+    mockHappyAddonPath();
+    const res = await POST(buildExplicitAddonRequest());
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.results[0].offerKind).not.toBe('addon');
+    expect(body.results[0].status).toBe('skipped');
+  });
+
+  it('with SMS_ENABLE_ADDON_FALLBACK=true env: explicit offerType=addon builds the addon offer (Path 2 enabled path)', async () => {
+    process.env.SMS_ENABLE_ADDON_FALLBACK = 'true';
     mockHappyAddonPath();
     const res = await POST(buildExplicitAddonRequest());
     const body = await res.json();

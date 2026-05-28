@@ -3,7 +3,7 @@
 **Audience:** Matt, with eyes on the system. This runbook assumes the four PRs from the Path 1 plan (Bug 4 scanAppointments retry, Bug 3 member-discoverability, Step 0.5 webhook phone-index, SMS_ENABLE_ADDON_FALLBACK gate extension) are MERGED to main and the Vercel deploys have completed.
 
 **Path 1 definition:**
-- `SMS_ENABLE_ADDON_FALLBACK=false` MUST be explicitly set in Vercel production. The default if unset is `true` (line 391 of `src/app/api/sms/automation/pre-appointment/route.js`), so unset means addon offers ON. Path 1 requires the explicit `false` setting; this runbook checks for it.
+- `SMS_ENABLE_ADDON_FALLBACK` is the add-on kill switch and is fail-closed: unset or `false` means add-on offers are OFF, and no per-request flag can override an OFF env. Path 1 needs add-on offers OFF, so leaving it unset is safe; setting `false` explicitly is belt-and-suspenders. It must NOT be `true` for Path 1.
 - `SMS_CRON_ENABLED=true` (the flip below). Duration-upgrade offers flow.
 - `BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK=false`. Plus the code guard at `src/lib/boulevard.js:26` walls the destructive-mutation path regardless.
 - `SMS_REQUIRE_MANUAL_LIVE_APPROVAL` is your choice (off = direct send, on = each send queued for manual approval before Twilio call).
@@ -15,7 +15,7 @@ Before flipping the cron, verify every one of these:
 - [ ] All four Path 1 PRs are MERGED to main (in addition to the cancel-bot PRs #34-#37 from earlier 2026-05-28)
 - [ ] Vercel dashboard shows the latest main commit deployed green on production
 - [ ] `vercel env ls production --scope silver-mirror-projects` shows all of:
-  - `SMS_ENABLE_ADDON_FALLBACK=false` (REQUIRED — explicit)
+  - `SMS_ENABLE_ADDON_FALLBACK` is unset or `false` (NOT `true`; fail-closed default is OFF)
   - `BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK=false`
   - `SMS_CRON_ENABLED=false` (still off — you flip it later in Step 2)
   - `SMS_AUTOMATION_TOKEN`, `SMS_UPGRADE_STATUS=live`, `SMS_CRON_LOCATIONS` (non-empty)
@@ -91,8 +91,8 @@ curl -s https://sm-member-cancel.vercel.app/api/sms/automation/pre-appointment \
 
 ### If you see addon offers being built (gate not firing)
 
-- Confirm `vercel env ls production | grep SMS_ENABLE_ADDON_FALLBACK` shows `false`
-- If it shows `true` or is missing, set it: `vercel env add SMS_ENABLE_ADDON_FALLBACK production --value false --yes` then `vercel --prod --yes` and wait for redeploy
+- Confirm `vercel env ls production | grep SMS_ENABLE_ADDON_FALLBACK` does NOT show `true` (unset or `false` are both OFF; fail-closed)
+- If it shows `true`, turn it off: `vercel env rm SMS_ENABLE_ADDON_FALLBACK production --yes` (or re-add with `--value false`) then `vercel --prod --yes` and wait for redeploy
 - Re-run dry-run 2
 
 If the gate still doesn't fire after a verified env var and deploy, do NOT flip the cron. Open an issue with the dry-run output attached.
@@ -160,7 +160,7 @@ Outbound SMS stops on the next cron tick (worst case 10 minutes from rollback). 
 
 **For a deeper rollback** (e.g., the gate extension itself misbehaved): revert the gate-extension PR via the GitHub UI, redeploy, then flip the cron again.
 
-**For an addon-only rollback** (e.g., addon offers are firing when they shouldn't): set `SMS_ENABLE_ADDON_FALLBACK=false` (it should already be set, but verify with `vercel env ls`) and redeploy. This blocks addons without stopping duration upgrades.
+**For an addon-only rollback** (e.g., addon offers are firing when they shouldn't, which means the env is `true`): set `SMS_ENABLE_ADDON_FALLBACK=false` or remove it entirely (unset is also OFF), then redeploy. This blocks addons without stopping duration upgrades.
 
 ## Open questions for Matt (resolve before or during go-live)
 
@@ -176,4 +176,4 @@ Outbound SMS stops on the next cron tick (worst case 10 minutes from rollback). 
 | Bug 4 retry | `fetchBoulevardGraphQL` retries 429/5xx/network errors with exponential backoff (bounded by `BOULEVARD_FETCH_MAX_RETRIES`, default 2) | Boulevard's burst limits don't translate to terminal cron failures anymore |
 | Bug 3 namesLikelyMatch | Hardens the false-positive surface in member-discoverability matching | Fewer false `member_not_found` skip reasons in the funnel; more eligible guests reach the consent gate |
 | Step 0.5 phone-index | Webhook resolves inbound SMS by Redis phone-index instead of Boulevard per-message | YES/NO reply round-trip latency drops; fewer Boulevard calls per inbound webhook |
-| SMS_ENABLE_ADDON_FALLBACK extension | Explicit addon requests now honor the gate; setting the var to false blocks all addon paths | Path 1 ships with duration-upgrade offers only; addon offers are Path 2 (later) |
+| SMS_ENABLE_ADDON_FALLBACK extension | Explicit addon requests now honor the gate, and the env is a fail-closed hard cap (unset or false = OFF, no per-request override) | Path 1 ships with duration-upgrade offers only; addon offers are Path 2 (later) |
