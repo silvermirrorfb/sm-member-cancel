@@ -2,6 +2,11 @@ import { Redis } from '@upstash/redis';
 
 const REGISTRY_PREFIX = 'sms-registry:loc:';
 const REGISTRY_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+const PHONE_INDEX_KEY = 'sms-registry:phone-index';
+// PHONE_INDEX_KEY is a Redis HASH: key = last-10-digit phone, value = JSON
+// {clientId, locationId, updatedAt}. Populated by sms-registry-seed cron.
+// Used by the Twilio webhook for O(1) phone→clientId resolution so it doesn't
+// hit the 15-50s findClientsByPhoneScan path that causes Twilio ERR:11200.
 
 let cachedRedis = null;
 let cachedRedisSignature = '';
@@ -94,8 +99,67 @@ async function removeMemberByPhone(phone) {
     }
   } while (cursor !== '0' && cursor !== 0);
 
+  // Also remove from the phone index so subsequent webhook lookups don't
+  // find a stale entry for a number that was just opted out.
+  await deletePhoneIndexEntry(phone);
+
   console.log(`[sms-registry] Removed ${removed} entries for phone ${normalizedPhone}`);
   return removed > 0;
+}
+
+function normalizePhoneForIndex(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length < 10) return null;
+  return digits.slice(-10);
+}
+
+async function setPhoneIndexEntry(phone, clientId, canonicalLocationId) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const key = normalizePhoneForIndex(phone);
+  if (!key || !clientId) return false;
+  const value = JSON.stringify({
+    clientId,
+    locationId: canonicalLocationId || null,
+    updatedAt: new Date().toISOString(),
+  });
+  try {
+    await redis.hset(PHONE_INDEX_KEY, { [key]: value });
+    return true;
+  } catch (e) {
+    console.error('[sms-registry] setPhoneIndexEntry failed:', e.message);
+    return false;
+  }
+}
+
+async function lookupClientIdByPhoneFromIndex(phone) {
+  const redis = getRedis();
+  if (!redis) return null;
+  const key = normalizePhoneForIndex(phone);
+  if (!key) return null;
+  try {
+    const raw = await redis.hget(PHONE_INDEX_KEY, key);
+    if (!raw) return null;
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed?.clientId) return null;
+    return parsed;
+  } catch (e) {
+    console.warn('[sms-registry] lookupClientIdByPhoneFromIndex error:', e.message);
+    return null; // fail-open so caller falls through
+  }
+}
+
+async function deletePhoneIndexEntry(phone) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const key = normalizePhoneForIndex(phone);
+  if (!key) return false;
+  try {
+    await redis.hdel(PHONE_INDEX_KEY, key);
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 async function getRegistryCounts(canonicalLocationIds) {
@@ -194,4 +258,8 @@ export {
   isOnStopSet,
   removeFromStopSet,
   STOP_SET_KEY,
+  PHONE_INDEX_KEY,
+  setPhoneIndexEntry,
+  lookupClientIdByPhoneFromIndex,
+  deletePhoneIndexEntry,
 };
