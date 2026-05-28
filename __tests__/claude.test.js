@@ -2123,6 +2123,18 @@ describe('system prompt: Phase 5 HARD RULE - NO HUMAN-TEAM SLA PROMISES', () => 
     expect(allowBlock).toMatch(/90 days/);
   });
 
+  it('rule explicitly carves out the defined session-end confirmation email path (codex review P2 fix)', () => {
+    const section = ruleSection();
+    const allowIdx = section.indexOf('What this rule DOES allow');
+    const crossIdx = section.indexOf('Cross-references', allowIdx);
+    const allowBlock = section.slice(allowIdx, crossIdx);
+    expect(allowBlock).toMatch(/Defined session-end confirmation emails/);
+    expect(allowBlock).toMatch(/confirmation email will be sent/);
+    expect(allowBlock).toMatch(/processConversationEnd/);
+    expect(allowBlock).toMatch(/without promising a specific timeline/);
+    expect(allowBlock).toMatch(/applies to ad-hoc follow-up promises[\s\S]*NOT to this defined session-end confirmation/);
+  });
+
   it('rule has no em or en dashes', () => {
     const section = ruleSection();
     expect(section).not.toMatch(/[–—]/);
@@ -2133,9 +2145,9 @@ describe('system prompt: Phase 5 HARD RULE - NO HUMAN-TEAM SLA PROMISES', () => 
     const matches = [...prompt.matchAll(/within (24|48|24 to 48|24-48) hours?/gi)];
     expect(matches.length).toBeGreaterThan(0);
     for (const match of matches) {
-      const before = prompt.slice(Math.max(0, match.index - 600), match.index);
+      const before = prompt.slice(Math.max(0, match.index - 800), match.index);
       const inAcceptableContext =
-        /Example BAD|Banned|MUST NOT|MUST not|no specific/i.test(before);
+        /Example BAD|Banned|MUST NOT|MUST not|no specific|without promising/i.test(before);
       expect(inAcceptableContext).toBe(true);
     }
   });
