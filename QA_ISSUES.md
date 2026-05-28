@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 27, 2026 (Phase 1-10 decision-audit branch on `fix/cancel-bot-decision-audit-2026-05-27`: cancel-bot #25 benefits-list 3-tier split, cancel-bot #26 perk dollar values stripped + HARD RULE, cancel-bot #27 NO HUMAN-TEAM SLA PROMISES umbrella, cancel-bot #28 FILLER PHRASE CONTROL ban on "Perfect!", cancel-bot #29 PAUSE VS CANCEL INTENT BOUNDARY, plus lock-in regression tests on cancel-bot #13 / #16, plus open-conflict surface added to docs/CHATBOT_SCRIPT_DECISIONS_2026-05-05.md Decision 7. Branch awaiting Matt's ship word.)
+**Last updated:** May 28, 2026 (Phase 1-10 decision-audit branch + P2 code-level follow-up branch. Decision-audit branch `fix/cancel-bot-decision-audit-2026-05-27` shipped cancel-bot #25-29 plus lock-in regressions and the Decision 7 open-conflict surface. Stacked follow-up branch `fix/cancel-bot-code-level-sla-and-perk-enforcement` shipped cancel-bot #30 server-side SLA strings stripped + cancel-bot #31 runtime perk-value injection stripped. Both branches awaiting Matt's ship word; second branch depends on the first merging first.)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -723,6 +723,50 @@ Preserves existing pause-as-save-offer pattern (cancel intent + pause offered + 
 
 ---
 
+### cancel-bot #30
+**Status:** FIXED IN CODE 2026-05-28 by branch `fix/cancel-bot-code-level-sla-and-perk-enforcement` (not yet merged; depends on the decision-audit branch merging first). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** trust-erosion (banned SLA language reached members through code paths that bypass the LLM)
+**Discovered:** 2026-05-27 (Codex review of the decision-audit branch flagged this as P2)
+
+The decision-audit branch (commit ac3769e) added `HARD RULE - NO HUMAN-TEAM SLA PROMISES` to the system prompt, banning "within 24-48 hours" and "alerted our QA team" style promises. Codex's review on that branch surfaced that the rule doesn't reach deterministic fallback responses in `src/app/api/chat/message/route.js`: `buildSupportIncidentResponse` (called for booking/payment incidents), `buildLookupFailureMessage` (second-attempt cancellation lookup failures), and the inactive-account + cancel-intent branch of `buildPostLookupGreeting` all emitted hardcoded strings that bypass Claude entirely. A member hitting any of those paths still saw the banned SLA language.
+
+**Fix (this PR, `fix/cancel-bot-code-level-sla-and-perk-enforcement` commit 2260fb4):** four hardcoded user-facing strings updated to match the GOOD pattern from HARD RULE - NO HUMAN-TEAM SLA PROMISES ("Someone will follow up with you about next steps") and HARD RULE - NO FABRICATED ESCALATION (no fake teams):
+
+1. `buildSupportIncidentResponse` (line 127): stripped "I've alerted our QA team and logged this issue for follow-up." (fabricated team, two violations stacked: NO FABRICATED ESCALATION + NO HUMAN-TEAM SLA PROMISES) and "We aim to respond within 48 hours" (timeline promise). Replaced with "I'm flagging this for follow-up." + "Someone will follow up with you about next steps." Phone path and troubleshooting-detail ask preserved.
+2. `buildPostLookupGreeting` inactive-account + cancel-intent branch (line 437): "they will follow up within 24-48 hours" -> "someone will follow up with you about next steps."
+3. `buildLookupFailureMessage` second-attempt variant A (line 477): "The memberships team replies within 24-48 hours and can complete the cancellation process for you" -> "The memberships team can complete the cancellation process. Someone will follow up with you about next steps."
+4. `buildLookupFailureMessage` second-attempt variant B (line 478): "The memberships team can locate the account and handle cancellation within 24-48 hours" -> "The memberships team can locate the account and handle the cancellation. Someone will follow up with you about next steps."
+
+Routing/conditional logic of every fallback preserved unchanged - only the user-facing strings rotated. The three helper functions are now exported so a dedicated test file can assert the strings directly.
+
+12 regression tests in `__tests__/chat-message-fallback-sla-strings.test.js` cover: no timeline patterns in any fallback, no fabricated-QA-team language in the support-incident response, GOOD pattern usage (flag for follow-up + phone path + troubleshooting ask), no em dashes in any fallback string, attempt 1 lookup-failure stays SLA-free, and an end-to-end source scan that no live (non-comment) line in route.js contains any banned SLA pattern. Closes the prompt-vs-code-path gap that Codex's review exposed.
+
+---
+
+### cancel-bot #31
+**Status:** FIXED IN CODE 2026-05-28 by branch `fix/cancel-bot-code-level-sla-and-perk-enforcement` (not yet merged; depends on the decision-audit branch merging first). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** trust-risk (unverified perk dollar amounts continued to surface to members)
+**Discovered:** 2026-05-27 (Codex review of the decision-audit branch flagged this as P2)
+
+The decision-audit branch (commit 5980dbc) stripped `($XX value)` annotations from the static `MEMBER PERKS MILESTONES` and `LOYALTY POINTS` tables in `src/lib/system-prompt.txt` and added `HARD RULE - NO PERK DOLLAR VALUES`. Codex's review surfaced that those values still flowed into the prompt at runtime via `formatProfileForPrompt` in `src/lib/boulevard.js`: the function emitted `Next Perk Milestone: Month N — Name ($XX value)` and `Loyalty Redeemable: Name (M points = $XX value)`. HARD RULE #22 explicitly tells the bot to use the injected "Next Perk Milestone" field, so members were still seeing the unverified amounts the static-table strip was supposed to remove.
+
+**Fix (this PR, `fix/cancel-bot-code-level-sla-and-perk-enforcement` commit 7d68c9d):** `formatProfileForPrompt` updated to strip the value annotations at injection time. Specifically:
+
+1. Loyalty Redeemable line: `(N points = $XX value)` -> `(N points)`. Point cost and service name are operational truth; the dollar value is unverified retail-equivalent and carries the same source-of-truth risk that motivated the Phase 4 strip.
+2. Next Perk Milestone line: `Month N — Name ($XX value)` -> `Month N, Name`. The `($XX value)` annotation is stripped for all perks. Enhancement Credit dollar amounts ($50 across Months 22, 42, 54, 78, 90, 102, 114) are preserved because they live INSIDE the perk NAME field (e.g., "$50 Enhancement Credit"), which IS the perk identity, not a value annotation.
+3. Em dashes inside perk names (from the `PERK_MILESTONES` source data, e.g., "Year 3.5 Mid-Year — $50 Enhancement Credit") are defensively replaced with commas at injection time so the rendered profile complies with the global no-em-dash rule the prompt enforces.
+4. UNKNOWN placeholder strings throughout the function: 8 em dashes in "UNKNOWN — do not state X" / "UNKNOWN — do not mention X" patterns replaced with commas ("UNKNOWN, do not state X" etc.). These were previously leaking into the prompt.
+
+`PERK_MILESTONES` source data (lines 220-249 of `boulevard.js`) NOT touched. The em dashes in those name strings are defensively replaced at injection time by the formatter. A future cleanup PR could update `PERK_MILESTONES` directly, but that touches an inner data structure and was out of scope for this P2 fix per Matt's instructions (only the `formatProfileForPrompt` display function is in scope; the underlying constants are HARD STOPS).
+
+`HARD RULE #22` ("For perk messaging, use ONLY the injected 'Next Perk Milestone' + 'Months Until Next Perk' fields. Do not infer perk timing from the static milestone table.") still makes sense after the strip - the rule tells the bot to use the injected fields and not infer; the injected fields are just now value-free.
+
+No downstream parser of these strings exists - they are display-only, formatted into the prompt for the LLM to read. Verified via grep: the only references to "Next Perk Milestone" / "Loyalty Redeemable" in `src/` are the formatter itself and the system-prompt.txt HARD RULE #22 reference.
+
+12 regression tests in `__tests__/boulevard-format-profile-prompt-no-perk-values.test.js` cover: no "= $XX value" annotation in the Loyalty Redeemable line, no "($XX value)" annotation in the Next Perk Milestone line (iterated across 6 sample perks), Enhancement Credit identity preservation, mid-year Enhancement Credit em-dash-to-comma conversion, Months Until Next Perk arithmetic, missing-field handling, em-dash defense across all perk names, and an end-to-end scan that no banned `$XX value` pattern appears anywhere in the rendered profile.
+
+---
+
 ## Cross-cutting issues
 
 ### cancel-bot #22
@@ -859,8 +903,8 @@ The 10 chatbot-script decisions parked with Travis for review, mirrored from `do
 |---|---|---|---|
 | 1 | cancel-bot #5 | Retention aggressiveness after first clear refusal | high (FTC) | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`) |
 | 2 | cancel-bot #5 | Retention behavior on geographic/medical exits | high | FIXED IN CODE 2026-05-15 (PR `fix/relocation-out-of-footprint-no-retention`, geographic half only; medical exits still default to Decision Tree #17) |
-| 3 | cancel-bot #6 | Escalation reality vs fabricated promises | HIGHEST | IN-CHAT CODE HALF CLOSED 2026-05-15 (PR #13, PR `fix/broaden-no-process-handoff-rule`, plus PR `fix/escalation-cleanup-and-commitment-clarification` for the Decision 2 sweep). `sendBeacon` robustness for leg-A still residual. |
-| 4 | cancel-bot #11 / #26 | Perk dollar value verification | medium | FIXED IN CODE 2026-05-27 via strip path (Phase 4 of `fix/cancel-bot-decision-audit-2026-05-27`); reopen-on-Katie-data path documented in HARD RULE |
+| 3 | cancel-bot #6 / #27 / #30 | Escalation reality vs fabricated promises | HIGHEST | IN-CHAT CODE HALF CLOSED end-to-end as of 2026-05-28: static prompt via PR #13, PR `fix/broaden-no-process-handoff-rule`, PR `fix/escalation-cleanup-and-commitment-clarification`, and Phase 5 of `fix/cancel-bot-decision-audit-2026-05-27` (NO HUMAN-TEAM SLA PROMISES umbrella); deterministic server-side fallbacks via `fix/cancel-bot-code-level-sla-and-perk-enforcement` (closes the gap Codex's review surfaced). `sendBeacon` robustness for leg-A still residual. |
+| 4 | cancel-bot #11 / #26 / #31 | Perk dollar value verification | medium | FIXED IN CODE end-to-end as of 2026-05-28: static prompt table stripped via Phase 4 of `fix/cancel-bot-decision-audit-2026-05-27`; runtime injection (`formatProfileForPrompt`) stripped via `fix/cancel-bot-code-level-sla-and-perk-enforcement`. Both branches awaiting merge. Reopen-on-Katie-data path documented in HARD RULE |
 | 5 | cancel-bot #12 | Identity verification floor | high (privacy) |
 | 6 | cancel-bot #13 | Refund / double-billing escalation script | medium | FIXED IN CODE 2026-05-15 (PR `fix/billing-dispute-escalation-script`); Phase 1 lock-in regression test added 2026-05-27 |
 | 7 | cancel-bot #14 | Credit visibility approach | medium | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`); OPEN CONFLICT surfaced 2026-05-27 in docs/CHATBOT_SCRIPT_DECISIONS_2026-05-05.md for Matt to resolve (Vote A/B reconciliation) |
