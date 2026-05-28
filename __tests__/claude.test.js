@@ -1923,6 +1923,78 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
   });
 });
 
+describe('system prompt: Phase 6 HARD RULE - FILLER PHRASE CONTROL', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - FILLER PHRASE CONTROL');
+    const end = prompt.indexOf('\n19. If any profile field is UNKNOWN', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the filler-phrase rule exists with required structure', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Banned in MEMBERSHIP MODE/);
+    expect(section).toMatch(/Empathy phrase cap/);
+    expect(section).toMatch(/Cancellation-flow specifics/);
+    expect(section).toMatch(/Example BAD/);
+    expect(section).toMatch(/Example GOOD/);
+  });
+
+  it('bans "Perfect!" entirely in MEMBERSHIP MODE / cancellation flows', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/banned[\s\S]*?Perfect!/i);
+    expect(section).toMatch(/cancellation, pause, downgrade, or billing-dispute flow/i);
+  });
+
+  it('caps empathy phrases at one per response', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/AT MOST ONE empathy phrase per/i);
+    expect(section).toMatch(/MUST NOT stack/);
+  });
+
+  it('provides substitute acknowledgments for cancellation flows', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/"Got it,"/);
+    expect(section).toMatch(/"Okay,"/);
+    expect(section).toMatch(/"Done\."/);
+  });
+
+  it('TONE & FORMATTING MEMBERSHIP MODE block references the new rule', () => {
+    const prompt = getSystemPrompt();
+    const tonStart = prompt.indexOf('MEMBERSHIP MODE:\n- 2-4 sentences per message');
+    const bothModeStart = prompt.indexOf('BOTH MODES:', tonStart);
+    expect(tonStart).toBeGreaterThan(-1);
+    expect(bothModeStart).toBeGreaterThan(tonStart);
+    const block = prompt.slice(tonStart, bothModeStart);
+    expect(block).toMatch(/Never use "Perfect!"/);
+    expect(block).toMatch(/AT MOST ONE empathy phrase per response/);
+    expect(block).toMatch(/HARD RULE - FILLER PHRASE CONTROL/);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('every "Perfect!" instance outside HARD RULE - FILLER PHRASE CONTROL sits inside an Example BAD, banned-list, or rule-cross-reference context', () => {
+    const prompt = getSystemPrompt();
+    const fillerRuleStart = prompt.indexOf('HARD RULE - FILLER PHRASE CONTROL');
+    const fillerRuleEnd = prompt.indexOf('\n19. If any profile field is UNKNOWN', fillerRuleStart);
+    const matches = [...prompt.matchAll(/Perfect!/g)];
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      const insideFillerRule = match.index >= fillerRuleStart && match.index < fillerRuleEnd;
+      if (insideFillerRule) continue;
+      const before = prompt.slice(Math.max(0, match.index - 800), match.index);
+      const inAcceptableContext =
+        /Example BAD|Banned|banned|MUST NOT|MUST not|Never use "/i.test(before);
+      expect(inAcceptableContext).toBe(true);
+    }
+  });
+});
+
 describe('system prompt: Phase 5 HARD RULE - NO HUMAN-TEAM SLA PROMISES', () => {
   function ruleSection() {
     const prompt = getSystemPrompt();
