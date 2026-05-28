@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 19, 2026 (cancel-bot #24 follow-up: named-lead retention play removed from customer-facing flow after Travis operational clarification; cross-cutting #7: split EMAIL_OPS_ALERTS from EMAIL_ESCALATION)
+**Last updated:** May 27, 2026 (Phase 1-10 decision-audit branch on `fix/cancel-bot-decision-audit-2026-05-27`: cancel-bot #25 benefits-list 3-tier split, cancel-bot #26 perk dollar values stripped + HARD RULE, cancel-bot #27 NO HUMAN-TEAM SLA PROMISES umbrella, cancel-bot #28 FILLER PHRASE CONTROL ban on "Perfect!", cancel-bot #29 PAUSE VS CANCEL INTENT BOUNDARY, plus lock-in regression tests on cancel-bot #13 / #16, plus open-conflict surface added to docs/CHATBOT_SCRIPT_DECISIONS_2026-05-05.md Decision 7. Branch awaiting Matt's ship word.)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -610,6 +610,119 @@ Net effect on the cancellation flow: vague service-quality complaints now route 
 
 ---
 
+### cancel-bot #25
+**Status:** FIXED IN CODE 2026-05-27 by Phase 2 of branch `fix/cancel-bot-decision-audit-2026-05-27` (not yet merged). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** brand consistency, member confusion on retail discount
+**Discovered:** 2026-05-27 (Phase 2 of decision-tree audit, prompted by Travis's clarification that the three discount tiers should be presented as distinct categories, not collapsed)
+
+The bot was collapsing three distinct member-discount tiers into wording like "20% off services and products, 10% off retail" or "20% off facials, add-ons, and Silver Mirror products, 10% off retail". This conflates Silver Mirror's own product line (20% off) with other-brand retail (10% off), and members reading the collapsed wording had no way to tell that the in-shop Revision/IS Clinical/Sanitas/EmerginC/Dr. Dennis Gross/Skinceuticals products are at a different discount rate than Silver Mirror's own line.
+
+**Fix (Phase 2):** new `HARD RULE - MEMBER DISCOUNT THREE-CATEGORY STRUCTURE` in `src/lib/system-prompt.txt`. Three categories the bot must keep distinct:
+1. Services: 20% off (additional facials beyond the included monthly facial, add-ons, peels, microchanneling)
+2. Silver Mirror products: 20% off (Silver Mirror's own skincare line)
+3. Non-Silver Mirror retail: 10% off (other brands carried in shop)
+
+Updates to MEMBER PERKS section, KNOWLEDGE BASE: PRODUCTS & RETAIL, and PROMOTIONS POLICY general-deals answer ensure the three tiers are presented as distinct lines. Shorthand "your 20% member discount" is allowed in brief Final Warning enumerations (preserves Christina / Benjamin existing examples) because it doesn't assert a single rate across categories. If the member asks for the breakdown, the bot gives all three. Banned collapsed phrasings: "20% off everything", "20% off services and products", "20% off all purchases", "20% off facials, add-ons, and products, plus 10% off retail".
+
+5 regression tests in `__tests__/claude.test.js` (`system prompt: Phase 2 three-category member discount structure`). Closes the benefits-list piece of Travis Decision 8. The tone-cleanup piece (Perfect!, empathy stacking) is in cancel-bot #28.
+
+---
+
+### cancel-bot #26
+**Status:** FIXED IN CODE 2026-05-27 by Phase 4 of branch `fix/cancel-bot-decision-audit-2026-05-27` (not yet merged). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** trust-risk, unverified data going to members
+**Discovered:** Ongoing (escalation of cancel-bot #11)
+**Travis decision context:** Decision 4 (Perk dollar values) — Katie owned the verification ask and has been unresponsive for 3+ weeks since the 2026-05-05 decisions doc. Per Matt's 2026-05-27 call, default to STRIP rather than continue waiting.
+
+Cancel-bot #11 was MATERIALLY REDUCED by PR `fix/broaden-no-process-handoff-rule` (the milestone enumeration ban) but the residual surface — bot naming the single next upcoming milestone WITH a dollar value pulled from the static prompt table — still carried the same source-of-truth risk. Members were being quoted "$65 moisturizer", "$77 serum", "$41 cleanser", "$183 bundle" without those values being verified against any operational truth.
+
+**Fix (Phase 4):** strip all `$XX value` and `worth $XX` annotations from the prompt and add `HARD RULE - NO PERK DOLLAR VALUES`. Names and timing (Month 2, Month 4, etc.) preserved as accurate operational truth. Exception: Enhancement Credit dollar amounts (Months 22, 42, 54, 78, 90, 102, 114) preserved because the dollar amount IS the perk identity, not a value annotation on a different perk.
+
+Edits to `src/lib/system-prompt.txt`:
+- MEMBER PERKS MILESTONES table: 14 `$XX value` annotations stripped (Month 2, 4, 5, 6, 9, 12, 18, 24, 36, 48, 72, 84, 96, 108)
+- LOYALTY POINTS redemption table: 6 `$XX value` annotations stripped (500-8,000 pts tiers)
+- Zoe BAD example in HARD RULE - MILESTONE DISCUSSION SCOPE: 5 `$XX value` annotations stripped from the enumerated perk list; added explanatory sentence noting two banned patterns are stacked
+- Benjamin GOOD example in HARD RULE - GUEST DEMANDS: "Hyaluronic Acid Serum worth $77" -> "Hyaluronic Acid Serum"
+- Christina BAD example in HARD RULE - FIRM REFUSAL SHORT-CIRCUIT: "Cleanser, $41 value" -> "Cleanser"
+- New HARD RULE - NO PERK DOLLAR VALUES with triggers, MAY-say list, MUST-NOT-say list, Enhancement Credit exception, BAD/GOOD examples, and reopen path (if Katie or another owner later provides a verified single-source-of-truth value table, the rule can be relaxed)
+
+8 regression tests in `__tests__/claude.test.js` (`system prompt: Phase 4 perk dollar values stripped + HARD RULE banning quoted amounts`). Closes the Decision 4 residual via the strip path. If Katie later provides verified values, reopen the rule, not the prompt.
+
+---
+
+### cancel-bot #27
+**Status:** FIXED IN CODE 2026-05-27 by Phase 5 of branch `fix/cancel-bot-decision-audit-2026-05-27` (not yet merged). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** trust-erosion (false promises on human-team response)
+**Discovered:** May 10 2026 (Sindhura Polepalli production case, originally captured under cancel-bot #19 / #20)
+
+Sindhura case: bot said "they'll reach out within 24 to 48 hours to resolve this" on behalf of the memberships team. The team's response time and outcome are not within the bot's visibility, so the promise damaged member trust when it did not hold.
+
+PR #13 (no-fabricated-escalation) and PR #18 (no-defined-process handoffs) already covered the major sub-cases. This phase adds an umbrella HARD RULE that consolidates the principle: the bot does not promise specific timelines, outcomes, or actions on behalf of ANY human team at Silver Mirror, even when the team is real and the routing is correct.
+
+**Fix (Phase 5):** new `HARD RULE - NO HUMAN-TEAM SLA PROMISES` in `src/lib/system-prompt.txt`, placed between HARD RULE - NO FABRICATED ESCALATION and HARD RULE - NO FABRICATED STAFF NAMES.
+
+Coverage:
+- Applies to memberships team, location manager, location front desk, individual estheticians, "the team at [location]", generic "team", any human team
+- Banned timeline patterns (15+ phrasings: "within 24 hours", "within 48 hours", "within 24 to 48 hours", "within an hour", "by tomorrow", "by end of day/week", "this week", "this morning", "this afternoon", "in the next X hours/days", weasel "shortly"/"soon", any "within X" or "by [day/time]" tied to follow-up)
+- Banned outcome patterns (9 phrasings: "they'll fix this", "they'll resolve this", "they'll restore [X]", "they'll refund you", "they'll calculate", "they'll audit", "they'll address this", "they'll investigate", "they'll pull your transaction history")
+- Banned action patterns (5+ phrasings: "they'll reach out", "they'll call you", "they'll email you", "they'll set up a meeting", any specific action guarantee)
+- GOOD pattern: generic "Someone will follow up with you about next steps." / "Our memberships team will follow up directly."
+- What this rule DOES allow: defined policies (30-day processing, 90-day credit validity), routing to a real channel without timeline, manager-escalation safety paths (escalation can be promised; timing cannot)
+- Cross-references to all related rules (NO FABRICATED ESCALATION, NO DEFINED PROCESS HANDOFFS, BILLING DISPUTE HANDLING, CREDIT VISIBILITY DISCLAIMER, ALREADY ATTEMPTED CHANNEL)
+- BAD/GOOD example pairs: Sindhura credits case (canonical), manager-callback with vs without timeline, location-team follow-up with vs without timeline
+
+7 regression tests in `__tests__/claude.test.js` (`system prompt: Phase 5 HARD RULE - NO HUMAN-TEAM SLA PROMISES`), plus a global scan that asserts every "within 24" or "within 48" reference in the prompt sits inside an Example BAD, banned-list, or rule-body context. Closes the umbrella consolidation of Decision 3 hardening.
+
+---
+
+### cancel-bot #28
+**Status:** FIXED IN CODE 2026-05-27 by Phase 6 of branch `fix/cancel-bot-decision-audit-2026-05-27` (not yet merged). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** brand consistency, tone-deafness in cancellation flows
+**Discovered:** Ongoing (per cancel-bot #15 and Decision 8 voice/tone cleanup)
+**Decision context:** Decision 8 (Voice and tone cleanup, "Perfect!" overuse, empathy phrase stacking). Katie owned; been unresponsive 3+ weeks since the 2026-05-05 decisions doc. Per Matt's 2026-05-27 call, ship the strip now.
+
+The bot's recurring pattern of leading with "Perfect!" (in cancellation lookups, after firm refusals, in send-offs) and stacking two or three empathy phrases per response ("I hear you. That makes sense. No worries.") makes it sound robotic and, in cancellation flows specifically, tone-deaf. Sindhura case 2026-05-11 and multiple other production sessions show this pattern.
+
+**Fix (Phase 6):** new `HARD RULE - FILLER PHRASE CONTROL` in `src/lib/system-prompt.txt`, placed after HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING.
+
+Coverage:
+- Banned in MEMBERSHIP MODE entirely: "Perfect!", "Perfect,", "Perfect." as default acknowledgment of any member response in cancellation, pause, downgrade, or billing-dispute flows. Also "Awesome!", "Amazing!", "Excellent!" as defaults.
+- Substitutes: "Got it,", "Okay,", "Done.", "Thank you for telling me,", or no acknowledgment when the next sentence carries the response forward.
+- Empathy phrase cap: AT MOST ONE empathy phrase per response from {"I hear you", "No worries", "That makes sense", "I understand", "Thanks for sharing that", "I'm sorry that's how it's felt", "I hear that"}. Never stack two or three.
+- GENERAL MODE: less strict. "Perfect!" permitted in genuinely positive moments (e.g., booking just confirmed). No empathy stacking.
+- Step-of-flow specifics: lookup confirmation, offer presentation, offer acceptance, offer refusal (firm), confirmation/send-off all get neutral acknowledgment ("Got it,").
+- BAD/GOOD example pairs for Perfect! in lookup, Perfect! after acceptance, three-phrase empathy stack, two-phrase stack across adjacent responses, Perfect! in send-off.
+
+Also updated TONE & FORMATTING MEMBERSHIP MODE block to add the new constraints inline and cross-reference the HARD RULE.
+
+7 regression tests in `__tests__/claude.test.js` (`system prompt: Phase 6 HARD RULE - FILLER PHRASE CONTROL`), plus a global scan asserting every "Perfect!" in the prompt sits inside HARD RULE - FILLER PHRASE CONTROL itself or an Example BAD / banned-list / rule cross-reference context. Closes the tone-cleanup piece of Travis Decision 8. The benefits-list piece is cancel-bot #25.
+
+---
+
+### cancel-bot #29
+**Status:** FIXED IN CODE 2026-05-27 by Phase 7 of branch `fix/cancel-bot-decision-audit-2026-05-27` (not yet merged). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** outcome integrity (pause request silently processed as cancellation)
+**Discovered:** Session d16f133e (date unconfirmed; cited in Matt's 2026-05-27 audit brief as a pause request that may have converted to a cancellation)
+
+Pause and cancellation are different outcomes with different downstream consequences (pause keeps the membership active with 3-billing-cycle commitment; cancellation starts the 30-day legal notice period and ends rate lock + benefits). Session d16f133e suggested the bot processed a pause request as a cancellation, or at minimum failed to distinguish the two intents. The existing cancellation flow (Step 1-6, Decision Tree #1-#20) treats every membership conversation as a cancellation candidate, so a clean pause-only request would be misclassified if the bot defaulted to running the cancellation retention tree.
+
+**Fix (Phase 7):** new `HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY` in `src/lib/system-prompt.txt`, placed between HARD RULE - FIRM REFUSAL SHORT-CIRCUIT and HARD RULE - CREDIT VISIBILITY DISCLAIMER.
+
+Coverage:
+- Detection triggers for PAUSE intent ("pause", "hold", "freeze", "1-month hold", "step back")
+- Detection triggers for CANCEL intent ("cancel", "end", "I'm done", "close my account", "stop my membership")
+- Detection triggers for AMBIGUOUS intent ("take a break", "stop paying for now", compound asks)
+- Five response patterns: pause-first opens (treat as pause, not cancellation), cancel-first opens (treat as cancellation, decision tree may offer pause as Step 4 save), ambiguous opens (one clarifying question with canonical phrasing), intent shift mid-flow from pause to cancel (stop pause flow, switch to cancellation), intent shift mid-flow from cancel to pause (stop cancellation, switch to pause)
+- Banned patterns: auto-converting pause to cancel or vice versa, marking wrong outcome, saying "processing your cancellation" when only a pause was requested
+- Outcome categorization grid: 5 scenarios mapped to RETAINED vs CANCELLED
+- BAD/GOOD example pairs for pause auto-converted to cancellation, ambiguous intent without clarification, intent shift bot ignored
+
+Preserves existing pause-as-save-offer pattern (cancel intent + pause offered + pause accepted = RETAINED) and all decision-tree pause-first paths (Travel, Relocation, Shifted to Derm, New Provider, Forgot Benefits, Voucher Build-Up, Cost Overwhelming, Lost Job, Medical). PR #6 same-message commitment disclosure cross-referenced.
+
+8 regression tests in `__tests__/claude.test.js` (`system prompt: Phase 7 HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY`). Closes the pause/cancel boundary surface from session d16f133e.
+
+---
+
 ## Cross-cutting issues
 
 ### cancel-bot #22
@@ -747,12 +860,12 @@ The 10 chatbot-script decisions parked with Travis for review, mirrored from `do
 | 1 | cancel-bot #5 | Retention aggressiveness after first clear refusal | high (FTC) | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`) |
 | 2 | cancel-bot #5 | Retention behavior on geographic/medical exits | high | FIXED IN CODE 2026-05-15 (PR `fix/relocation-out-of-footprint-no-retention`, geographic half only; medical exits still default to Decision Tree #17) |
 | 3 | cancel-bot #6 | Escalation reality vs fabricated promises | HIGHEST | IN-CHAT CODE HALF CLOSED 2026-05-15 (PR #13, PR `fix/broaden-no-process-handoff-rule`, plus PR `fix/escalation-cleanup-and-commitment-clarification` for the Decision 2 sweep). `sendBeacon` robustness for leg-A still residual. |
-| 4 | cancel-bot #11 | Perk dollar value verification | medium |
+| 4 | cancel-bot #11 / #26 | Perk dollar value verification | medium | FIXED IN CODE 2026-05-27 via strip path (Phase 4 of `fix/cancel-bot-decision-audit-2026-05-27`); reopen-on-Katie-data path documented in HARD RULE |
 | 5 | cancel-bot #12 | Identity verification floor | high (privacy) |
-| 6 | cancel-bot #13 | Refund / double-billing escalation script | medium | FIXED IN CODE 2026-05-15 (PR `fix/billing-dispute-escalation-script`) |
-| 7 | cancel-bot #14 | Credit visibility approach | medium | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`) |
-| 8 | cancel-bot #15 | Tone fixes (Perfect!, empathy, benefits list) | low-medium |
-| 9 | cancel-bot #16 | Channel-loop rule (don't redirect to failed channels) | medium | FIXED IN CODE 2026-05-15 (PR `fix/already-tried-channel-auto-escalation`) |
+| 6 | cancel-bot #13 | Refund / double-billing escalation script | medium | FIXED IN CODE 2026-05-15 (PR `fix/billing-dispute-escalation-script`); Phase 1 lock-in regression test added 2026-05-27 |
+| 7 | cancel-bot #14 | Credit visibility approach | medium | FIXED IN CODE 2026-05-15 (PR `fix/retention-softening-and-credit-disclaimer`); OPEN CONFLICT surfaced 2026-05-27 in docs/CHATBOT_SCRIPT_DECISIONS_2026-05-05.md for Matt to resolve (Vote A/B reconciliation) |
+| 8 | cancel-bot #15 / #25 / #28 | Tone fixes (Perfect!, empathy, benefits list) | low-medium | FIXED IN CODE 2026-05-27 (Phase 2 benefits 3-tier + Phase 6 FILLER PHRASE CONTROL in `fix/cancel-bot-decision-audit-2026-05-27`) |
+| 9 | cancel-bot #16 | Channel-loop rule (don't redirect to failed channels) | medium | FIXED IN CODE 2026-05-15 (PR `fix/already-tried-channel-auto-escalation`); Phase 3 lock-in regression test added 2026-05-27 |
 | 10 | cancel-bot #17 | Commitment language standardization | medium | FIXED IN CODE 2026-05-15 (PR `fix/escalation-cleanup-and-commitment-clarification`) |
 
 ---
