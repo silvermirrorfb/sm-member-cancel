@@ -1923,6 +1923,63 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
   });
 });
 
+describe('system prompt: Phase 2 three-category member discount structure', () => {
+  it('MEMBER PERKS section presents the three discount tiers as distinct lines', () => {
+    const prompt = getSystemPrompt();
+    const memberPerksStart = prompt.indexOf('MEMBER PERKS:');
+    const memberCreditsStart = prompt.indexOf('MEMBERSHIP CREDITS:', memberPerksStart);
+    expect(memberPerksStart).toBeGreaterThan(-1);
+    expect(memberCreditsStart).toBeGreaterThan(memberPerksStart);
+    const section = prompt.slice(memberPerksStart, memberCreditsStart);
+    expect(section).toMatch(/Services: 20% off/);
+    expect(section).toMatch(/Silver Mirror products: 20% off/);
+    expect(section).toMatch(/Non-Silver Mirror retail.*10% off/);
+  });
+
+  it('PROMOTIONS POLICY general-deals answer enumerates all three discount tiers', () => {
+    const prompt = getSystemPrompt();
+    const policyStart = prompt.indexOf('PROMOTIONS POLICY');
+    const policyEnd = prompt.indexOf('TRIGGERING MEMBERSHIP MODE', policyStart);
+    const section = prompt.slice(policyStart, policyEnd);
+    expect(section).toMatch(/20% off services/);
+    expect(section).toMatch(/20% off Silver Mirror products/);
+    expect(section).toMatch(/10% off non-Silver Mirror retail/);
+    // The old collapsed wording is gone.
+    expect(section).not.toMatch(/20% off facials, add-ons, and Silver Mirror products, 10% off retail,/);
+  });
+
+  it('KNOWLEDGE BASE: PRODUCTS & RETAIL specifies non-Silver Mirror retail at 10%', () => {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('KNOWLEDGE BASE: PRODUCTS & RETAIL');
+    const end = prompt.indexOf('KNOWLEDGE BASE: ABOUT SILVER MIRROR', start);
+    const section = prompt.slice(start, end);
+    expect(section).toMatch(/20% off Silver Mirror products/);
+    expect(section).toMatch(/10% off non-Silver Mirror retail/);
+  });
+
+  it('the HARD RULE for three-category structure exists and names the three tiers', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - MEMBER DISCOUNT THREE-CATEGORY STRUCTURE:');
+    expect(ruleStart).toBeGreaterThan(-1);
+    const ruleEnd = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:', ruleStart);
+    expect(ruleEnd).toBeGreaterThan(ruleStart);
+    const section = prompt.slice(ruleStart, ruleEnd);
+    expect(section).toMatch(/Services: 20% off/);
+    expect(section).toMatch(/Silver Mirror products: 20% off/);
+    expect(section).toMatch(/Non-Silver Mirror retail: 10% off/);
+    expect(section).toMatch(/20% off everything/); // banned phrasing example
+    expect(section).toMatch(/20% off services and products/); // banned phrasing example
+  });
+
+  it('three-category HARD RULE has no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - MEMBER DISCOUNT THREE-CATEGORY STRUCTURE:');
+    const ruleEnd = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:', ruleStart);
+    const section = prompt.slice(ruleStart, ruleEnd);
+    expect(section).not.toMatch(/[–—]/);
+  });
+});
+
 describe('system prompt: Phase 1 finance-team / memberships-team billing dispute wording', () => {
   it('every "finance team" reference sits inside a banned-list or BAD example', () => {
     const prompt = getSystemPrompt();
