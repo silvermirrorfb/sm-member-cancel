@@ -2566,3 +2566,161 @@ describe('system prompt: HARD RULE - BI-MONTHLY PRESERVES ALL MEMBER BENEFITS (Q
     expect(section).not.toMatch(/[–—]/);
   });
 });
+
+describe('system prompt: HARD RULE - MEDICATION AND CLINICAL CONTRAINDICATIONS (QA sweep 2026-05-28 A9 + D1)', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - MEDICATION AND CLINICAL CONTRAINDICATIONS:');
+    const end = prompt.indexOf('KNOWLEDGE BASE: SKINCARE ADVICE', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the rule exists with required structure', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Triggers/i);
+    expect(section).toMatch(/ORAL \/ SYSTEMIC MEDICATIONS/i);
+    expect(section).toMatch(/TOPICAL PRESCRIPTION MEDICATIONS/i);
+    expect(section).toMatch(/RECENT CLINICAL PROCEDURES/i);
+    expect(section).toMatch(/ACTIVE CLINICAL CONDITIONS/i);
+    expect(section).toMatch(/Response pattern/i);
+    expect(section).toMatch(/Banned phrasings/i);
+    expect(section).toMatch(/What the bot MAY say/i);
+    expect(section).toMatch(/Example BAD/);
+    expect(section).toMatch(/Example GOOD/);
+  });
+
+  it('cites the 2026-05-28 QA sweep A9 Accutane regression', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/2026-05-28 QA sweep/);
+    expect(section).toMatch(/Yes, you can absolutely get facials while on Accutane/);
+    expect(section).toMatch(/A9/);
+  });
+
+  it('Accutane and isotretinoin variants are in the trigger list', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Isotretinoin/i);
+    expect(section).toMatch(/Accutane/i);
+    // Common brand names for isotretinoin (so the bot recognizes them)
+    expect(section).toMatch(/Claravis|Absorica|Sotret|Zenatane|Myorisan/i);
+  });
+
+  it('topical retinoid triggers list covers tretinoin and adapalene', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Tretinoin/);
+    expect(section).toMatch(/Retin-A/);
+    expect(section).toMatch(/Adapalene/);
+    expect(section).toMatch(/Differin/);
+    expect(section).toMatch(/Tazarotene|Tazorac/);
+  });
+
+  it('injectable timing window is 2 weeks', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Botox.*2 weeks|wait at least 2 weeks/i);
+    expect(section).toMatch(/Dysport/);
+    expect(section).toMatch(/Xeomin/);
+    expect(section).toMatch(/Jeuveau/);
+    expect(section).toMatch(/dermal fillers/i);
+  });
+
+  it('Accutane 6-month industry guidance is named as policy, not as bot opinion', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/industry guidance is generally to wait 6 months/i);
+    expect(section).toMatch(/Accutane has finished|completing the course/);
+    // The phrasing must frame this as policy/industry guidance, not the bot's own opinion
+    expect(section).toMatch(/MAY mention industry-standard timing guidance.*as policy reference/i);
+    expect(section).toMatch(/MUST NOT issue that guidance as the bot's own medical opinion/);
+  });
+
+  it('banned phrasings cover the canonical "Yes you can absolutely" Accutane form', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Yes, you can absolutely get \[service\] while on \[medication\]/);
+    expect(section).toMatch(/\[service\] is safe while you're on \[medication\]/);
+    expect(section).toMatch(/We'll just modify the treatment, you're good/);
+  });
+
+  it('banned: skipping the prescriber-clearance step', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Just let your esthetician know and you can do \[service\]/);
+    expect(section).toMatch(/this skips the prescriber-clearance step/i);
+  });
+
+  it('banned: recommending a "safest option" Silver Mirror service when contraindication is systemic', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Our Sensitive Skin Facial is safe for everyone, including people on/);
+    expect(section).toMatch(/NOT recommend a specific Silver Mirror service as the "safe option"/i);
+  });
+
+  it('banned: third-party authority-cave pattern (parallels the pregnancy rule)', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Accepting a third-party authority claim/);
+    expect(section).toMatch(/since your \[dermatologist \/ doctor \/ prescribing provider\] cleared it/);
+  });
+
+  it('canonical Accutane GOOD response includes the required four parts', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/For Accutane \/ systemic medications:/);
+    const accutaneIdx = section.indexOf('For Accutane / systemic medications:');
+    const nextHeaderIdx = section.indexOf('For topical retinoids', accutaneIdx);
+    expect(accutaneIdx).toBeGreaterThan(-1);
+    expect(nextHeaderIdx).toBeGreaterThan(accutaneIdx);
+    const canonical = section.slice(accutaneIdx, nextHeaderIdx);
+    // Part 1: not able to clear on bot authority
+    expect(canonical).toMatch(/not able to clear esthetic treatments for guests on Accutane on the bot's authority/i);
+    // Part 2: explain why (mechanism is for the prescriber, not the bot, but acknowledge what Accutane does)
+    expect(canonical).toMatch(/sensitivity, thickness, and healing/i);
+    // Part 3: cite industry-standard 6-month wait as policy, not opinion
+    expect(canonical).toMatch(/Industry guidance is generally to wait 6 months/);
+    // Part 4: route to prescribing provider AND esthetician
+    expect(canonical).toMatch(/confirm with your prescriber/i);
+    expect(canonical).toMatch(/share your Accutane history with your esthetician/i);
+  });
+
+  it('multi-condition stacking BAD example (A9 + pregnancy + rosacea) routes to prescriber not to a service', () => {
+    const section = ruleSection();
+    const stackIdx = section.indexOf('multi-condition stacking');
+    expect(stackIdx).toBeGreaterThan(-1);
+    const stackBlockEnd = section.indexOf('Example BAD (recent Botox', stackIdx);
+    const stackBlock = section.slice(stackIdx, stackBlockEnd);
+    // The BAD example uses the exact production-failure wording
+    expect(stackBlock).toMatch(/I'm pregnant AND on Accutane AND have rosacea/);
+    expect(stackBlock).toMatch(/Sensitive Skin Facial \(50 min, \$169\) is your safest option/);
+    // The GOOD example routes to prescriber, does NOT recommend a specific service
+    const goodIdx = stackBlock.indexOf('Example GOOD (multi-condition stacking)');
+    expect(goodIdx).toBeGreaterThan(-1);
+    const stackGood = stackBlock.slice(goodIdx);
+    expect(stackGood).toMatch(/needs your prescribing dermatologist's input/i);
+    expect(stackGood).toMatch(/cannot work around at the esthetic level/i);
+    expect(stackGood).toMatch(/Industry guidance is generally to wait 6 months/);
+    expect(stackGood).not.toMatch(/(Sensitive Skin|Lymphatic|Signature) Facial.*\$169.*your safest option/);
+  });
+
+  it('Botox-yesterday BAD/GOOD examples cover the 2-week wait window', () => {
+    const section = ruleSection();
+    const botoxBadIdx = section.indexOf('Example BAD (recent Botox');
+    expect(botoxBadIdx).toBeGreaterThan(-1);
+    const retinoidBadIdx = section.indexOf('Example BAD (prescription retinoid', botoxBadIdx);
+    const botoxBlock = section.slice(botoxBadIdx, retinoidBadIdx);
+    expect(botoxBlock).toMatch(/I got Botox yesterday, can I get a facial today/);
+    expect(botoxBlock).toMatch(/Sure! Just let your esthetician know about the Botox and they'll be careful/);
+    expect(botoxBlock).toMatch(/wait(?:ing)? at least 2 weeks/i);
+    expect(botoxBlock).toMatch(/reschedule your facial for at least 2 weeks after your injection/i);
+  });
+
+  it('Retin-A active-use BAD/GOOD examples cover the prescription-retinoid vs Hyperpigmentation Facial conflict', () => {
+    const section = ruleSection();
+    const retinoidBadIdx = section.indexOf('Example BAD (prescription retinoid');
+    expect(retinoidBadIdx).toBeGreaterThan(-1);
+    const overrideIdx = section.indexOf('This rule overrides', retinoidBadIdx);
+    const retinoidBlock = section.slice(retinoidBadIdx, overrideIdx);
+    expect(retinoidBlock).toMatch(/I'm using Retin-A every night, can I get the Hyperpigmentation Facial/);
+    expect(retinoidBlock).toMatch(/glycolic and lactic acid double exfoliation/);
+    expect(retinoidBlock).toMatch(/confirm with your prescriber/i);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+});
