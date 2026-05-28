@@ -574,8 +574,18 @@ function namesLikelyMatch(requestedName, candidateFirstName, candidateLastName) 
     const reqLastTokens = reqTokens.slice(1);
     const candLastTokens = candTokens.slice(1);
     if (reqLastParts.length > 1 && candLastParts.length > 1) {
+      // Codex P1 fix (2026-05-28): hyphenated-vs-hyphenated requires ALL parts
+      // to match as sets (order-independent). The prior `some(...)` rule false-
+      // positive-matched "John Smith-Jones" to "John Smith-Brown" because they
+      // share "Smith". For distinct members with the same first name and one
+      // shared surname component, picking the wrong client is the worst
+      // possible outcome of this matcher (the route would then process a
+      // different member's account). Strict same-set matching is safer.
       const reqSet = new Set(reqLastParts);
-      if (candLastParts.some(p => reqSet.has(p))) return true;
+      const candSet = new Set(candLastParts);
+      if (reqSet.size === candSet.size && [...reqSet].every(p => candSet.has(p))) {
+        return true;
+      }
     }
     if (reqLastParts.length > 1 && candLastTokens.length >= 2) {
       const reqSet = new Set(reqLastParts);

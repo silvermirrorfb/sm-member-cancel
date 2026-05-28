@@ -2404,5 +2404,16 @@ describe('namesLikelyMatch edge cases (Bug 3)', () => {
       // Sanity: the first-part form still matches.
       expect(namesLikelyMatch("John O'Brien-Smith", 'John', "O'Brien")).toBe(true);
     });
+
+    it('rejects hyphenated-vs-hyphenated when only one component overlaps (codex P1 2026-05-28)', () => {
+      // John Smith-Jones and John Smith-Brown are DIFFERENT members. The
+      // previous `some(...)` rule false-positive-matched them because they
+      // share "Smith". Strict same-set matching blocks this case.
+      expect(namesLikelyMatch('John Smith-Jones', 'John', 'Smith-Brown')).toBe(false);
+      expect(namesLikelyMatch('John Smith-Brown', 'John', 'Smith-Jones')).toBe(false);
+      // Sanity: identical hyphenated sets still match (order-independent).
+      expect(namesLikelyMatch('John Smith-Jones', 'John', 'Smith-Jones')).toBe(true);
+      expect(namesLikelyMatch('John Smith-Jones', 'John', 'Jones-Smith')).toBe(true);
+    });
   });
 });
