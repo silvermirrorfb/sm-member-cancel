@@ -259,6 +259,7 @@ export {
   removeFromStopSet,
   STOP_SET_KEY,
   PHONE_INDEX_KEY,
+  normalizePhoneForIndex,
   setPhoneIndexEntry,
   lookupClientIdByPhoneFromIndex,
   deletePhoneIndexEntry,

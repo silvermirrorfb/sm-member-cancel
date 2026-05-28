@@ -63,9 +63,13 @@ vi.mock('../src/lib/boulevard.js', () => ({
   getClientById: (...args) => mockGetClientById(...args),
 }));
 
-vi.mock('../src/lib/sms-member-registry.js', () => ({
-  lookupClientIdByPhoneFromIndex: (...args) => mockLookupClientIdByPhoneFromIndex(...args),
-}));
+vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    lookupClientIdByPhoneFromIndex: (...args) => mockLookupClientIdByPhoneFromIndex(...args),
+  };
+});
 
 vi.mock('../src/lib/notify.js', () => ({
   logSupportIncident: (...args) => mockLogSupportIncident(...args),
@@ -134,7 +138,9 @@ describe('twilio webhook phone-index lookup fallback', () => {
 
   it('registry hit: getClientById is called, lookupMember is NOT called', async () => {
     mockLookupClientIdByPhoneFromIndex.mockResolvedValue({ clientId: 'urn:blvd:Client:abc', locationId: null });
-    mockGetClientById.mockResolvedValue({ clientId: 'urn:blvd:Client:abc', firstName: 'Test', lastName: 'Member' });
+    // Resolved client's phone matches the inbound +12025551234, so the fast
+    // path is a genuine hit and must short-circuit without a scan.
+    mockGetClientById.mockResolvedValue({ clientId: 'urn:blvd:Client:abc', firstName: 'Test', lastName: 'Member', phone: '+12025551234' });
     const res = await POST(makeFormRequest());
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:abc');
@@ -157,6 +163,30 @@ describe('twilio webhook phone-index lookup fallback', () => {
     const res = await POST(makeFormRequest());
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:stale');
+    expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
+  });
+
+  it('registry hit but indexed client phone no longer matches inbound: stale index, falls through to lookupMember', async () => {
+    mockLookupClientIdByPhoneFromIndex.mockResolvedValue({ clientId: 'urn:blvd:Client:wrongnum', locationId: null });
+    // The index points at a client whose CURRENT phone is a different number
+    // than the inbound +12025551234 (stale or reassigned index entry).
+    mockGetClientById.mockResolvedValue({
+      clientId: 'urn:blvd:Client:wrongnum',
+      firstName: 'Stale',
+      lastName: 'Entry',
+      phone: '+19998887777',
+    });
+    mockLookupMember.mockResolvedValue({
+      clientId: 'urn:blvd:Client:correct',
+      firstName: 'Correct',
+      lastName: 'Member',
+      phone: '+12025551234',
+    });
+    const res = await POST(makeFormRequest());
+    expect(res.status).toBe(200);
+    expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:wrongnum');
+    // A stale index must NOT short-circuit; the webhook must verify the phone
+    // and fall through to the slow scan when it does not match.
     expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
   });
 

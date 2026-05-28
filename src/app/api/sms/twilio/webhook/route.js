@@ -28,7 +28,7 @@ import {
   lookupMember,
   reverifyAndApplyUpgradeForProfile,
 } from '../../../../../lib/boulevard';
-import { lookupClientIdByPhoneFromIndex } from '../../../../../lib/sms-member-registry';
+import { lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
 import { logSmsChatMessages, logSupportIncident } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
@@ -45,7 +45,20 @@ async function lookupProfileWithDeadline(from, scanFn) {
     const indexed = await lookupClientIdByPhoneFromIndex(from);
     if (indexed?.clientId) {
       const profile = await getClientById(indexed.clientId);
-      if (profile) return profile;
+      if (profile) {
+        // Verify the resolved client still maps to the inbound number's
+        // phone-index key before trusting the fast path. A stale or reassigned
+        // index entry could otherwise attach the wrong member's profile to
+        // this session. On mismatch, fall through to the authoritative scan.
+        const fromKey = normalizePhoneForIndex(from);
+        const profileKey = normalizePhoneForIndex(profile.phone);
+        if (fromKey && profileKey && fromKey === profileKey) {
+          return profile;
+        }
+        console.warn(
+          `[sms-webhook] phone-index stale: clientId ${indexed.clientId} phone ${profileKey || '(none)'} does not match inbound ${fromKey}, falling through to scan`,
+        );
+      }
     }
   } catch (err) {
     console.warn('[sms-webhook] phone-index lookup error:', err?.message || err);
