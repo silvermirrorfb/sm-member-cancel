@@ -1922,3 +1922,49 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
     expect(section).not.toMatch(/[–—]/);
   });
 });
+
+describe('system prompt: Phase 1 finance-team / memberships-team billing dispute wording', () => {
+  it('every "finance team" reference sits inside a banned-list or BAD example', () => {
+    const prompt = getSystemPrompt();
+    const matches = [...prompt.matchAll(/finance team/gi)];
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      const before = prompt.slice(Math.max(0, match.index - 400), match.index);
+      const inBannedRegion =
+        /Banned language|Fabricated team names|Example BAD|BANNED|MUST NOT/i.test(before);
+      expect(inBannedRegion).toBe(true);
+    }
+  });
+
+  it('the billing-dispute scripted response routes through "memberships team", not "finance team"', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT', ruleStart);
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(nextRuleStart).toBeGreaterThan(ruleStart);
+    const section = prompt.slice(ruleStart, nextRuleStart);
+    const scriptedStart = section.indexOf('Scripted response');
+    const bannedStart = section.indexOf('Banned language for billing disputes');
+    expect(scriptedStart).toBeGreaterThan(-1);
+    expect(bannedStart).toBeGreaterThan(scriptedStart);
+    const scripted = section.slice(scriptedStart, bannedStart);
+    expect(scripted).toMatch(/memberships team/i);
+    expect(scripted).not.toMatch(/finance team/i);
+    expect(scripted).not.toMatch(/billing team/i);
+    expect(scripted).not.toMatch(/accounting/i);
+  });
+
+  it('every billing-dispute GOOD example routes through "memberships team"', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT', ruleStart);
+    const section = prompt.slice(ruleStart, nextRuleStart);
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|HARD RULE -|$)/g) || [];
+    expect(goodExamples.length).toBeGreaterThanOrEqual(2);
+    for (const good of goodExamples) {
+      expect(good).toMatch(/memberships team/i);
+      expect(good).not.toMatch(/finance team/i);
+      expect(good).not.toMatch(/billing team/i);
+    }
+  });
+});
