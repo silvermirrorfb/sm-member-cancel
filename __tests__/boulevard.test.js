@@ -2518,17 +2518,53 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
       expect(fetchMock.getScanCalls()).toBe(1);
     });
 
-    it('caps retry attempts on a persistent 429 (bounded, not infinite)', async () => {
+    it('caps retry attempts on a persistent 429 at exactly maxRetries + 1 per strategy', async () => {
       const fetchMock = mockFetchWithScanHandler(() => ({ ok: false, status: 429, text: async () => 'rate limit' }));
       global.fetch = fetchMock;
 
       const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
 
       expect(result.diagnostics?.failure).toBe('appointments_query_failed');
-      // Upper bound: ~9 strategies x 3 roots x (1 + max_retries=2) = 81.
-      // Termination, not speed, is the assertion.
-      expect(fetchMock.getScanCalls()).toBeGreaterThan(1);
-      expect(fetchMock.getScanCalls()).toBeLessThan(200);
+      // Per-strategy budget = 1 initial + maxRetries=2 retries = 3 fetches.
+      // Group the fingerprints to assert EVERY attempted strategy hit its cap
+      // exactly. An off-by-one in the retry loop (4 attempts) or a missed cap
+      // would show up here as a wrong group count, not the loose < 200.
+      const fps = fetchMock.getFingerprints();
+      const groupCounts = fps.reduce((acc, fp) => {
+        acc[fp] = (acc[fp] || 0) + 1;
+        return acc;
+      }, {});
+      const groupValues = Object.values(groupCounts);
+      expect(groupValues.length).toBeGreaterThan(0);
+      for (const count of groupValues) {
+        expect(count).toBe(3);
+      }
+    });
+
+    it('does NOT apply retry to callers that did not opt in (mutation safety)', async () => {
+      // The retry path is gated on options.retryTransient===true. Callers
+      // that pass any other options (including no options) get exactly one
+      // fetch attempt, period. This is the safety property that makes
+      // mutations safe: cancelAppointment, bookingCreate, and friends share
+      // fetchBoulevardGraphQL but never opt in, so a transient 429 cannot
+      // double-cancel or duplicate-book. Codex flagged this as a P1 on the
+      // first review of the Bug 4 patch.
+      //
+      // Probed via getClientById, which uses the same default path as
+      // mutations (silentErrors + returnErrors, NO retryTransient). A 429
+      // response must produce exactly one fetch call.
+      let fetchCount = 0;
+      global.fetch = vi.fn(async () => {
+        fetchCount += 1;
+        return { ok: false, status: 429, text: async () => 'rate limit' };
+      });
+
+      const { getClientById } = await import('../src/lib/boulevard.js');
+      const result = await getClientById('urn:blvd:Client:test');
+      expect(result).toBeNull();
+      // Exactly one fetch: no retry. If the gate were broken, fetchCount
+      // would be 3 (1 + maxRetries=2).
+      expect(fetchCount).toBe(1);
     });
   });
 });
