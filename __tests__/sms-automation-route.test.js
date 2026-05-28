@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockLookupMember = vi.fn();
 const mockGetClientById = vi.fn();
@@ -811,5 +811,149 @@ describe('sms automation route', () => {
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:abc123');
     expect(mockLookupMember).toHaveBeenCalled();
     expect(body.results[0].reason).not.toBe('member_not_found');
+  });
+
+  // ===================================================================
+  // SMS_ENABLE_ADDON_FALLBACK gates explicit-addon (Path 1 extension, 2026-05-28)
+  // Tests inherit the outer describe's beforeEach mock setup.
+  // ===================================================================
+
+  function buildExplicitAddonRequest(bodyOverrides = {}) {
+    return new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        offerType: 'addon',
+        addOnCode: 'antioxidant_peel',
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Taylor',
+            lastName: 'Guest',
+            email: 'taylor@example.com',
+          },
+        ],
+        ...bodyOverrides,
+      }),
+    });
+  }
+
+  function mockHappyAddonPath() {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-gate',
+      phone: '+19175550001',
+      tier: null,
+      accountStatus: 'ACTIVE',
+      firstName: 'Taylor',
+      name: 'Taylor Guest',
+      email: 'taylor@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: false,
+      reason: 'no_upgrade_target_for_duration',
+      appointmentId: 'appt-gate',
+      currentDurationMinutes: 50,
+      availableGapMinutes: 10,
+      startOn: '2026-03-09T18:00:00Z',
+      isMember: false,
+    });
+  }
+
+  it('with enableAddonFallback=false in body: explicit offerType=addon is blocked (no addon offer built)', async () => {
+    mockHappyAddonPath();
+    const res = await POST(buildExplicitAddonRequest({ enableAddonFallback: false }));
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.results[0].offerKind).not.toBe('addon');
+    expect(body.results[0].status).toBe('skipped');
+  });
+
+  it('with SMS_ENABLE_ADDON_FALLBACK=false env: explicit offerType=addon is blocked (no addon offer built)', async () => {
+    process.env.SMS_ENABLE_ADDON_FALLBACK = 'false';
+    mockHappyAddonPath();
+    const res = await POST(buildExplicitAddonRequest());
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.results[0].offerKind).not.toBe('addon');
+    expect(body.results[0].status).toBe('skipped');
+  });
+
+  it('with SMS_ENABLE_ADDON_FALLBACK=false env: duration-only offer (no explicit offerType) still proceeds', async () => {
+    process.env.SMS_ENABLE_ADDON_FALLBACK = 'false';
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-dur',
+      phone: '+19175550002',
+      tier: '30',
+      firstName: 'Casey',
+      name: 'Casey Guest',
+      email: 'casey@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-dur',
+      targetDurationMinutes: 50,
+      pricing: { memberTotal: 99, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      isMember: true,
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-token': 'token',
+      },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          {
+            firstName: 'Casey',
+            lastName: 'Guest',
+            email: 'casey@example.com',
+            phone: '+19175550002',
+          },
+        ],
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    // Duration upgrade should NOT be skipped by the addon gate.
+    // It may go to dry_run (the happy path) or to another non-gate skip reason.
+    if (body.results[0].status === 'skipped') {
+      expect(body.results[0].reason).not.toMatch(/addon/i);
+    }
+    expect(body.results[0].offerKind).not.toBe('addon');
+  });
+
+  it('with enableAddonFallback=true in body: explicit offerType=addon still proceeds (regression)', async () => {
+    process.env.SMS_ENABLE_ADDON_FALLBACK = 'false'; // env says off
+    mockHappyAddonPath();
+    const res = await POST(buildExplicitAddonRequest({ enableAddonFallback: true })); // body override wins
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].offerKind).toBe('addon');
+  });
+
+  it('with SMS_ENABLE_ADDON_FALLBACK unset: existing default (true) still allows addon (regression)', async () => {
+    delete process.env.SMS_ENABLE_ADDON_FALLBACK;
+    mockHappyAddonPath();
+    const res = await POST(buildExplicitAddonRequest());
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].offerKind).toBe('addon');
   });
 });

@@ -754,7 +754,16 @@ export async function POST(request) {
 
       let selectedOffer = null;
       if (effectiveOfferType === 'addon') {
-        selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
+        // Path 1 gate extension (2026-05-28 eng-review decision): explicit addon
+        // requests now honor effectiveEnableAddonFallback (SMS_ENABLE_ADDON_FALLBACK
+        // env var, default true). When Path 1 is in effect (set to false), the
+        // explicit-addon branch is blocked alongside the auto-mode and default-mode
+        // fallback paths below, so no addon offer is built regardless of how the
+        // request was made. The downstream `if (!selectedOffer)` block at line ~775
+        // handles the null case via the existing addonUnavailableReason ladder.
+        if (effectiveEnableAddonFallback) {
+          selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
+        }
       } else if (effectiveOfferType === 'auto') {
         if (opportunity?.eligible && isSmsDurationOfferAllowed(opportunity)) {
           selectedOffer = { offerKind: 'duration', ...opportunity };
