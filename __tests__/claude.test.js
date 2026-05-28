@@ -1922,3 +1922,477 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
     expect(section).not.toMatch(/[–—]/);
   });
 });
+
+describe('system prompt: Phase 7 HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY:');
+    const end = prompt.indexOf('HARD RULE - CREDIT VISIBILITY DISCLAIMER:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the rule exists with required structure (intents, response patterns, banned patterns, examples)', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Detection triggers[\s\S]*PAUSE intent/i);
+    expect(section).toMatch(/Detection triggers[\s\S]*CANCEL intent/i);
+    expect(section).toMatch(/Detection triggers[\s\S]*AMBIGUOUS/i);
+    expect(section).toMatch(/Response patterns/i);
+    expect(section).toMatch(/Banned patterns/i);
+    expect(section).toMatch(/Outcome categorization/i);
+    expect(section).toMatch(/Example BAD/);
+    expect(section).toMatch(/Example GOOD/);
+  });
+
+  it('rule cites the d16f133e production case', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/d16f133e/);
+  });
+
+  it('rule mandates explicit clarification for ambiguous intent (one question, then proceed)', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/MUST ask explicitly/);
+    expect(section).toMatch(/Just to confirm, would you like to pause your membership for a period and then resume billing, or fully cancel\?/);
+    expect(section).toMatch(/Do not ask this clarifying question more than once/i);
+  });
+
+  it('bans silent auto-conversion in both directions', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Treating "pause my membership" as a cancellation intent/);
+    expect(section).toMatch(/Treating "cancel my membership" as a pause intent/);
+    expect(section).toMatch(/auto-convert/i);
+  });
+
+  it('outcome categorization is explicit', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Pause requested \+ pause processed = RETAINED/);
+    expect(section).toMatch(/Pause requested \+ member changed mind to cancel = CANCELLED/);
+    expect(section).toMatch(/Cancel requested \+ pause offered \+ pause accepted = RETAINED/);
+  });
+
+  it('rule preserves the existing pause-as-save-offer pattern (cancel intent + pause accepted = RETAINED)', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/may offer a pause as a save offer per Step 4/);
+    expect(section).toMatch(/PR #6/);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('decision tree pause-first paths still exist for the relevant reasons (rule does not delete them)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/1\. Travel: 1-month pause/);
+    expect(prompt).toMatch(/2\. Relocation: 1-month pause/);
+    expect(prompt).toMatch(/16\. Lost Job: 1-month pause/);
+    expect(prompt).toMatch(/17\. Medical: 1-month pause/);
+  });
+});
+
+describe('system prompt: Phase 6 HARD RULE - FILLER PHRASE CONTROL', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - FILLER PHRASE CONTROL');
+    const end = prompt.indexOf('\n19. If any profile field is UNKNOWN', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the filler-phrase rule exists with required structure', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Banned in MEMBERSHIP MODE/);
+    expect(section).toMatch(/Empathy phrase cap/);
+    expect(section).toMatch(/Cancellation-flow specifics/);
+    expect(section).toMatch(/Example BAD/);
+    expect(section).toMatch(/Example GOOD/);
+  });
+
+  it('bans "Perfect!" entirely in MEMBERSHIP MODE / cancellation flows', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/banned[\s\S]*?Perfect!/i);
+    expect(section).toMatch(/cancellation, pause, downgrade, or billing-dispute flow/i);
+  });
+
+  it('caps empathy phrases at one per response', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/AT MOST ONE empathy phrase per/i);
+    expect(section).toMatch(/MUST NOT stack/);
+  });
+
+  it('provides substitute acknowledgments for cancellation flows', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/"Got it,"/);
+    expect(section).toMatch(/"Okay,"/);
+    expect(section).toMatch(/"Done\."/);
+  });
+
+  it('TONE & FORMATTING MEMBERSHIP MODE block references the new rule', () => {
+    const prompt = getSystemPrompt();
+    const tonStart = prompt.indexOf('MEMBERSHIP MODE:\n- 2-4 sentences per message');
+    const bothModeStart = prompt.indexOf('BOTH MODES:', tonStart);
+    expect(tonStart).toBeGreaterThan(-1);
+    expect(bothModeStart).toBeGreaterThan(tonStart);
+    const block = prompt.slice(tonStart, bothModeStart);
+    expect(block).toMatch(/Never use "Perfect!"/);
+    expect(block).toMatch(/AT MOST ONE empathy phrase per response/);
+    expect(block).toMatch(/HARD RULE - FILLER PHRASE CONTROL/);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('every "Perfect!" instance outside HARD RULE - FILLER PHRASE CONTROL sits inside an Example BAD, banned-list, or rule-cross-reference context', () => {
+    const prompt = getSystemPrompt();
+    const fillerRuleStart = prompt.indexOf('HARD RULE - FILLER PHRASE CONTROL');
+    const fillerRuleEnd = prompt.indexOf('\n19. If any profile field is UNKNOWN', fillerRuleStart);
+    const matches = [...prompt.matchAll(/Perfect!/g)];
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      const insideFillerRule = match.index >= fillerRuleStart && match.index < fillerRuleEnd;
+      if (insideFillerRule) continue;
+      const before = prompt.slice(Math.max(0, match.index - 800), match.index);
+      const inAcceptableContext =
+        /Example BAD|Banned|banned|MUST NOT|MUST not|Never use "/i.test(before);
+      expect(inAcceptableContext).toBe(true);
+    }
+  });
+});
+
+describe('system prompt: Phase 5 HARD RULE - NO HUMAN-TEAM SLA PROMISES', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - NO HUMAN-TEAM SLA PROMISES:');
+    const end = prompt.indexOf('HARD RULE - NO FABRICATED STAFF NAMES, ROLES, OR CONNECTION PROGRAMS:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the umbrella rule exists with the required structure', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Banned timeline patterns/i);
+    expect(section).toMatch(/Banned outcome patterns/i);
+    expect(section).toMatch(/Banned action patterns/i);
+    expect(section).toMatch(/GOOD pattern/i);
+    expect(section).toMatch(/What this rule DOES allow/i);
+    expect(section).toMatch(/Cross-references/i);
+  });
+
+  it('banned timeline list includes the Sindhura "within 24 to 48 hours" pattern and other common windows', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/within 24 hours/);
+    expect(section).toMatch(/within 48 hours/);
+    expect(section).toMatch(/within 24 to 48 hours/);
+    expect(section).toMatch(/by tomorrow/);
+    expect(section).toMatch(/by end of (day|week)/);
+  });
+
+  it('the GOOD pattern section contains the canonical "Someone will follow up" phrasing', () => {
+    const section = ruleSection();
+    const goodPatternIdx = section.indexOf('GOOD pattern');
+    const allowIdx = section.indexOf('What this rule DOES allow', goodPatternIdx);
+    expect(goodPatternIdx).toBeGreaterThan(-1);
+    expect(allowIdx).toBeGreaterThan(goodPatternIdx);
+    const goodPatternBlock = section.slice(goodPatternIdx, allowIdx);
+    expect(goodPatternBlock).toMatch(/Someone will follow up with you about next steps/);
+    expect(goodPatternBlock).toMatch(/will follow up/);
+  });
+
+  it('Sindhura BAD/GOOD example pair is present', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Sindhura case/);
+    expect(section).toMatch(/My credits disappeared during my pause/);
+    expect(section).toMatch(/within 24 to 48 hours to resolve this/);
+    const goodMatches = section.match(/Example GOOD \(Sindhura case[\s\S]*?(?=Example|HARD RULE)/);
+    expect(goodMatches).not.toBeNull();
+    expect(goodMatches[0]).toMatch(/Someone will follow up with you about next steps/);
+    expect(goodMatches[0]).not.toMatch(/within 24/);
+  });
+
+  it('rule allows defined policies (30-day processing, 90-day credit validity)', () => {
+    const section = ruleSection();
+    const allowIdx = section.indexOf('What this rule DOES allow');
+    const crossIdx = section.indexOf('Cross-references', allowIdx);
+    const allowBlock = section.slice(allowIdx, crossIdx);
+    expect(allowBlock).toMatch(/30 days/);
+    expect(allowBlock).toMatch(/90 days/);
+  });
+
+  it('rule explicitly carves out the defined session-end confirmation email path (codex review P2 fix)', () => {
+    const section = ruleSection();
+    const allowIdx = section.indexOf('What this rule DOES allow');
+    const crossIdx = section.indexOf('Cross-references', allowIdx);
+    const allowBlock = section.slice(allowIdx, crossIdx);
+    expect(allowBlock).toMatch(/Defined session-end confirmation emails/);
+    expect(allowBlock).toMatch(/confirmation email will be sent/);
+    expect(allowBlock).toMatch(/processConversationEnd/);
+    expect(allowBlock).toMatch(/without promising a specific timeline/);
+    expect(allowBlock).toMatch(/applies to ad-hoc follow-up promises[\s\S]*NOT to this defined session-end confirmation/);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('global scan: every "within 24" or "within 48" reference sits inside a banned-list, BAD example, or rule body context', () => {
+    const prompt = getSystemPrompt();
+    const matches = [...prompt.matchAll(/within (24|48|24 to 48|24-48) hours?/gi)];
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      const before = prompt.slice(Math.max(0, match.index - 800), match.index);
+      const inAcceptableContext =
+        /Example BAD|Banned|MUST NOT|MUST not|no specific|without promising/i.test(before);
+      expect(inAcceptableContext).toBe(true);
+    }
+  });
+});
+
+describe('system prompt: Phase 4 perk dollar values stripped + HARD RULE banning quoted amounts', () => {
+  it('MEMBER PERKS MILESTONES table has no "$XX value" annotations', () => {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('MEMBER PERKS MILESTONES:');
+    const end = prompt.indexOf('HARD RULE - MILESTONE DISCUSSION SCOPE:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const table = prompt.slice(start, end);
+    expect(table).not.toMatch(/\$\d+ value/);
+    expect(table).not.toMatch(/\$\d+\+ value/);
+    expect(table).not.toMatch(/\$\d+-\$\d+/);
+    // Perk names and timing still present
+    expect(table).toMatch(/Month 2: Moisturizer/);
+    expect(table).toMatch(/Month 4: Hyaluronic Acid Serum/);
+    expect(table).toMatch(/Month 9: Cleanser/);
+    expect(table).toMatch(/Month 12: Foundational Formulas Bundle/);
+    // Enhancement Credit dollar amounts preserved (they ARE the perk)
+    expect(table).toMatch(/Month 22: \$50 Enhancement Credit/);
+    expect(table).toMatch(/Month 42: Year 3\.5 Mid-Year, \$50 Enhancement Credit/);
+  });
+
+  it('LOYALTY POINTS redemption list has no value annotations', () => {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('LOYALTY POINTS:');
+    const end = prompt.indexOf('FACIAL PACKAGES (alternative to membership)', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = prompt.slice(start, end);
+    expect(section).not.toMatch(/\$\d+ value/);
+    expect(section).toMatch(/500 pts: Extra Extractions/);
+    expect(section).toMatch(/8,000 pts: Premier Contour Facial/);
+  });
+
+  it('Benjamin GOOD example no longer quotes "worth $77" for the Month 4 perk', () => {
+    const prompt = getSystemPrompt();
+    const benjaminIdx = prompt.indexOf('Example GOOD response: User says "Unless you give me free months');
+    expect(benjaminIdx).toBeGreaterThan(-1);
+    const benjamin = prompt.slice(benjaminIdx, benjaminIdx + 1000);
+    expect(benjamin).not.toMatch(/Hyaluronic Acid Serum worth \$77/);
+    expect(benjamin).toMatch(/Hyaluronic Acid Serum/); // perk name preserved
+    expect(benjamin).toMatch(/Month 4 perk/); // timing preserved
+  });
+
+  it('Christina BAD example no longer quotes "$41 value" for the Month 9 perk', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - CREDIT VISIBILITY DISCLAIMER:', ruleStart);
+    const section = prompt.slice(ruleStart, nextRuleStart);
+    expect(section).not.toMatch(/Cleanser, \$41 value/);
+    expect(section).toMatch(/Month 9 perk \(Cleanser\)/);
+  });
+
+  it('Zoe BAD enumeration in MILESTONE DISCUSSION SCOPE no longer quotes dollar values', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - MILESTONE DISCUSSION SCOPE:');
+    const ruleEnd = prompt.indexOf('HARD RULE - NO PERK DOLLAR VALUES:', ruleStart);
+    const section = prompt.slice(ruleStart, ruleEnd);
+    expect(section).not.toMatch(/Month 2 Moisturizer \(\$65 value\)/);
+    expect(section).not.toMatch(/\$77 value/);
+    expect(section).not.toMatch(/\$183 value/);
+    expect(section).toMatch(/Month 2 Moisturizer, Month 4 Hyaluronic Acid Serum/);
+  });
+
+  it('HARD RULE - NO PERK DOLLAR VALUES exists with required structure', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - NO PERK DOLLAR VALUES:');
+    const ruleEnd = prompt.indexOf('COMPUTED VALUES:', ruleStart);
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(ruleEnd).toBeGreaterThan(ruleStart);
+    const rule = prompt.slice(ruleStart, ruleEnd);
+    expect(rule).toMatch(/MUST NOT quote specific dollar values/i);
+    expect(rule).toMatch(/Triggers/i);
+    expect(rule).toMatch(/What the bot MAY say/i);
+    expect(rule).toMatch(/What the bot MUST NOT say/i);
+    expect(rule).toMatch(/\$50 Enhancement Credit/); // exception documented
+    expect(rule).toMatch(/Example BAD/);
+    expect(rule).toMatch(/Example GOOD/);
+  });
+
+  it('HARD RULE - NO PERK DOLLAR VALUES has no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - NO PERK DOLLAR VALUES:');
+    const ruleEnd = prompt.indexOf('COMPUTED VALUES:', ruleStart);
+    const rule = prompt.slice(ruleStart, ruleEnd);
+    expect(rule).not.toMatch(/[–—]/);
+  });
+
+  it('global scan: no "$XX value" tied to a perk name in any non-banned-list region', () => {
+    const prompt = getSystemPrompt();
+    // Scan the whole prompt for the pattern "(\$XX value)" or "worth \$XX"
+    // and assert any match sits inside a banned-list block or an "Example BAD" block.
+    const valueMatches = [...prompt.matchAll(/\(\$\d+(?:\+|-\$\d+)? value\)|worth \$\d+/g)];
+    for (const match of valueMatches) {
+      const before = prompt.slice(Math.max(0, match.index - 500), match.index);
+      const inBannedRegion =
+        /Example BAD|BANNED|MUST NOT|banned/i.test(before);
+      expect(inBannedRegion).toBe(true);
+    }
+  });
+});
+
+describe('system prompt: Phase 3 already-tried-channel escalates to memberships team not phone', () => {
+  function alreadyAttemptedChannelSection() {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - ALREADY ATTEMPTED CHANNEL:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - FOOTPRINT-AWARE RELOCATION HANDLING:', ruleStart);
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(nextRuleStart).toBeGreaterThan(ruleStart);
+    return prompt.slice(ruleStart, nextRuleStart);
+  }
+
+  it('the rule exists and contains the standard handoff phrase', () => {
+    const section = alreadyAttemptedChannelSection();
+    expect(section).toMatch(/flagging this for our memberships team to review/i);
+    expect(section).toMatch(/Someone will follow up with you about next steps/i);
+  });
+
+  it('the phone-attempted block explicitly bans suggesting (888) 677-0055 as a next step', () => {
+    const section = alreadyAttemptedChannelSection();
+    expect(section).toMatch(/do NOT suggest calling \(888\) 677-0055/i);
+  });
+
+  it('every GOOD example in the rule routes to memberships team, never to (888) 677-0055', () => {
+    const section = alreadyAttemptedChannelSection();
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|Example BAD|HARD RULE -|$)/g) || [];
+    expect(goodExamples.length).toBeGreaterThanOrEqual(3);
+    for (const good of goodExamples) {
+      expect(good).toMatch(/memberships team/i);
+      expect(good).not.toMatch(/\(888\) 677-0055/);
+      expect(good).not.toMatch(/888-677-0055/);
+    }
+  });
+
+  it('the GOOD examples do not redirect to email when the member already tried email', () => {
+    const section = alreadyAttemptedChannelSection();
+    const goodAfterEmailAttempt = section.match(/Member: "I've been trying to cancel via email[\s\S]*?(?=Example|HARD RULE -|$)/);
+    expect(goodAfterEmailAttempt).not.toBeNull();
+    expect(goodAfterEmailAttempt[0]).not.toMatch(/memberships@silvermirror\.com|hello@silvermirror\.com/i);
+  });
+});
+
+describe('system prompt: Phase 2 three-category member discount structure', () => {
+  it('MEMBER PERKS section presents the three discount tiers as distinct lines', () => {
+    const prompt = getSystemPrompt();
+    const memberPerksStart = prompt.indexOf('MEMBER PERKS:');
+    const memberCreditsStart = prompt.indexOf('MEMBERSHIP CREDITS:', memberPerksStart);
+    expect(memberPerksStart).toBeGreaterThan(-1);
+    expect(memberCreditsStart).toBeGreaterThan(memberPerksStart);
+    const section = prompt.slice(memberPerksStart, memberCreditsStart);
+    expect(section).toMatch(/Services: 20% off/);
+    expect(section).toMatch(/Silver Mirror products: 20% off/);
+    expect(section).toMatch(/Non-Silver Mirror retail.*10% off/);
+  });
+
+  it('PROMOTIONS POLICY general-deals answer enumerates all three discount tiers', () => {
+    const prompt = getSystemPrompt();
+    const policyStart = prompt.indexOf('PROMOTIONS POLICY');
+    const policyEnd = prompt.indexOf('TRIGGERING MEMBERSHIP MODE', policyStart);
+    const section = prompt.slice(policyStart, policyEnd);
+    expect(section).toMatch(/20% off services/);
+    expect(section).toMatch(/20% off Silver Mirror products/);
+    expect(section).toMatch(/10% off non-Silver Mirror retail/);
+    // The old collapsed wording is gone.
+    expect(section).not.toMatch(/20% off facials, add-ons, and Silver Mirror products, 10% off retail,/);
+  });
+
+  it('KNOWLEDGE BASE: PRODUCTS & RETAIL specifies non-Silver Mirror retail at 10%', () => {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('KNOWLEDGE BASE: PRODUCTS & RETAIL');
+    const end = prompt.indexOf('KNOWLEDGE BASE: ABOUT SILVER MIRROR', start);
+    const section = prompt.slice(start, end);
+    expect(section).toMatch(/20% off Silver Mirror products/);
+    expect(section).toMatch(/10% off non-Silver Mirror retail/);
+  });
+
+  it('the HARD RULE for three-category structure exists and names the three tiers', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - MEMBER DISCOUNT THREE-CATEGORY STRUCTURE:');
+    expect(ruleStart).toBeGreaterThan(-1);
+    const ruleEnd = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:', ruleStart);
+    expect(ruleEnd).toBeGreaterThan(ruleStart);
+    const section = prompt.slice(ruleStart, ruleEnd);
+    expect(section).toMatch(/Services: 20% off/);
+    expect(section).toMatch(/Silver Mirror products: 20% off/);
+    expect(section).toMatch(/Non-Silver Mirror retail: 10% off/);
+    expect(section).toMatch(/20% off everything/); // banned phrasing example
+    expect(section).toMatch(/20% off services and products/); // banned phrasing example
+  });
+
+  it('three-category HARD RULE has no em or en dashes', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - MEMBER DISCOUNT THREE-CATEGORY STRUCTURE:');
+    const ruleEnd = prompt.indexOf('HARD RULE - FIRST OFFER POSITIVE EMOTIONAL REFRAMING:', ruleStart);
+    const section = prompt.slice(ruleStart, ruleEnd);
+    expect(section).not.toMatch(/[–—]/);
+  });
+});
+
+describe('system prompt: Phase 1 finance-team / memberships-team billing dispute wording', () => {
+  it('every "finance team" reference sits inside a banned-list or BAD example', () => {
+    const prompt = getSystemPrompt();
+    const matches = [...prompt.matchAll(/finance team/gi)];
+    expect(matches.length).toBeGreaterThan(0);
+    for (const match of matches) {
+      const before = prompt.slice(Math.max(0, match.index - 400), match.index);
+      const inBannedRegion =
+        /Banned language|Fabricated team names|Example BAD|BANNED|MUST NOT/i.test(before);
+      expect(inBannedRegion).toBe(true);
+    }
+  });
+
+  it('the billing-dispute scripted response routes through "memberships team", not "finance team"', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT', ruleStart);
+    expect(ruleStart).toBeGreaterThan(-1);
+    expect(nextRuleStart).toBeGreaterThan(ruleStart);
+    const section = prompt.slice(ruleStart, nextRuleStart);
+    const scriptedStart = section.indexOf('Scripted response');
+    const bannedStart = section.indexOf('Banned language for billing disputes');
+    expect(scriptedStart).toBeGreaterThan(-1);
+    expect(bannedStart).toBeGreaterThan(scriptedStart);
+    const scripted = section.slice(scriptedStart, bannedStart);
+    expect(scripted).toMatch(/memberships team/i);
+    expect(scripted).not.toMatch(/finance team/i);
+    expect(scripted).not.toMatch(/billing team/i);
+    expect(scripted).not.toMatch(/accounting/i);
+  });
+
+  it('every billing-dispute GOOD example routes through "memberships team"', () => {
+    const prompt = getSystemPrompt();
+    const ruleStart = prompt.indexOf('HARD RULE - BILLING DISPUTE HANDLING:');
+    const nextRuleStart = prompt.indexOf('HARD RULE - FIRM REFUSAL SHORT-CIRCUIT', ruleStart);
+    const section = prompt.slice(ruleStart, nextRuleStart);
+    const goodExamples = section.match(/Example GOOD[\s\S]*?(?=Example GOOD|HARD RULE -|$)/g) || [];
+    expect(goodExamples.length).toBeGreaterThanOrEqual(2);
+    for (const good of goodExamples) {
+      expect(good).toMatch(/memberships team/i);
+      expect(good).not.toMatch(/finance team/i);
+      expect(good).not.toMatch(/billing team/i);
+    }
+  });
+});

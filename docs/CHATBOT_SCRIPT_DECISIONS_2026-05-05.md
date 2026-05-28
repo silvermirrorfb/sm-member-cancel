@@ -151,6 +151,39 @@ Notes:
 
 ---
 
+#### 🚩 OPEN CONFLICT (added 2026-05-27, Phase 8 audit):
+
+**The current shipped behavior is a hybrid of A and B that nobody explicitly authorized.** Surface this to Matt before any further work on Decision 7.
+
+**What shipped:**
+- PR #26 (`fix/retention-softening-and-credit-disclaimer`, May 15) added `HARD RULE - CREDIT VISIBILITY DISCLAIMER` to the system prompt. The bot now leads with an honest "I can see your membership details, but I don't have visibility into your specific credit balances or expiration dates" upfront disclaimer, then routes via the PR #18 standard handoff phrase: "I'm flagging this for our memberships team to review your credits. Someone will follow up with you about next steps." This is the explicit-disclaimer half of Vote B.
+- PR #18 / PR #27 / Phase 5 of this branch (HARD RULE - NO HUMAN-TEAM SLA PROMISES) explicitly BAN the "within 24 hours" follow-up promise that was the other half of Vote B. So the shipped behavior dropped the 24-hour SLA without explicit authorization to drop it.
+
+**The conflict:**
+- **Per QA_ISSUES.md cancel-bot #14:** "Travis decision (May 15 2026, Decision 7): option B." This is what the May 15 PR cited as the basis for the explicit-disclaimer-plus-handoff approach.
+- **Per Matt's audit brief (2026-05-27):** "Travis voted A with 'avoid expired credits, escalate if asked' refinement." This refinement is not reflected anywhere in the shipped prompt, and Option A (wire in credit visibility) would have been a code-build path that nobody has scoped.
+- The two accounts of Travis's vote disagree. The shipped behavior is closer to a heavily-trimmed Vote B (disclaimer kept, 24-hour follow-up promise stripped) than to either Travis's stated preference per the May 15 record OR Matt's stated preference per the May 27 audit.
+
+**What "avoid expired credits, escalate if asked" might mean (interpretation, needs Matt's clarification):**
+- The bot proactively warns about expired credits before the member asks (e.g., during the post-lookup confirmation message, if the bot's profile data shows the member has unused credits approaching the 90-day expiration window)? This would be an additive change to the post-lookup message; not in current scope.
+- OR the bot only mentions credits when the member specifically asks (status quo), and escalates THEN with the handoff phrase. This is closer to current shipped behavior except that Vote A's "wire in credit visibility" code build is not part of the shipped behavior.
+
+**Reconciliation Matt should decide:**
+
+1. **Option B-stripped (current shipped behavior):** Keep PR #26's HARD RULE - CREDIT VISIBILITY DISCLAIMER as-is. The 24-hour follow-up promise was correctly omitted per the broader anti-SLA principle. No further change.
+
+2. **Option A as Matt described it (with the "avoid expired credits, escalate if asked" refinement):** Keep the disclaimer + handoff for member-initiated credit questions. ADD a proactive "you have N unused credits, the earliest expires on [date], you may want to use them before [date]" line to the post-lookup message IF the injected profile data has credit count + expiration date populated. This requires backend work to populate those fields from Boulevard, which is the "wire in credit visibility" piece. Code build, not prompt-only.
+
+3. **Option B as originally specified (Vote B with the 24-hour SLA):** Restore the 24-hour follow-up promise that was stripped. This conflicts with HARD RULE - NO HUMAN-TEAM SLA PROMISES added in Phase 5 of this branch and would need that rule to be relaxed for the credit-question path.
+
+4. **A different option Matt has in mind:** Specify the wording and we'll ship it.
+
+**Recommendation (for Matt to override):** Option 1. The current shipped behavior is operationally clean (no fabricated SLA, honest about the visibility gap, routes to memberships team). Option 2 is also fine but requires a code-build budget that isn't currently allocated. Option 3 conflicts with the anti-SLA principle and should not be selected.
+
+**Note for the auditing AI:** Do NOT auto-resolve this conflict by editing the prompt. Surface it to Matt and wait for his explicit decision.
+
+---
+
 ### Decision 8: Voice / tone clean-up, "Perfect!" and scripted empathy
 
 **What we saw:** Three patterns Codex flagged as making the bot sound robotic:
