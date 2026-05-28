@@ -1923,6 +1923,74 @@ describe('system prompt: no em dashes or en dashes in PR #28 edits', () => {
   });
 });
 
+describe('system prompt: Phase 7 HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY', () => {
+  function ruleSection() {
+    const prompt = getSystemPrompt();
+    const start = prompt.indexOf('HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY:');
+    const end = prompt.indexOf('HARD RULE - CREDIT VISIBILITY DISCLAIMER:', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return prompt.slice(start, end);
+  }
+
+  it('the rule exists with required structure (intents, response patterns, banned patterns, examples)', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Detection triggers[\s\S]*PAUSE intent/i);
+    expect(section).toMatch(/Detection triggers[\s\S]*CANCEL intent/i);
+    expect(section).toMatch(/Detection triggers[\s\S]*AMBIGUOUS/i);
+    expect(section).toMatch(/Response patterns/i);
+    expect(section).toMatch(/Banned patterns/i);
+    expect(section).toMatch(/Outcome categorization/i);
+    expect(section).toMatch(/Example BAD/);
+    expect(section).toMatch(/Example GOOD/);
+  });
+
+  it('rule cites the d16f133e production case', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/d16f133e/);
+  });
+
+  it('rule mandates explicit clarification for ambiguous intent (one question, then proceed)', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/MUST ask explicitly/);
+    expect(section).toMatch(/Just to confirm, would you like to pause your membership for a period and then resume billing, or fully cancel\?/);
+    expect(section).toMatch(/Do not ask this clarifying question more than once/i);
+  });
+
+  it('bans silent auto-conversion in both directions', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Treating "pause my membership" as a cancellation intent/);
+    expect(section).toMatch(/Treating "cancel my membership" as a pause intent/);
+    expect(section).toMatch(/auto-convert/i);
+  });
+
+  it('outcome categorization is explicit', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/Pause requested \+ pause processed = RETAINED/);
+    expect(section).toMatch(/Pause requested \+ member changed mind to cancel = CANCELLED/);
+    expect(section).toMatch(/Cancel requested \+ pause offered \+ pause accepted = RETAINED/);
+  });
+
+  it('rule preserves the existing pause-as-save-offer pattern (cancel intent + pause accepted = RETAINED)', () => {
+    const section = ruleSection();
+    expect(section).toMatch(/may offer a pause as a save offer per Step 4/);
+    expect(section).toMatch(/PR #6/);
+  });
+
+  it('rule has no em or en dashes', () => {
+    const section = ruleSection();
+    expect(section).not.toMatch(/[–—]/);
+  });
+
+  it('decision tree pause-first paths still exist for the relevant reasons (rule does not delete them)', () => {
+    const prompt = getSystemPrompt();
+    expect(prompt).toMatch(/1\. Travel: 1-month pause/);
+    expect(prompt).toMatch(/2\. Relocation: 1-month pause/);
+    expect(prompt).toMatch(/16\. Lost Job: 1-month pause/);
+    expect(prompt).toMatch(/17\. Medical: 1-month pause/);
+  });
+});
+
 describe('system prompt: Phase 6 HARD RULE - FILLER PHRASE CONTROL', () => {
   function ruleSection() {
     const prompt = getSystemPrompt();
