@@ -6,6 +6,7 @@ import {
   resolveBoulevardLocationInput,
   verifyMemberIdentity,
   levenshtein,
+  namesLikelyMatch,
   OFFICIAL_LOCATION_REGISTRY,
   WALKIN_PRICES,
   CURRENT_RATES,
@@ -2292,5 +2293,99 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(result.diagnostics?.failure).toBe('appointments_query_failed');
     expect(result.diagnostics?.queryErrors?.[0]?.stage).toBe('preflight');
     expect(result.diagnostics?.queryErrors?.[0]?.errors?.[0]?.code).toBe('MISSING_REQUIRED_QUERY_ARG');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug 3 (2026-05-28): namesLikelyMatch edge-case hardening.
+//
+// Three known members were dropped from name-scan results despite having been
+// previously found: Donatella Vilgrain, Catherine Hamrick-Down, Maureen Golga.
+// The user's hypothesis: namesLikelyMatch is too strict for real-world name
+// variations (hyphenation, nicknames, accented characters, whitespace).
+//
+// These tests document the current behavior (some pass already because the
+// existing matcher has substring + levenshtein fallback) and pin down the
+// real edge cases that need fixing. Critical safety invariant: a wrong-member
+// match is the worst outcome, so any loosening must NOT introduce false
+// positives between distinct people.
+// ---------------------------------------------------------------------------
+describe('namesLikelyMatch edge cases (Bug 3)', () => {
+  describe('exact and near-exact matches (regression baseline)', () => {
+    it('matches exact first + last', () => {
+      expect(namesLikelyMatch('Donatella Vilgrain', 'Donatella', 'Vilgrain')).toBe(true);
+    });
+
+    it('matches when search is just first+last and candidate has middle name', () => {
+      expect(namesLikelyMatch('Sophia Dowd', 'Sophia', 'Isabel Dowd')).toBe(true);
+    });
+
+    it('is case-insensitive', () => {
+      expect(namesLikelyMatch('DONATELLA VILGRAIN', 'donatella', 'vilgrain')).toBe(true);
+      expect(namesLikelyMatch('donatella vilgrain', 'DONATELLA', 'VILGRAIN')).toBe(true);
+    });
+
+    it('handles extra whitespace', () => {
+      expect(namesLikelyMatch('  Donatella   Vilgrain  ', 'Donatella', 'Vilgrain')).toBe(true);
+    });
+
+    it('tolerates a single-letter typo via levenshtein fallback', () => {
+      expect(namesLikelyMatch('Maureen Golga', 'Maureen', 'Golgs')).toBe(true);
+    });
+  });
+
+  describe('hyphenated last names', () => {
+    it('matches when both sides hyphenate the same way', () => {
+      expect(namesLikelyMatch('Catherine Hamrick-Down', 'Catherine', 'Hamrick-Down')).toBe(true);
+    });
+
+    it('matches when search has hyphen and candidate uses space (Boulevard sometimes drops the hyphen)', () => {
+      expect(namesLikelyMatch('Catherine Hamrick-Down', 'Catherine', 'Hamrick Down')).toBe(true);
+    });
+
+    it('matches when search has space and candidate uses hyphen (Boulevard sometimes adds the hyphen)', () => {
+      expect(namesLikelyMatch('Catherine Hamrick Down', 'Catherine', 'Hamrick-Down')).toBe(true);
+    });
+
+    it('matches when search uses hyphen and candidate uses only the first half (informal short-form)', () => {
+      expect(namesLikelyMatch('Catherine Hamrick-Down', 'Catherine', 'Hamrick')).toBe(true);
+    });
+  });
+
+  describe('accented / diacritic characters', () => {
+    it('matches when search has accents and candidate does not', () => {
+      expect(namesLikelyMatch('José García', 'Jose', 'Garcia')).toBe(true);
+    });
+
+    it('matches when candidate has accents and search does not', () => {
+      expect(namesLikelyMatch('Jose Garcia', 'José', 'García')).toBe(true);
+    });
+
+    it('matches with multi-character accents (Polish, German umlaut, French cedilla)', () => {
+      expect(namesLikelyMatch('Łukasz Müller', 'Lukasz', 'Muller')).toBe(true);
+      expect(namesLikelyMatch('Francois Genet', 'François', 'Genêt')).toBe(true);
+    });
+  });
+
+  describe('safety: must NOT produce false positives between distinct people', () => {
+    it('rejects clearly different first + last names', () => {
+      expect(namesLikelyMatch('Catherine Hamrick', 'Donatella', 'Vilgrain')).toBe(false);
+    });
+
+    it('rejects same last name, different first name', () => {
+      // A loose matcher would conflate "Sam Smith" with "Pat Smith". Must not.
+      expect(namesLikelyMatch('Sam Smith', 'Pat', 'Smith')).toBe(false);
+    });
+
+    it('rejects similar but distinct surnames', () => {
+      expect(namesLikelyMatch('Maureen Golga', 'Maureen', 'Gomez')).toBe(false);
+    });
+
+    it('rejects single-token requests (no last name)', () => {
+      // A first-name-only search must NOT match anyone, period. Wrong-member
+      // match is worst-case; if the caller only has a first name, fall back
+      // to a safer path (phone/email/disambiguation prompt).
+      expect(namesLikelyMatch('Catherine', 'Catherine', 'Hamrick')).toBe(false);
+    });
   });
 });
