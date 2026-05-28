@@ -124,12 +124,19 @@ function extractLocation(text) {
     return hit || null;
 }
 
-function buildSupportIncidentResponse() {
+export function buildSupportIncidentResponse() {
+    // Wording matches HARD RULE - NO HUMAN-TEAM SLA PROMISES and HARD RULE - NO FABRICATED
+    // ESCALATION in src/lib/system-prompt.txt. No fabricated team ("QA team" does not exist
+    // and has no defined SLA), no specific timeline ("48 hours" is not a real SLA), no
+    // outcome guarantee. Uses the canonical "Someone will follow up about next steps"
+    // pattern plus the BOOKING/PAYMENT ISSUE FLOW guidance: flag for follow-up, give the
+    // urgent phone path, ask for troubleshooting details. See also: codex-review-2026-05-27
+    // P2 follow-up findings.
     return [
-      "Thanks for flagging this. I've alerted our QA team and logged this issue for follow-up.",
-      `We aim to respond within 48 hours. The fastest way to get help is to call ${SUPPORT_PHONE}.`,
-      `For non-urgent follow-up, email ${HELLO_EMAIL}.`,
-      'If you can, please share your location, device/browser, and a screenshot so we can troubleshoot faster.',
+      "Thanks for flagging this. I'm flagging this for follow-up.",
+      `The fastest way to get help is to call ${SUPPORT_PHONE}.`,
+      `For non-urgent follow-up, email ${HELLO_EMAIL}. Someone will follow up with you about next steps.`,
+      'If you can, please share your location, device/browser, and a screenshot to help troubleshoot.',
     ].join(' ');
 }
 
@@ -325,7 +332,7 @@ function polishVisibleAssistantResponse(text, userText) {
     return cleaned || original;
 }
 
-function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
+export function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     const firstName = String(profile?.firstName || profile?.name?.split(' ')[0] || 'there').trim();
     const rawText = String(rawUserMessage || '');
     const recentUserText = String(options.recentUserText || '');
@@ -434,7 +441,11 @@ function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     if (cancelIntent && inactiveAccount) {
           sentences.push(`It looks like your account is currently inactive and has an outstanding balance.`);
           sentences.push(`The memberships team can help with either path once the balance is settled: reactivate your membership if you want to keep benefits active, or finalize cancellation if you want to close it out.`);
-          sentences.push(`Please email ${MEMBERSHIP_EMAIL} with your full name and best callback number, and they will follow up within 24-48 hours.`);
+          // Inactive-account cancel-intent fallback. Matches the canonical pattern from
+          // HARD RULE - NO HUMAN-TEAM SLA PROMISES: name the channel + "someone will follow
+          // up with you about next steps" with no specific timeline. Mirrors the
+          // inactive-account guidance at src/lib/system-prompt.txt CANCELLATION section.
+          sentences.push(`Please email ${MEMBERSHIP_EMAIL} with your full name and best callback number, and someone will follow up with you about next steps.`);
           return sentences.join(' ');
     }
 
@@ -462,7 +473,7 @@ function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     return sentences.join(' ');
 }
 
-function buildLookupFailureMessage(firstName, attempt) {
+export function buildLookupFailureMessage(firstName, attempt) {
     const namePrefix = firstName ? `${firstName}, ` : '';
     const seed = `${firstName}|${attempt}`;
 
@@ -473,9 +484,13 @@ function buildLookupFailureMessage(firstName, attempt) {
           ], `${seed}|fail_first`);
     }
 
+    // Both variants comply with HARD RULE - NO HUMAN-TEAM SLA PROMISES: no specific
+    // timeline (no "within 24-48 hours"), generic "someone will follow up about next
+    // steps" handoff. The membership team's ability to complete the cancellation is
+    // a real capability statement (not an SLA promise) and is preserved.
     return pickVariant([
-          `${namePrefix}I still cannot locate the account in chatbot search.\n\nPlease email ${MEMBERSHIP_EMAIL} and include:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team replies within 24-48 hours and can complete the cancellation process for you.`,
-          `${namePrefix}I still do not see a reliable account match here.\n\nPlease email ${MEMBERSHIP_EMAIL} with:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team can locate the account and handle cancellation within 24-48 hours.`,
+          `${namePrefix}I still cannot locate the account in chatbot search.\n\nPlease email ${MEMBERSHIP_EMAIL} and include:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team can complete the cancellation process. Someone will follow up with you about next steps.`,
+          `${namePrefix}I still do not see a reliable account match here.\n\nPlease email ${MEMBERSHIP_EMAIL} with:\n- Full name\n- Phone number\n- Any possible signup email\n\nThe memberships team can locate the account and handle the cancellation. Someone will follow up with you about next steps.`,
     ], `${seed}|fail_second`);
 }
 
