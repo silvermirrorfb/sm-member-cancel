@@ -424,9 +424,31 @@ function parseTierFromText(text) {
   return match ? match[1] : null;
 }
 
+// Explicit base-letter folds for Latin-extension characters that don't
+// decompose via NFD (these are atomic letters, not precomposed accents).
+// Without this, names like "Łukasz" lose the Ł entirely.
+const LATIN_EXTENSION_FOLDS = {
+  'Ł': 'L', 'ł': 'l',
+  'Ø': 'O', 'ø': 'o',
+  'Æ': 'AE', 'æ': 'ae',
+  'Œ': 'OE', 'œ': 'oe',
+  'ß': 'ss',
+  'Þ': 'Th', 'þ': 'th',
+  'Ð': 'D', 'ð': 'd',
+};
+
 function normalizeNameText(text) {
   if (!text) return '';
-  return String(text)
+  // 1) NFD decomposes precomposed accented characters into base + combining
+  //    mark: "José" -> "Jose", "Müller" -> "Muller", "François" -> "Francois".
+  // 2) Strip the combining-mark range.
+  // 3) Apply explicit folds for atomic Latin-extension letters that NFD does
+  //    NOT decompose (Polish Ł, Norwegian Ø, German ß, etc.).
+  // 4) Lowercase, strip non-letter punctuation, collapse whitespace.
+  let s = String(text).normalize('NFD').replace(/[̀-ͯ]/g, '');
+  let folded = '';
+  for (const ch of s) folded += (LATIN_EXTENSION_FOLDS[ch] || ch);
+  return folded
     .toLowerCase()
     .replace(/[^a-z\s'-]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -502,11 +524,26 @@ function resolveNameScanFallbackCandidate(requestedName, requestedEmail, candida
   return { candidate: null, strategy: null, reason: 'no_match' };
 }
 
+// 2026-05-28 Bug 3 hardening:
+// - Reject single-token requests (a first-name-only search must NOT match;
+//   wrong-member match is worst-case, so we route those to safer paths).
+// - Tighten the fuzzy fallback: was lev<=3 on the whole-name string, which
+//   matched "Sam Smith" vs "Pat Smith" (lev=3) and "Maureen Golga" vs
+//   "Maureen Gomez" (lev=2). Now require first-name exact AND last-name lev<=2,
+//   OR last-name exact AND first-name lev<=2.
+// - Handle hyphenated last names symmetrically: "Hamrick-Down" should match
+//   "Hamrick Down" and "Hamrick" (the informal short-form).
+function hyphenSplit(token) {
+  return String(token || '').split('-').filter(Boolean);
+}
+
 function namesLikelyMatch(requestedName, candidateFirstName, candidateLastName) {
   const reqTokens = tokenizeName(requestedName);
   const candFull = `${candidateFirstName || ''} ${candidateLastName || ''}`.trim();
   const candTokens = tokenizeName(candFull);
-  if (reqTokens.length === 0 || candTokens.length === 0) return false;
+  // Safety: a first-name-only search is too ambiguous to auto-match. The
+  // caller should fall back to phone/email or a disambiguation prompt.
+  if (reqTokens.length < 2 || candTokens.length === 0) return false;
 
   const reqFirst = reqTokens[0];
   const reqLast = reqTokens[reqTokens.length - 1];
@@ -516,19 +553,73 @@ function namesLikelyMatch(requestedName, candidateFirstName, candidateLastName) 
   // Strong signal: first + last token align.
   if (reqFirst === candFirst && reqLast === candLast) return true;
 
-  // Allow middle-name variants where both sides still contain first + last.
+  // Allow middle-name variants: search "Sophia Dowd" vs candidate "Sophia
+  // Isabel Dowd".
   if (reqFirst === candFirst && candTokens.includes(reqLast)) return true;
   if (candFirst === reqFirst && reqTokens.includes(candLast)) return true;
 
-  const reqNorm = normalizeNameText(requestedName);
-  const candNorm = normalizeNameText(candFull);
-  if (!reqNorm || !candNorm) return false;
+  // Hyphenated last names. Only match when:
+  //   a) Both sides hyphenated and any part overlaps (hyphen-on-hyphen drift)
+  //   b) Both sides effectively have the same multi-part last name, just one
+  //      side uses hyphen and the other uses space ("Hamrick-Down" vs
+  //      "Hamrick Down"): require all parts overlap.
+  //   c) Bare-side last name equals the FIRST PART of the hyphenated side
+  //      (the informal short-form convention: "Hamrick-Down" -> "Hamrick").
+  //      Codex flagged that the previous "any-part overlap" rule matched
+  //      "Smith" against "O'Brien-Smith", which is a different surname.
+  //      First-part-only is the safer cultural convention.
+  if (reqFirst === candFirst) {
+    const reqLastParts = hyphenSplit(reqLast);
+    const candLastParts = hyphenSplit(candLast);
+    const reqLastTokens = reqTokens.slice(1);
+    const candLastTokens = candTokens.slice(1);
+    if (reqLastParts.length > 1 && candLastParts.length > 1) {
+      // Codex P1 fix (2026-05-28): hyphenated-vs-hyphenated requires ALL parts
+      // to match as sets (order-independent). The prior `some(...)` rule false-
+      // positive-matched "John Smith-Jones" to "John Smith-Brown" because they
+      // share "Smith". For distinct members with the same first name and one
+      // shared surname component, picking the wrong client is the worst
+      // possible outcome of this matcher (the route would then process a
+      // different member's account). Strict same-set matching is safer.
+      const reqSet = new Set(reqLastParts);
+      const candSet = new Set(candLastParts);
+      if (reqSet.size === candSet.size && [...reqSet].every(p => candSet.has(p))) {
+        return true;
+      }
+    }
+    if (reqLastParts.length > 1 && candLastTokens.length >= 2) {
+      const reqSet = new Set(reqLastParts);
+      if (candLastTokens.every(t => reqSet.has(t))) return true;
+    }
+    if (candLastParts.length > 1 && reqLastTokens.length >= 2) {
+      const candSet = new Set(candLastParts);
+      if (reqLastTokens.every(t => candSet.has(t))) return true;
+    }
+    // Bare-side match against the FIRST part of the hyphenated side.
+    if (reqLastParts.length > 1 && candLast === reqLastParts[0]) return true;
+    if (candLastParts.length > 1 && reqLast === candLastParts[0]) return true;
+  }
 
-  // Substring allows "sophia dowd" vs "sophia isabel dowd".
-  if (reqNorm.includes(candNorm) || candNorm.includes(reqNorm)) return true;
+  // Strict fuzzy. Both rules now length-aware (per codex P1):
+  //   1) Same FIRST exact + close LAST. lev<=1 always; lev=2 only when the
+  //      longer last name is >=5 chars. Catches "Maureen Golga"/"Maureen
+  //      Golgs" (lev=1) and "Catherine Hamrik"/"Catherine Hamrick" (lev=1,
+  //      len 7), while rejecting "Amy Li"/"Amy Wu" (lev=2, len 2).
+  //   2) Same LAST exact + close FIRST, with the same length-aware threshold.
+  //      Lets "Sofia"/"Sophia" (lev=2, len 5/6) match while rejecting
+  //      "Sam"/"Pat" (lev=2, len 3/3).
+  if (reqFirst === candFirst) {
+    const lastLev = levenshtein(reqLast, candLast);
+    if (lastLev <= 1) return true;
+    if (lastLev <= 2 && Math.max(reqLast.length, candLast.length) >= 5) return true;
+  }
+  if (reqLast === candLast) {
+    const firstLev = levenshtein(reqFirst, candFirst);
+    if (firstLev <= 1) return true;
+    if (firstLev <= 2 && Math.max(reqFirst.length, candFirst.length) >= 5) return true;
+  }
 
-  // Final fuzzy check for minor typos.
-  return levenshtein(candNorm, reqNorm) <= 3;
+  return false;
 }
 
 function getCachedMembership(clientId) {
@@ -4389,6 +4480,7 @@ export {
   normalizeBoulevardLocationId,
   canonicalizeBoulevardLocationId,
   resolveBoulevardLocationInput,
+  namesLikelyMatch,
   OFFICIAL_LOCATION_REGISTRY,
   WALKIN_PRICES,
   CURRENT_RATES,
