@@ -2348,7 +2348,7 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   const targetDurationMinutes = isFiniteNumber(options.targetDurationMinutes)
     ? options.targetDurationMinutes
     : pickUpgradeTargetDuration(currentDurationMinutes);
-  const isMember = Boolean(profile?.tier) && !/inactive|cancel/.test(String(profile?.accountStatus || '').toLowerCase());
+  const isMember = (profile?.hasMembership === true || Boolean(profile?.tier)) && !/inactive|cancel/.test(String(profile?.accountStatus || '').toLowerCase());
   if (!isFiniteNumber(targetDurationMinutes)) {
     return {
       eligible: false,

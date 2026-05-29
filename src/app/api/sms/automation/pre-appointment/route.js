@@ -169,7 +169,7 @@ function buildAddonOffer(profile, opportunity, options = {}) {
 
   const isMember = typeof opportunity?.isMember === 'boolean'
     ? opportunity.isMember
-    : Boolean(profile?.tier) && !/inactive|cancel/i.test(String(profile?.accountStatus || '').toLowerCase());
+    : (profile?.hasMembership === true || Boolean(profile?.tier)) && !/inactive|cancel/i.test(String(profile?.accountStatus || '').toLowerCase());
   return {
     offerKind: 'addon',
     appointmentId: opportunity.appointmentId || null,
@@ -217,7 +217,7 @@ function buildAddonOfferMessage(offer, options = {}) {
   const isMember = options.isMember === true;
   if (isMember) {
     const memberPrice = Math.round(price * 0.8);
-    return `${greeting} we can add ${offer.addOnName} to your facial today for just $${memberPrice} (your member price — $${price - memberPrice} off). Reply YES to add it or NO to skip.`;
+    return `${greeting} we can add ${offer.addOnName} to your facial today for just $${memberPrice} (your member price, $${price - memberPrice} off). Reply YES to add it or NO to skip.`;
   }
   return `${greeting} we can add ${offer.addOnName} to your facial today for $${price}. Reply YES to add it or NO to skip.`;
 }

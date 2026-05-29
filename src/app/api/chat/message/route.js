@@ -37,6 +37,16 @@ const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
 const HELLO_EMAIL = 'hello@silvermirror.com';
 const SUPPORT_PHONE = '(888) 677-0055';
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
+// Explicit account-deletion / data-erasure requests. Distinct from membership
+// cancellation: deletion is handled by hello@, never by the cancellation flow.
+// Requires a deletion verb paired with account/profile/data so "remove the late
+// fee" or "cancel my membership" do not match.
+const ACCOUNT_DELETION_KEYWORDS = /\b(delete|deleting|deletion|remove|removing|removal|erase|erasing|wipe)\b[^.?!\n]{0,25}\b(account|profile|my data|my info|my information|personal data|personal info|personal information)\b|\b(account|profile)\b[^.?!\n]{0,15}\b(deletion|deleted|removed|erased)\b|\bright to be forgotten\b/i;
+// Broader than CANCELLATION_KEYWORDS: ANY phrasing that signals wanting to stop a
+// membership or billing (e.g. "stop my billing", "end my subscription", "close my
+// membership", "stop charging me"). Used only to guard the deletion fast-path so
+// it can never block a cancellation request (FTC Negative Option Rule).
+const STOP_MEMBERSHIP_KEYWORDS = /\b(cancel|cancellation|terminate|end|stop|close|deactivate|discontinue)\b[^.?!\n]{0,30}\b(member|membership|subscription|billing|bill|payment|payments|charge|charges|charged|plan|dues|auto[\s-]?renew\w*)\b|\bstop (?:charging|billing|paying|the charges?)\b|\b(?:don'?t|do not|stop|no longer|never|quit)\b[^.?!\n]{0,20}\b(?:bill|billing|charge|charging|charged|charge me)\b/i;
 const SENSITIVE_CONTEXT_KEYWORDS = /\b(lost job|laid off|medical|surgery|hospital|hardship|can'?t afford|cannot afford|stressed|overwhelmed|frustrated|angry|upset|anxious)\b/i;
 const PAUSE_CREDIT_KEYWORDS = /\b(credit|credits)\b/i;
 const PAUSE_HOLD_KEYWORDS = /\b(pause|paused|hold|on hold)\b/i;
@@ -156,8 +166,21 @@ function collectRecentUserText(messages, limit = 6) {
     return recent.join(' ');
 }
 
-function hasCancellationIntent(text) {
+export function hasCancellationIntent(text) {
     return CANCELLATION_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+export function isAccountDeletionRequest(text) {
+    return ACCOUNT_DELETION_KEYWORDS.test(String(text || '').toLowerCase());
+}
+
+// True for any phrasing that signals wanting to stop membership or billing,
+// broader than hasCancellationIntent. Guards the deletion fast-path so a
+// dual-intent message ("delete my account and stop my billing") is never
+// short-circuited away from the cancellation flow.
+export function wantsToStopMembershipOrBilling(text) {
+    const input = String(text || '').toLowerCase();
+    return CANCELLATION_KEYWORDS.test(input) || STOP_MEMBERSHIP_KEYWORDS.test(input);
 }
 
 function isPauseCreditsQuestion(text) {
@@ -478,6 +501,13 @@ export function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
 // deletion / profile changes route to hello@, membership questions to the
 // memberships inbox. (Douglas Lee false-positive: a non-member was flagged
 // as a member and pushed through cancellation with all fields UNKNOWN.)
+// Account deletion is handled by the team at hello@, not by this bot and not by
+// the membership cancellation flow. Applies to members and non-members alike.
+export function buildAccountDeletionResponse(firstName) {
+    const namePrefix = firstName ? `${firstName}, ` : '';
+    return `${namePrefix}deleting an account is handled by our team directly, so I am not able to do that from here. Please email ${HELLO_EMAIL} from the email on your account and they can take care of it. If you also want to stop a membership and its billing, let me know or email ${MEMBERSHIP_EMAIL} and the memberships team can help.`;
+}
+
 export function buildNoMembershipMessage(firstName) {
     const namePrefix = firstName ? `${firstName}, ` : '';
     return `${namePrefix}I looked this up and I am not seeing an active Silver Mirror membership tied to your details, so there is nothing for me to cancel here.\n\nIf you were trying to delete your account or update your information, please email ${HELLO_EMAIL} and the team can take care of that.\n\nFor anything else membership related, you can reach the memberships team at ${MEMBERSHIP_EMAIL}.`;
@@ -745,6 +775,30 @@ export async function POST(request) {
       // Add user message to history
       await addMessage(sessionId, 'user', sanitizedMessage);
       pendingTranscriptEntries.push({ role: 'user', content: sanitizedMessage });
+
+      // Account-deletion requests route to hello@ (the team that handles them),
+      // never into the membership cancellation flow. Fires for members and
+      // non-members in any mode, before cancellation logic. (Douglas Lee asked
+      // to delete his account and was wrongly pushed into cancellation.)
+      // Dual-intent guard (FTC: cancellation must never be blocked): if the same
+      // message also expresses any intent to stop membership or billing, defer to
+      // the cancellation flow instead of short-circuiting to the deletion handoff.
+      if (isAccountDeletionRequest(sanitizedMessage) && !wantsToStopMembershipOrBilling(sanitizedMessage)) {
+            const deletionFirstName = String(
+              session.memberProfile?.firstName || (extractName(sanitizedMessage) || '').split(' ')[0] || ''
+            ).trim();
+            const deletionResponse = buildAccountDeletionResponse(deletionFirstName);
+            await addMessage(sessionId, 'assistant', deletionResponse);
+            pendingTranscriptEntries.push({ role: 'assistant', content: deletionResponse });
+            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'account deletion routing');
+            return NextResponse.json({
+                message: deletionResponse,
+                sessionId,
+                accountDeletionRouted: true,
+            }, {
+                headers: buildRateLimitHeaders(rateLimit),
+            });
+      }
 
       // Direct FAQ answer for a common question: credits during pause/hold.
       if (isPauseCreditsQuestion(sanitizedMessage)) {
