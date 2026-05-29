@@ -7,7 +7,7 @@ import {
   normalizePhone,
   resolveBoulevardLocationInput,
 } from '../../../../lib/boulevard';
-import { registerMember } from '../../../../lib/sms-member-registry';
+import { registerMember, setPhoneIndexEntry } from '../../../../lib/sms-member-registry';
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 50;
@@ -41,9 +41,13 @@ export async function GET(request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const enabled = String(process.env.SMS_CRON_ENABLED || '').toLowerCase();
-  if (enabled !== 'true' && enabled !== '1') {
-    return NextResponse.json({ ok: true, skipped: 'SMS_CRON_ENABLED is false' });
+  // Seed runs independent of SMS_CRON_ENABLED so the registry (and phone
+  // index) stay warm during outbound-send pauses. No member-visible side
+  // effects; only writes Boulevard client data to Redis. Explicit opt-out:
+  // set SMS_REGISTRY_SEED_ENABLED=false.
+  const seedEnabled = String(process.env.SMS_REGISTRY_SEED_ENABLED || 'true').toLowerCase();
+  if (seedEnabled === 'false' || seedEnabled === '0') {
+    return NextResponse.json({ ok: true, skipped: 'SMS_REGISTRY_SEED_ENABLED is false' });
   }
 
   const locationsRaw = String(process.env.SMS_CRON_LOCATIONS || '').trim();
@@ -125,7 +129,12 @@ export async function GET(request) {
         phone,
         locationName: targetLocations.get(clientLocId),
       });
-      if (success) registered++;
+      if (success) {
+        registered++;
+        // Populate phone→clientId reverse index for the Twilio webhook's
+        // O(1) lookup. No additional Boulevard call — phone is already in hand.
+        await setPhoneIndexEntry(phone, node.id, clientLocId);
+      }
     }
 
     if (!connection?.pageInfo?.hasNextPage) break;

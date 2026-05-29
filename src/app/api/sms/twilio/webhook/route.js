@@ -24,11 +24,68 @@ import {
 } from '../../../../../lib/sms-upgrade-policy';
 import {
   evaluateUpgradeOpportunityForProfile,
+  getClientById,
   lookupMember,
   reverifyAndApplyUpgradeForProfile,
 } from '../../../../../lib/boulevard';
+import { lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
 import { logSmsChatMessages, logSupportIncident } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
+
+// Cap on the slow O(N) phone-scan fallback. Twilio's webhook timeout is
+// 15 seconds; we reserve 3s for the rest of the handler. On deadline we
+// log at error level and return null, letting the existing no-profile
+// path (lines ~634-661) reply 200 with the manual-confirm TwiML.
+const PHONE_SCAN_DEADLINE_MS = 12_000;
+
+async function lookupProfileWithDeadline(from, scanFn) {
+  // O(1) Redis lookup first — avoids the 15-50s Boulevard phone-scan that
+  // historically caused Twilio ERR:11200 on cold-cache inbound replies.
+  try {
+    const indexed = await lookupClientIdByPhoneFromIndex(from);
+    if (indexed?.clientId) {
+      const profile = await getClientById(indexed.clientId);
+      if (profile) {
+        // Verify the resolved client still maps to the inbound number's
+        // phone-index key before trusting the fast path. A stale or reassigned
+        // index entry could otherwise attach the wrong member's profile to
+        // this session. On mismatch, fall through to the authoritative scan.
+        const fromKey = normalizePhoneForIndex(from);
+        const profileKey = normalizePhoneForIndex(profile.phone);
+        if (fromKey && profileKey && fromKey === profileKey) {
+          return profile;
+        }
+        console.warn(
+          `[sms-webhook] phone-index stale: clientId ${indexed.clientId} phone ${profileKey || '(none)'} does not match inbound ${fromKey}, falling through to scan`,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn('[sms-webhook] phone-index lookup error:', err?.message || err);
+  }
+  // Fallback: race the slow O(N) scan against a 12s deadline.
+  console.log('[sms-webhook] phone-index miss, attempting fallback scan with 12s deadline');
+  const t0 = Date.now();
+  let timeoutHandle = null;
+  const deadline = new Promise(resolve => {
+    timeoutHandle = setTimeout(() => resolve('__deadline__'), PHONE_SCAN_DEADLINE_MS);
+  });
+  const scanPromise = Promise.resolve()
+    .then(() => scanFn('', from))
+    .catch(err => {
+      console.warn('[sms-webhook] fallback scan threw:', err?.message || err);
+      return null;
+    });
+  const result = await Promise.race([scanPromise, deadline]);
+  if (timeoutHandle) clearTimeout(timeoutHandle);
+  const elapsed = Date.now() - t0;
+  if (result === '__deadline__') {
+    console.error(`[sms-webhook] phone-scan timeout after ${elapsed}ms, returning empty profile`);
+    return null;
+  }
+  console.log(`[sms-webhook] fallback scan completed in ${elapsed}ms (profile=${result ? 'hit' : 'miss'})`);
+  return result;
+}
 
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
 const SMS_WEB_HANDOFF_LIMIT = Math.max(Number(process.env.SMS_WEB_HANDOFF_MESSAGE_LIMIT || 10), 1);
@@ -623,7 +680,7 @@ export async function POST(request) {
 
       let profile = activeSession?.memberProfile || null;
       if (!profile) {
-        profile = await lookupMember('', from);
+        profile = await lookupProfileWithDeadline(from, lookupMember);
         if (activeSession && profile) {
           activeSession.memberId = profile.clientId || null;
           activeSession.memberProfile = profile;
