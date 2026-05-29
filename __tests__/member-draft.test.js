@@ -138,18 +138,18 @@ describe('buildMemberDraft — outcome routing', () => {
     expect(draft.body).not.toContain('$79');
   });
 
-  it('offers a 50-minute member bi-monthly at $169, not their grandfathered monthly price', () => {
+  it('offers a 50-minute member bi-monthly at the fixed $139 rate, not their grandfathered monthly price', () => {
     const draft = buildMemberDraft({
       ...baseSummary,
       membership_tier: '50-Minute',
-      monthly_rate: '139',
+      monthly_rate: '119',
       outcome: 'RETAINED',
       reason_primary: 'Cost Overwhelming',
       offer_accepted: 'Bi-monthly billing',
     });
 
-    expect(draft.body).toContain('$169');
-    expect(draft.body).not.toContain('$139');
+    expect(draft.body).toContain('$139');
+    expect(draft.body).not.toContain('$119');
   });
 
   it('shows both current bi-monthly prices when membership duration is unknown', () => {
@@ -163,7 +163,7 @@ describe('buildMemberDraft — outcome routing', () => {
     });
 
     expect(draft.body).toContain('$99 for 30-minute facials');
-    expect(draft.body).toContain('$169 for 50-minute facials');
+    expect(draft.body).toContain('$139 for 50-minute facials');
     expect(draft.body).not.toContain('$79');
   });
 

@@ -353,7 +353,9 @@ Bot was using the member's existing (possibly grandfathered) monthly price as th
 
 Grandfathered $89/month member was being offered bi-monthly at $89 instead of the correct $99. Revenue impact across every accepted bi-monthly save in the affected window.
 
-Fix added centralized current bi-monthly pricing constants in `pricing.js`. Bi-monthly offers now always quote current pricing regardless of member's existing rate.
+Fix added centralized current bi-monthly pricing constants (the `CURRENT_BIMONTHLY_PRICING` object in `src/lib/member-draft.js`; the `pricing.js` filename referenced in older notes was never actually created). Bi-monthly offers now always quote current pricing regardless of member's existing rate.
+
+**Price correction 2026-05-29 (Matt, owner):** the 50-minute bi-monthly rate is **$139**, not $169. The earlier $169 figure (attributed to Travis 2026-05-19) was wrong. Bi-monthly is now $99 for 30-minute and $139 for 50-minute, which means the per-cycle dollar amount equals the current monthly rate, so a member already on current pricing sees no price change when switching to bi-monthly (only grandfathered members see a change). Corrected in `member-draft.js` (`FIFTY_MINUTE: 139`), the `HARD RULE - BI-MONTHLY PRICING IS FIXED` block and all bi-monthly examples in `src/lib/system-prompt.txt`, and the related tests. The 50-minute facial *service* prices ($169 walk-in / Sensitive Skin Facial) are a different number and were left unchanged. Also confirmed: Esthetician's Choice is a 50-minute facial placeholder, not a membership tier, so it has no bearing on bi-monthly pricing. PR `fix/bimonthly-50min-price-139-2026-05-29`.
 
 ---
 
