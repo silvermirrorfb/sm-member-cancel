@@ -237,6 +237,16 @@ function parseSessionSummary(text) {
       console.warn('Session summary missing required fields — ignoring');
       return null;
     }
+    // Normalize money fields: the model sometimes emits these already
+    // $-prefixed ("$139", "$30"). The alert email and draft-email templates
+    // prepend their own "$", which produced "$$139"/"$$30" (Donna Sommer
+    // summary, 2026-05-20). Strip any leading "$" so the single template-level
+    // "$" renders correctly. Numbers pass through untouched.
+    for (const field of ['monthly_rate', 'next_perk_value']) {
+      if (typeof parsed[field] === 'string') {
+        parsed[field] = parsed[field].replace(/^\s*\$+\s*/, '');
+      }
+    }
     return parsed;
   } catch (err) {
     console.error('Failed to parse session summary JSON:', err);
