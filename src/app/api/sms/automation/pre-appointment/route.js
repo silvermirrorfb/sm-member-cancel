@@ -386,10 +386,13 @@ export async function POST(request) {
       0,
       asInt(body.reminderToleranceMinutes, asInt(process.env.SMS_REMINDER_TOLERANCE_MINUTES, 15)),
     );
-    const enableAddonFallback = asBool(
-      body.enableAddonFallback,
-      asBool(process.env.SMS_ENABLE_ADDON_FALLBACK, true),
-    );
+    // SMS_ENABLE_ADDON_FALLBACK is the authoritative kill switch for add-on SMS
+    // offers. Fail closed: unset or false means add-on offers are OFF, and no
+    // per-request (body) or per-candidate flag can turn them back on. Those flags
+    // can only further restrict. Path 1 ships add-on OFF (this default); Path 2
+    // enables add-on offers by setting the env var to true.
+    const addonFallbackEnvEnabled = asBool(process.env.SMS_ENABLE_ADDON_FALLBACK, false);
+    const enableAddonFallback = addonFallbackEnvEnabled && asBool(body.enableAddonFallback, true);
     const directCandidates = useQueuedOnly ? [] : resolveCandidates(body);
     const locations = Array.isArray(body.locations)
       ? body.locations.map(item => asText(item)).filter(Boolean)
@@ -686,10 +689,12 @@ export async function POST(request) {
       const effectiveAddOnCode = normalizeAddonCode(
         asText(candidate.addOnCode) || asText(queuedOptions.addOnCode) || defaultAddOnCode,
       );
-      const effectiveEnableAddonFallback = asBool(
-        candidate.enableAddonFallback,
-        asBool(queuedOptions.enableAddonFallback, enableAddonFallback),
-      );
+      // Re-apply the SMS_ENABLE_ADDON_FALLBACK hard cap: a per-candidate or queued
+      // flag must not be able to re-enable add-on offers when the env kill switch
+      // is off. The cap dominates; candidate/queued flags can only further restrict.
+      const effectiveEnableAddonFallback =
+        addonFallbackEnvEnabled &&
+        asBool(candidate.enableAddonFallback, asBool(queuedOptions.enableAddonFallback, enableAddonFallback));
       const effectiveFromNumber = asText(candidate.fromNumber) || asText(queuedOptions.fromNumber) || fromNumber || null;
       const effectiveStatusCallback =
         asText(candidate.statusCallback) || asText(queuedOptions.statusCallback) || statusCallback || null;
@@ -754,7 +759,16 @@ export async function POST(request) {
 
       let selectedOffer = null;
       if (effectiveOfferType === 'addon') {
-        selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
+        // Path 1 gate extension (2026-05-28 eng-review decision): explicit addon
+        // requests now honor effectiveEnableAddonFallback (SMS_ENABLE_ADDON_FALLBACK
+        // env var, default true). When Path 1 is in effect (set to false), the
+        // explicit-addon branch is blocked alongside the auto-mode and default-mode
+        // fallback paths below, so no addon offer is built regardless of how the
+        // request was made. The downstream `if (!selectedOffer)` block at line ~775
+        // handles the null case via the existing addonUnavailableReason ladder.
+        if (effectiveEnableAddonFallback) {
+          selectedOffer = buildAddonOffer(profile, opportunity, { addOnCode: effectiveAddOnCode });
+        }
       } else if (effectiveOfferType === 'auto') {
         if (opportunity?.eligible && isSmsDurationOfferAllowed(opportunity)) {
           selectedOffer = { offerKind: 'duration', ...opportunity };
