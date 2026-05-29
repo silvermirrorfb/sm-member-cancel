@@ -111,7 +111,7 @@ describe('membership prompt bi-monthly pricing', () => {
   it('instructs bi-monthly offers to use current pricing', () => {
     const prompt = getSystemPrompt();
 
-    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
     expect(prompt).not.toContain('Bi-monthly: "Every-other-month billing');
     expect(prompt).not.toContain('same rate, keeps membership active');
   });
@@ -254,7 +254,7 @@ describe('system prompt: prior-PR rules survive PR 1 system-prompt rewrite', () 
 
   it('preserves PR #5 bi-monthly current-pricing language', () => {
     const prompt = getSystemPrompt();
-    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
   });
 
   it('preserves PR #13 NO FABRICATED ESCALATION hard rule', () => {
@@ -449,7 +449,7 @@ describe('system prompt: footprint-aware relocation handling (Congo case, cancel
 describe('system prompt: prior PR rules survive the footprint-aware relocation PR', () => {
   it('preserves PR #5 bi-monthly current-pricing rule', () => {
     const prompt = getSystemPrompt();
-    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
   });
 
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
@@ -702,7 +702,7 @@ describe('system prompt: billing dispute handling (cancel-bot #13 / Decision 6)'
 describe('system prompt: prior PR rules survive the billing-dispute PR', () => {
   it('preserves PR #5 bi-monthly current-pricing rule', () => {
     const prompt = getSystemPrompt();
-    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
   });
 
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
@@ -1040,7 +1040,7 @@ describe('system prompt: credit visibility disclaimer (April 16 case, cancel-bot
 describe('system prompt: prior PR rules survive the firm-refusal + credit-disclaimer PR', () => {
   it('preserves PR #5 bi-monthly current-pricing rule', () => {
     const prompt = getSystemPrompt();
-    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
   });
 
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
@@ -1452,7 +1452,7 @@ describe('PR #27 Decision 10: standardized commitment language', () => {
     const prompt = getSystemPrompt();
     const lineMatch = prompt.match(/\n17\. Bi-monthly:[^\n]*/);
     expect(lineMatch).not.toBeNull();
-    expect(lineMatch[0]).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(lineMatch[0]).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
     expect(lineMatch[0]).toContain('no minimum commitment to be a member');
     expect(lineMatch[0]).toContain('the 3-billing-cycle commitment applies if you switch to bi-monthly billing');
     expect(lineMatch[0]).toContain('special schedules that need a few cycles of regular billing on either side to work');
@@ -1472,7 +1472,7 @@ describe('PR #27 Decision 10: standardized commitment language', () => {
 describe('PR #27 sweep does not regress any prior PR rule', () => {
   it('preserves PR #5 bi-monthly current-pricing rule', () => {
     const prompt = getSystemPrompt();
-    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
   });
 
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
@@ -1797,7 +1797,7 @@ describe('system prompt: PR #28 coexists with PR #26 firm-refusal short-circuit'
 describe('system prompt: PR #28 does not regress any prior PR rule', () => {
   it('preserves PR #5 bi-monthly current-pricing rule', () => {
     const prompt = getSystemPrompt();
-    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $169 for 50-minute facials.');
+    expect(prompt).toContain('Another option is switching to bi-monthly at our current pricing: $99 for 30-minute facials or $139 for 50-minute facials.');
   });
 
   it('preserves PR #6 pause-disclosure rule (3-billing-cycle commitment in offer message)', () => {
@@ -2527,7 +2527,7 @@ describe('system prompt: HARD RULE - BI-MONTHLY PRESERVES ALL MEMBER BENEFITS (Q
     // Post-codex P2: the bot must disclose the per-cycle dollar amount change
     expect(changesBlock).toMatch(/BILLED AMOUNT per charge becomes the fixed bi-monthly rate/);
     expect(changesBlock).toMatch(/grandfathered monthly rate is REPLACED/);
-    expect(changesBlock).toMatch(/50-minute member.*goes UP to \$169/);
+    expect(changesBlock).toMatch(/member already on the current monthly rate.*the per-cycle dollar amount is the same number, so there is no price change/);
     expect(changesBlock).toMatch(/MUST disclose the billed-amount change/);
   });
 

@@ -4280,6 +4280,9 @@ async function lookupMember(name, emailOrPhone, options = {}) {
       ...(commerce || {}),
       lookupStrategy,
     };
+    // Authoritative membership signal from the lookup boundary: `membership` is
+    // either a real Boulevard membership node (active or inactive) or null.
+    source.hasMembership = Boolean(membership);
     return buildProfile(source);
   } catch (err) { console.error('Boulevard API error:', err.message || err); return null; }
 }
@@ -4350,6 +4353,9 @@ async function getClientById(clientId) {
       ...(commerce || {}),
       lookupStrategy: 'client_by_id',
     };
+    // Authoritative membership signal from the lookup boundary: `membership` is
+    // either a real Boulevard membership node (active or inactive) or null.
+    source.hasMembership = Boolean(membership);
     return buildProfile(source);
   } catch (err) {
     return null;
@@ -4379,6 +4385,14 @@ function buildProfile(d) {
     tier: tier || null, monthlyRate,
     clientSince, memberSince, tenureMonths,
     accountStatus: d.accountStatus || d.membershipStatus || (d.active === false ? 'inactive' : d.active === true ? 'active' : null),
+    // True only when a real Boulevard membership record was found for this
+    // client (active or inactive). A matched client with zero memberships
+    // (walk-in, retail buyer, lead) is NOT a member. Callers must gate the
+    // cancellation flow on this so non-members are never flagged as members.
+    // lookupMember/getClientById pass the authoritative `hasMembership` from
+    // the lookup boundary; the field-derived fallback covers mock/synthetic
+    // callers that build a profile without that flag.
+    hasMembership: d.hasMembership === true || Boolean(d.membershipStatus || d.membershipStartDate || d.membershipName),
     paymentsProcessed: isFiniteNumber(d.paymentsProcessed) ? d.paymentsProcessed : null,
     totalDuesPaid: isFiniteNumber(d.totalDuesPaid) ? d.totalDuesPaid : null,
     totalRetailPurchases: isFiniteNumber(d.totalRetailPurchases) ? d.totalRetailPurchases : null,

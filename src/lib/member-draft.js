@@ -11,7 +11,7 @@ const SIGNATURE = `\nWarmly,\nFernanda\nMemberships Team\nSilver Mirror\nmembers
 
 const CURRENT_BIMONTHLY_PRICING = {
   THIRTY_MINUTE: 99,
-  FIFTY_MINUTE: 169,
+  FIFTY_MINUTE: 139,
 };
 
 const LOCATION_LEADS = {
