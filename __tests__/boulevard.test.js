@@ -2294,6 +2294,280 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
     expect(result.diagnostics?.queryErrors?.[0]?.stage).toBe('preflight');
     expect(result.diagnostics?.queryErrors?.[0]?.errors?.[0]?.code).toBe('MISSING_REQUIRED_QUERY_ARG');
   });
+
+  // -------------------------------------------------------------------------
+  // Bug 4 (2026-05-28): scanAppointments transient-failure retry.
+  //
+  // Production probe on 2026-05-12 (Bryant Park, 24h discovery window) saw
+  // ~14 percent of scans return appointments_query_failed. Root cause
+  // (confirmed via codex adversarial review): fetchBoulevardGraphQL had no
+  // retry, so a single HTTP 429 or 5xx from Boulevard burst-limiting turned
+  // into a terminal strategy failure that cascaded to all roots.
+  //
+  // Fix: retry transient failures (429, 5xx, network errors) with capped
+  // exponential backoff. DO NOT retry deterministic errors (401, 403,
+  // GraphQL validation) per codex caveat.
+  // -------------------------------------------------------------------------
+  describe('scanAppointments transient-failure retry (Bug 4 fix)', () => {
+    // Pin retry knobs so the persistent-429 test terminates fast in CI.
+    beforeEach(() => {
+      process.env.BOULEVARD_FETCH_MAX_RETRIES = '2';
+      process.env.BOULEVARD_FETCH_RETRY_BASE_MS = '1';
+    });
+    afterEach(() => {
+      delete process.env.BOULEVARD_FETCH_MAX_RETRIES;
+      delete process.env.BOULEVARD_FETCH_RETRY_BASE_MS;
+    });
+
+    const scalarType = (name = 'String') => ({ kind: 'SCALAR', name, ofType: null });
+    const objectType = (name) => ({ kind: 'OBJECT', name, ofType: null });
+
+    function introspectionResponse(typeName) {
+      if (typeName === 'RootQueryType') {
+        return {
+          __type: {
+            fields: [
+              {
+                name: 'appointments',
+                args: [
+                  { name: 'locationId', type: scalarType('ID') },
+                  { name: 'first', type: scalarType('Int') },
+                ],
+                type: objectType('AppointmentConnection'),
+              },
+            ],
+          },
+        };
+      }
+      if (typeName === 'AppointmentConnection') {
+        return {
+          __type: {
+            fields: [
+              { name: 'edges', type: objectType('AppointmentEdge') },
+              { name: 'pageInfo', type: objectType('PageInfo') },
+            ],
+          },
+        };
+      }
+      if (typeName === 'Appointment') {
+        return {
+          __type: {
+            fields: [
+              { name: 'id', type: scalarType('ID') },
+              { name: 'startAt', type: scalarType('DateTime') },
+              { name: 'endAt', type: scalarType('DateTime') },
+              { name: 'clientId', type: scalarType('ID') },
+              { name: 'providerId', type: scalarType('ID') },
+              { name: 'state', type: scalarType('AppointmentState') },
+              { name: 'locationId', type: scalarType('ID') },
+            ],
+          },
+        };
+      }
+      return { __type: null };
+    }
+
+    const SUCCESS_SCAN_PAYLOAD = {
+      appointments: {
+        edges: [
+          {
+            node: {
+              id: 'appt-1',
+              clientId: 'client-1',
+              providerId: 'prov-1',
+              locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
+              startAt: '2026-03-08T10:00:00.000Z',
+              endAt: '2026-03-08T10:30:00.000Z',
+              state: 'BOOKED',
+            },
+          },
+        ],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      },
+    };
+
+    // Identify a strategy by the unique combination of paging arg + query
+    // root in the GraphQL body. Two consecutive scan calls with identical
+    // fingerprints proves the retry path ran (strategy-iteration would
+    // change the fingerprint between calls).
+    function strategyFingerprint(query) {
+      let pagingArg = 'no_args';
+      if (/last:\s*\d+\s*,\s*before/.test(query)) pagingArg = 'last_before';
+      else if (/last:\s*\d+/.test(query)) pagingArg = 'last_only';
+      else if (/first:\s*\d+\s*,\s*after/.test(query)) pagingArg = 'first_after';
+      else if (/first:\s*\d+/.test(query)) pagingArg = 'first_only';
+      let shape = 'list';
+      if (/edges\s*\{[\s\S]*node\s*\{/.test(query)) shape = 'connection';
+      else if (/nodes\s*\{/.test(query)) shape = 'nodes_list';
+      let root = 'unknown';
+      if (/\bappointments\b/.test(query)) root = 'appointments';
+      else if (/\bbookings\b/.test(query)) root = 'bookings';
+      else if (/\bcalendarAppointments\b/.test(query)) root = 'calendarAppointments';
+      return `${root}:${shape}:${pagingArg}`;
+    }
+
+    function mockFetchWithScanHandler(scanHandler) {
+      const scanFingerprints = [];
+      const stub = vi.fn(async (_url, init) => {
+        const body = JSON.parse(init.body);
+        const typeName = body?.variables?.typeName;
+        if (body.query.includes('IntrospectSchemaQueryType')) {
+          return { ok: true, json: async () => ({ data: { __schema: { queryType: { name: 'RootQueryType' } } } }) };
+        }
+        if (body.query.includes('IntrospectTypeDetailed') || body.query.includes('IntrospectType')) {
+          return { ok: true, json: async () => ({ data: introspectionResponse(typeName) }) };
+        }
+        if (body.query.includes('ScanAppointments')) {
+          scanFingerprints.push(strategyFingerprint(body.query));
+          return scanHandler(scanFingerprints.length);
+        }
+        return { ok: true, json: async () => ({ data: {} }) };
+      });
+      stub.getScanCalls = () => scanFingerprints.length;
+      stub.getFingerprints = () => scanFingerprints.slice();
+      return stub;
+    }
+
+    const PROFILE = { clientId: 'client-1', locationId: '24a2fac0-deef-4f7f-8bf6-52368be42d65', tier: '30', accountStatus: 'active' };
+    const RUN_OPTS = { now: '2026-03-08T08:00:00.000Z', windowHours: 6 };
+
+    it('retries past a single HTTP 429 within the same strategy attempt', async () => {
+      const fetchMock = mockFetchWithScanHandler((n) => {
+        if (n === 2) return { ok: true, json: async () => ({ data: SUCCESS_SCAN_PAYLOAD }) };
+        return { ok: false, status: 429, text: async () => 'rate limit' };
+      });
+      global.fetch = fetchMock;
+
+      const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
+
+      expect(result.eligible).toBe(true);
+      // Same-strategy retry: call 1 and call 2 must have identical
+      // strategy fingerprints. Strategy-iteration alone would produce
+      // different fingerprints between consecutive calls.
+      const fps = fetchMock.getFingerprints();
+      expect(fps).toHaveLength(2);
+      expect(fps[0]).toBe(fps[1]);
+    });
+
+    it('retries past a single HTTP 503 within the same strategy attempt', async () => {
+      const fetchMock = mockFetchWithScanHandler((n) => {
+        if (n === 2) return { ok: true, json: async () => ({ data: SUCCESS_SCAN_PAYLOAD }) };
+        return { ok: false, status: 503, text: async () => 'upstream unavailable' };
+      });
+      global.fetch = fetchMock;
+
+      const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
+
+      expect(result.eligible).toBe(true);
+      const fps = fetchMock.getFingerprints();
+      expect(fps).toHaveLength(2);
+      expect(fps[0]).toBe(fps[1]);
+    });
+
+    it('retries past a transient fetch throw (e.g. ECONNRESET) within the same strategy attempt', async () => {
+      const fetchMock = mockFetchWithScanHandler((n) => {
+        if (n === 2) return { ok: true, json: async () => ({ data: SUCCESS_SCAN_PAYLOAD }) };
+        const err = new Error('socket hang up');
+        err.code = 'ECONNRESET';
+        throw err;
+      });
+      global.fetch = fetchMock;
+
+      const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
+
+      expect(result.eligible).toBe(true);
+      const fps = fetchMock.getFingerprints();
+      expect(fps).toHaveLength(2);
+      expect(fps[0]).toBe(fps[1]);
+    });
+
+    it('does NOT retry on HTTP 401 (auth errors are terminal)', async () => {
+      const fetchMock = mockFetchWithScanHandler(() => ({ ok: false, status: 401, text: async () => 'unauthorized' }));
+      global.fetch = fetchMock;
+
+      const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
+
+      expect(result.diagnostics?.failure).toBe('appointments_query_failed');
+      // Strategy iteration alone fires at most ~27 attempts (9 strategies
+      // x 3 roots). If 401 were retried at retries=2, we would see
+      // ~3x that. The ceiling proves no retry.
+      expect(fetchMock.getScanCalls()).toBeLessThanOrEqual(30);
+    });
+
+    it('does NOT retry on GraphQL validation errors (deterministic, retry would not help)', async () => {
+      const fetchMock = mockFetchWithScanHandler(() => ({
+        ok: true,
+        json: async () => ({
+          errors: [{ message: 'Field "appointments" of type "RootQueryType" must have a selection of subfields.' }],
+        }),
+      }));
+      global.fetch = fetchMock;
+
+      const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
+
+      expect(result.diagnostics?.failure).toBe('appointments_query_failed');
+      expect(fetchMock.getScanCalls()).toBeLessThanOrEqual(30);
+    });
+
+    it('happy path: a successful first attempt fires exactly one scan call', async () => {
+      const fetchMock = mockFetchWithScanHandler(() => ({ ok: true, json: async () => ({ data: SUCCESS_SCAN_PAYLOAD }) }));
+      global.fetch = fetchMock;
+
+      const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
+
+      expect(result.eligible).toBe(true);
+      expect(fetchMock.getScanCalls()).toBe(1);
+    });
+
+    it('caps retry attempts on a persistent 429 at exactly maxRetries + 1 per strategy', async () => {
+      const fetchMock = mockFetchWithScanHandler(() => ({ ok: false, status: 429, text: async () => 'rate limit' }));
+      global.fetch = fetchMock;
+
+      const result = await evaluateUpgradeOpportunityForProfile(PROFILE, RUN_OPTS);
+
+      expect(result.diagnostics?.failure).toBe('appointments_query_failed');
+      // Per-strategy budget = 1 initial + maxRetries=2 retries = 3 fetches.
+      // Group the fingerprints to assert EVERY attempted strategy hit its cap
+      // exactly. An off-by-one in the retry loop (4 attempts) or a missed cap
+      // would show up here as a wrong group count, not the loose < 200.
+      const fps = fetchMock.getFingerprints();
+      const groupCounts = fps.reduce((acc, fp) => {
+        acc[fp] = (acc[fp] || 0) + 1;
+        return acc;
+      }, {});
+      const groupValues = Object.values(groupCounts);
+      expect(groupValues.length).toBeGreaterThan(0);
+      for (const count of groupValues) {
+        expect(count).toBe(3);
+      }
+    });
+
+    it('does NOT apply retry to callers that did not opt in (mutation safety)', async () => {
+      // The retry path is gated on options.retryTransient===true. Callers
+      // that pass any other options (including no options) get exactly one
+      // fetch attempt, period. This is the safety property that makes
+      // mutations safe: cancelAppointment, bookingCreate, and friends share
+      // fetchBoulevardGraphQL but never opt in, so a transient 429 cannot
+      // double-cancel or duplicate-book. Codex flagged this as a P1 on the
+      // first review of the Bug 4 patch.
+      //
+      // Probed via getClientById, which uses the same default path as
+      // mutations (silentErrors + returnErrors, NO retryTransient). A 429
+      // response must produce exactly one fetch call.
+      let fetchCount = 0;
+      global.fetch = vi.fn(async () => {
+        fetchCount += 1;
+        return { ok: false, status: 429, text: async () => 'rate limit' };
+      });
+
+      const { getClientById } = await import('../src/lib/boulevard.js');
+      const result = await getClientById('urn:blvd:Client:test');
+      expect(result).toBeNull();
+      // Exactly one fetch: no retry. If the gate were broken, fetchCount
+      // would be 3 (1 + maxRetries=2).
+      expect(fetchCount).toBe(1);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

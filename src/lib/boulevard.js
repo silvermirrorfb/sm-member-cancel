@@ -738,82 +738,200 @@ function verifyMemberIdentity(lookupRequest, profile) {
   return Boolean(emailMatches || phoneMatches);
 }
 
-async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options = {}) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
-  let response;
+// Transient-failure classification for retry. Boulevard rate-limits bursts
+// (HTTP 429) and occasionally returns 5xx under load; both clear within a few
+// hundred ms. Network throws (ECONNRESET, ETIMEDOUT, socket hang up) on the
+// shared HTTPS pool also resolve on retry. Deterministic errors (auth, GraphQL
+// validation, AbortError from local timeout) get no retry because they cannot.
+//
+// Diagnosed in the 2026-05-28 Bug 4 investigation: a single 429 during a
+// scanAppointments burst was enough to cascade every strategy and every root
+// into appointments_query_failed (~14 percent of production scans).
+const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
-  try {
-    response = await fetch(apiUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ query, variables }),
-      signal: controller.signal,
-    });
-  } catch (fetchErr) {
-    if (fetchErr.name === 'AbortError') console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
-    else console.error('Boulevard API fetch error:', buildFetchErrorDiagnostics(fetchErr, apiUrl));
-    if (options.returnErrors) {
-      return {
-        __error: {
-          stage: 'fetch',
-          diagnostics: buildFetchErrorDiagnostics(fetchErr, apiUrl),
-        },
-      };
+function isTransientFetchError(err) {
+  if (!err) return false;
+  if (err.name === 'AbortError') return false;
+  // node-fetch / undici surface network errors as TypeError with .cause,
+  // ECONNRESET / ETIMEDOUT etc. on err.code, or a 'fetch failed' message.
+  if (err.code && ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ECONNREFUSED'].includes(err.code)) return true;
+  if (err.cause && err.cause.code && ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ECONNREFUSED'].includes(err.cause.code)) return true;
+  if (typeof err.message === 'string' && /socket hang up|fetch failed|network|reset/i.test(err.message)) return true;
+  return false;
+}
+
+// Hard caps applied to env knobs so a misconfigured value (e.g.
+// BOULEVARD_FETCH_MAX_RETRIES=Infinity) cannot turn the retry loop into a
+// runaway. maxRetries clamps to [0, 5]; baseMs clamps to [0, 5000].
+const FETCH_RETRY_MAX_RETRIES_CAP = 5;
+const FETCH_RETRY_BASE_MS_CAP = 5000;
+
+function getFetchRetryConfig() {
+  const rawRetries = Number(process.env.BOULEVARD_FETCH_MAX_RETRIES ?? 2);
+  const rawBase = Number(process.env.BOULEVARD_FETCH_RETRY_BASE_MS ?? 250);
+  const maxRetries = Number.isFinite(rawRetries)
+    ? Math.max(0, Math.min(FETCH_RETRY_MAX_RETRIES_CAP, Math.floor(rawRetries)))
+    : 2;
+  const baseMs = Number.isFinite(rawBase)
+    ? Math.max(0, Math.min(FETCH_RETRY_BASE_MS_CAP, rawBase))
+    : 250;
+  return { maxRetries, baseMs };
+}
+
+function sleepMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Bounded jitter so N parallel scans that all hit a single 429 don't all
+// retry at exactly the same instant (which would recreate the burst we just
+// got rate-limited for). Range: 0..baseMs additive on top of the exponential.
+function jitterMs(baseMs) {
+  if (!Number.isFinite(baseMs) || baseMs <= 0) return 0;
+  return Math.floor(Math.random() * baseMs);
+}
+
+async function fetchBoulevardGraphQL(apiUrl, headers, query, variables, options = {}) {
+  // Retries are OPT-IN. Mutations (cancelAppointment, bookingCreate, addOn
+  // upsert and friends routed through runMutationRoot at boulevard.js ~2633)
+  // MUST NOT enable retryTransient because Boulevard's response is not
+  // guaranteed reliable: a transient failure mid-mutation could mean
+  // "applied but response dropped" and a retry would duplicate the booking
+  // or cancel something already canceled. Only callers whose operation is
+  // naturally idempotent (read-only scans, introspection probes the caller
+  // cross-checks) should opt in. scanAppointments and the introspection
+  // helpers opt in; runMutationRoot deliberately does not.
+  const retryEnabled = options.retryTransient === true;
+  const cfg = getFetchRetryConfig();
+  const maxRetries = retryEnabled ? cfg.maxRetries : 0;
+  const baseMs = cfg.baseMs;
+
+  // attempt 0 is the initial call; attempts 1..maxRetries are retries.
+  let lastTransientError = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      // Exponential backoff: base * 2^(attempt-1) plus 0..base jitter.
+      // attempt=1 -> base*1 + jitter, attempt=2 -> base*2 + jitter.
+      // Keeps the worst-case latency bounded.
+      await sleepMs(baseMs * Math.pow(2, attempt - 1) + jitterMs(baseMs));
     }
-    return null;
-  } finally {
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), BOULEVARD_TIMEOUT_MS);
+    let response;
+
+    try {
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal,
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      if (fetchErr.name === 'AbortError') console.error(`Boulevard API timed out after ${BOULEVARD_TIMEOUT_MS}ms`);
+      else console.error('Boulevard API fetch error:', buildFetchErrorDiagnostics(fetchErr, apiUrl));
+      if (isTransientFetchError(fetchErr) && attempt < maxRetries) {
+        lastTransientError = fetchErr;
+        continue;
+      }
+      if (options.returnErrors) {
+        return {
+          __error: {
+            stage: 'fetch',
+            diagnostics: buildFetchErrorDiagnostics(fetchErr, apiUrl),
+          },
+        };
+      }
+      return null;
+    }
     clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const t = await response.text().catch(() => '');
+      console.error(`Boulevard API HTTP ${response.status}: ${t.substring(0,500)}`);
+      if (TRANSIENT_HTTP_STATUSES.has(response.status) && attempt < maxRetries) {
+        lastTransientError = { status: response.status };
+        continue;
+      }
+      if (options.returnErrors) {
+        return {
+          __error: {
+            stage: 'http',
+            status: response.status,
+            bodyPreview: t.substring(0, 500),
+          },
+        };
+      }
+      return null;
+    }
+
+    let data;
+    try {
+      data = await response.json();
+    } catch (e) {
+      console.error('Boulevard API non-JSON:', e.message);
+      // Non-JSON 200 is usually a transient gateway issue (HTML error page
+      // from a reverse proxy under load). Retry the same way as 5xx.
+      if (attempt < maxRetries) {
+        lastTransientError = { stage: 'non_json', message: e.message };
+        continue;
+      }
+      if (options.returnErrors) {
+        return {
+          __error: {
+            stage: 'non_json',
+            message: e.message,
+          },
+        };
+      }
+      return null;
+    }
+
+    if (data.errors) {
+      if (!options.silentErrors) {
+        console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
+      }
+      // GraphQL errors are NOT retried by default. They are deterministic
+      // (validation, missing field, type mismatch) and would just repeat.
+      // The one defensible exception is Boulevard returning a rate-limit
+      // signal in errors[] with HTTP 200, but the codes vary and false
+      // positives would mask real bugs. Leave deterministic and revisit
+      // once Boulevard's rate-limit-as-graphql shape is observed.
+      if (options.returnErrors) {
+        return {
+          __error: {
+            stage: 'graphql',
+            errors: data.errors,
+          },
+          data: data.data || null,
+        };
+      }
+      return null;
+    }
+
+    return data;
   }
 
-  if (!response.ok) {
-    const t = await response.text().catch(() => '');
-    console.error(`Boulevard API HTTP ${response.status}: ${t.substring(0,500)}`);
-    if (options.returnErrors) {
+  // Exhausted retries on a transient error. Surface it in the standard shape.
+  if (options.returnErrors) {
+    if (lastTransientError?.status) {
       return {
         __error: {
           stage: 'http',
-          status: response.status,
-          bodyPreview: t.substring(0, 500),
+          status: lastTransientError.status,
+          bodyPreview: `transient retry exhausted (max ${maxRetries})`,
         },
       };
     }
-    return null;
+    return {
+      __error: {
+        stage: 'fetch',
+        diagnostics: buildFetchErrorDiagnostics(lastTransientError || new Error('retry exhausted'), apiUrl),
+      },
+    };
   }
-
-  let data;
-  try {
-    data = await response.json();
-  } catch (e) {
-    console.error('Boulevard API non-JSON:', e.message);
-    if (options.returnErrors) {
-      return {
-        __error: {
-          stage: 'non_json',
-          message: e.message,
-        },
-      };
-    }
-    return null;
-  }
-
-  if (data.errors) {
-    if (!options.silentErrors) {
-      console.error('Boulevard GraphQL errors:', JSON.stringify(data.errors));
-    }
-    if (options.returnErrors) {
-      return {
-        __error: {
-          stage: 'graphql',
-          errors: data.errors,
-        },
-        data: data.data || null,
-      };
-    }
-    return null;
-  }
-
-  return data;
+  return null;
 }
 
 function findNameMatch(name, clients, options = {}) {
@@ -2033,12 +2151,17 @@ async function scanAppointments(apiUrl, headers, context = {}) {
           ...(strategy.argMode === 'last_before' ? { before } : {}),
           ...(strategy.argMode === 'first_after' ? { after } : {}),
         };
+        // Opt in to transient-failure retry. scanAppointments is read-only
+        // and idempotent; the Bug 4 (2026-05-28) fix scoped retry here so
+        // Boulevard burst-limit 429s and transient 5xx no longer cascade
+        // every strategy into appointments_query_failed. Mutations are
+        // explicitly NOT given this option (see fetchBoulevardGraphQL).
         const data = await fetchBoulevardGraphQL(
           apiUrl,
           headers,
           query,
           variables,
-          { silentErrors: true, returnErrors: true },
+          { silentErrors: true, returnErrors: true, retryTransient: true },
         );
         if (data?.__error) {
           queryFailed = true;
