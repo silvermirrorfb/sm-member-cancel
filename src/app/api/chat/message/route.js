@@ -473,6 +473,16 @@ export function buildPostLookupGreeting(profile, rawUserMessage, options = {}) {
     return sentences.join(' ');
 }
 
+// Shown when a Boulevard CLIENT record was matched but the client has no
+// membership. We do not run the cancellation flow for non-members; account
+// deletion / profile changes route to hello@, membership questions to the
+// memberships inbox. (Douglas Lee false-positive: a non-member was flagged
+// as a member and pushed through cancellation with all fields UNKNOWN.)
+export function buildNoMembershipMessage(firstName) {
+    const namePrefix = firstName ? `${firstName}, ` : '';
+    return `${namePrefix}I looked this up and I am not seeing an active Silver Mirror membership tied to your details, so there is nothing for me to cancel here.\n\nIf you were trying to delete your account or update your information, please email ${HELLO_EMAIL} and the team can take care of that.\n\nFor anything else membership related, you can reach the memberships team at ${MEMBERSHIP_EMAIL}.`;
+}
+
 export function buildLookupFailureMessage(firstName, attempt) {
     const namePrefix = firstName ? `${firstName}, ` : '';
     const seed = `${firstName}|${attempt}`;
@@ -1036,6 +1046,26 @@ export async function POST(request) {
             if (profile && !verifyMemberIdentity(verificationLookup, profile)) {
                       console.warn('Identity verification failed \u2014 treating as lookup miss');
                       profile = null;
+            }
+
+            // Matched a Boulevard client but the client has no membership record.
+            // Do NOT switch into Membership Mode or run the cancellation flow for a
+            // non-member (the Douglas Lee false-positive). Route them instead.
+            if (profile && !profile.hasMembership) {
+                      console.warn(`Lookup matched a client with no membership \u2014 routing as non-member (strategy=${profile.lookupStrategy || 'unknown'})`);
+                      const firstName = String(profile.firstName || verificationLookup?.firstName || '').trim();
+                      const nonMemberMessage = buildNoMembershipMessage(firstName);
+                      await addMessage(sessionId, 'assistant', nonMemberMessage);
+                      pendingTranscriptEntries.push({ role: 'assistant', content: nonMemberMessage });
+                      await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'no membership match');
+
+                return NextResponse.json({
+                            message: nonMemberMessage,
+                            sessionId,
+                            memberIdentified: false,
+                }, {
+                            headers: buildRateLimitHeaders(rateLimit),
+                });
             }
 
             if (profile) {
