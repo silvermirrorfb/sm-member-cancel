@@ -2805,25 +2805,6 @@ async function appointmentAlreadyHasAddon(apiUrl, headers, appointmentContext, t
   return false;
 }
 
-function toBoulevardNaiveDateTime(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  const direct = raw.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?::(\d{2}))?/);
-  if (direct) {
-    const seconds = direct[2] || '00';
-    return `${direct[1]}:${seconds}`;
-  }
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) return '';
-  const yyyy = parsed.getUTCFullYear();
-  const mm = String(parsed.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(parsed.getUTCDate()).padStart(2, '0');
-  const hh = String(parsed.getUTCHours()).padStart(2, '0');
-  const mi = String(parsed.getUTCMinutes()).padStart(2, '0');
-  const ss = String(parsed.getUTCSeconds()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
-}
-
 function toBookingWarningList(rawWarnings) {
   if (!Array.isArray(rawWarnings)) return [];
   return rawWarnings.map(warning => ({
@@ -2856,84 +2837,6 @@ async function runMutationRoot(apiUrl, headers, query, variables, root) {
   const payload = data?.data?.[root] || null;
   if (!payload) return { ok: false, error: { stage: 'empty_payload' }, payload: null };
   return { ok: true, payload, error: null };
-}
-
-async function trySyncAppointmentNotes(apiUrl, headers, appointmentId, notes) {
-  const targetAppointmentId = String(appointmentId || '').trim();
-  const noteText = String(notes || '').trim();
-  if (!targetAppointmentId) {
-    return {
-      applied: false,
-      reason: 'notes_sync_missing_appointment_id',
-      skipped: false,
-    };
-  }
-  if (!noteText) {
-    return {
-      applied: true,
-      reason: 'notes_sync_not_required',
-      skipped: true,
-    };
-  }
-
-  const mutationCandidates = [
-    {
-      root: 'updateAppointment',
-      query: `
-        mutation SyncAppointmentNotes($appointmentId: ID!, $notes: String!) {
-          updateAppointment(input: { id: $appointmentId, notes: $notes }) {
-            appointment {
-              id
-            }
-          }
-        }
-      `,
-    },
-    {
-      root: 'appointmentUpdate',
-      query: `
-        mutation SyncAppointmentNotesAlt($appointmentId: ID!, $notes: String!) {
-          appointmentUpdate(input: { id: $appointmentId, notes: $notes }) {
-            appointment {
-              id
-            }
-          }
-        }
-      `,
-    },
-  ];
-
-  let lastError = null;
-  for (const candidate of mutationCandidates) {
-    const data = await fetchBoulevardGraphQL(
-      apiUrl,
-      headers,
-      candidate.query,
-      { appointmentId: targetAppointmentId, notes: noteText },
-      { silentErrors: true, returnErrors: true },
-    );
-    if (!data || data.__error) {
-      lastError = data?.__error || { stage: 'notes_sync_failed' };
-      continue;
-    }
-    const node = data?.data?.[candidate.root] || null;
-    const updatedId = String(node?.appointment?.id || node?.id || '').trim();
-    if (updatedId) {
-      return {
-        applied: true,
-        reason: 'notes_sync_applied',
-        skipped: false,
-        mutationRoot: candidate.root,
-      };
-    }
-  }
-
-  return {
-    applied: false,
-    reason: 'notes_sync_failed',
-    skipped: false,
-    error: lastError,
-  };
 }
 
 function buildAddonReverifyResult(reason, opportunity = null, extra = {}) {
