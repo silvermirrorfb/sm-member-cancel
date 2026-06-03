@@ -201,7 +201,7 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 ---
 
 ### outbound-sms #11
-**Status:** FIXED IN CODE 2026-06-03 (PR A, duration-upgrade path). Add-on path tracked separately (PR B). Bump to VERIFIED FIXED after merge + production deploy.
+**Status:** FIXED IN CODE 2026-06-03. Duration path PR A (#47, merged 59f2607). Add-on path PR B (this PR), removes tryApplyAddonViaCancelRebook so neither path can cancel a booking under any env or flag. Bump to VERIFIED FIXED after merge + production deploy.
 **Severity:** customer-harm
 **Discovered:** 2026-05-20 (member-reported lost booking)
 
@@ -211,7 +211,7 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 
 **Mitigation already in place:** `ENABLE_CANCEL_REBOOK_FALLBACK` is gated `process.env.NODE_ENV !== 'production'` (`boulevard.js:27-30`), so the destructive fallback cannot run in production today. That neutralizes the live risk but leaves the destructive code reachable in non-production and one edit away from re-exposure.
 
-**Fix (PR A, this entry):** Remove the duration-upgrade cancel-rebook fallback entirely (`tryApplyUpgradeViaCancelRebook` and its single caller in `reverifyAndApplyUpgradeForProfile`). A duration upgrade can now only apply via the safe in-place `updateAppointment` mutation; on any failure it fails closed (`upgrade_mutation_failed`), which the webhook routes to a queued support incident plus the approved finalize-by-team SMS reply, leaving the appointment untouched. Regression test: `__tests__/boulevard-duration-upgrade-append-safety.test.js` (static-source guard plus a behavioral guard that runs with the fallback flag on in non-production and asserts no cancel). The add-on path fallback removal is PR B; removing the now-unused env var is PR C.
+**Fix (PR A, this entry):** Remove the duration-upgrade cancel-rebook fallback entirely (`tryApplyUpgradeViaCancelRebook` and its single caller in `reverifyAndApplyUpgradeForProfile`). A duration upgrade can now only apply via the safe in-place `updateAppointment` mutation; on any failure it fails closed (`upgrade_mutation_failed`), which the webhook routes to a queued support incident plus the approved finalize-by-team SMS reply, leaving the appointment untouched. Regression test: `__tests__/boulevard-duration-upgrade-append-safety.test.js` (static-source guard plus a behavioral guard that runs with the fallback flag on in non-production and asserts no cancel). The add-on path fallback removal is PR B; removing the now-unused env var is PR C. PR B removes the add-on cancel-rebook (`tryApplyAddonViaCancelRebook`) the same way, so both the duration and add-on apply paths now fail closed with no reachable cancel.
 
 **Verify post-deploy:** confirm `BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK` is off in production (`vercel env ls production --scope silver-mirror-projects`), and confirm a forced in-place failure routes a duration YES to a support incident and the finalize reply with the original appointment intact.
 
