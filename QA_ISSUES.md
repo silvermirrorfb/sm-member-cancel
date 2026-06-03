@@ -26,6 +26,10 @@ Issues are numbered per system, in chronological order of discovery. Numbers do 
 
 What's actually still open right now, in order of stakes:
 
+**Member-harm incident on record:**
+
+- **outbound-sms #11** - Real member (Maureen Golga, 2026-05-20) lost a booked appointment to the destructive cancel-rebook fallback. Production is already guarded by the `NODE_ENV !== 'production'` check; PR A removes the duration-upgrade fallback code outright, PR B the add-on fallback, PR C the now-unused env var.
+
 **Production escalations from Fernanda (May 6-10), shipping May 13 in corrected order:**
 
 1. **cancel-bot #20 (and code half of cancel-bot #6)** - FIXED IN CODE 2026-05-13 by PR `fix/broaden-no-process-handoff-rule` (PR 1 of the May 13 sequence, not yet merged). Three edits to `src/lib/system-prompt.txt`: (a) new `HARD RULE - MILESTONE DISCUSSION SCOPE` (upcoming only, no historical-perk enumeration like Zoe got); (b) new `HARD RULE - NO DEFINED PROCESS HANDOFFS` mandating Travis's exact phrase "I'm flagging this for our memberships team to review. Someone will follow up with you about next steps." with bans on specific timelines, outcomes, and actions; (c) strengthened PR #13's `HARD RULE - NO FABRICATED ESCALATION` with Sindhura-class soft-promise example bans ("they'll resolve this," "they'll reach out within 24-48 hours," etc.). 18 new tests cover both production cases plus PR #5/#6/#13 preservation. Bump to VERIFIED FIXED after merge + production deploy.
@@ -193,6 +197,23 @@ Verified externally via curl: the deployment-specific URL and the team-scoped al
 **Verified 2026-05-18:** 68 sends in Redis `sms-sent:2026-05-18` counter, 30+ POST hits to `/api/sms/automation/pre-appointment` 200s in 22:00-23:30 UTC, 20+ `sms-cooldown:*` keys present (success-path-only writes).
 
 The masking chain that hid this outage for 5 days is tracked separately as cross-cutting #2. See `docs/PLAN_sms-outage-fix_2026-05-17.md`.
+
+---
+
+### outbound-sms #11
+**Status:** FIXED IN CODE 2026-06-03 (PR A, duration-upgrade path). Add-on path tracked separately (PR B). Bump to VERIFIED FIXED after merge + production deploy.
+**Severity:** customer-harm
+**Discovered:** 2026-05-20 (member-reported lost booking)
+
+**Symptom:** On 2026-05-20 a real member (Maureen Golga) had a booked appointment destroyed by the outbound-SMS upgrade flow. The flow cancelled the existing appointment and then failed to create the replacement, leaving the member with no appointment and the freed slot available to others. There was no transaction wrapping the two steps and no rollback.
+
+**Root cause:** The add-on and duration apply flows each carried a destructive cancel-then-rebook fallback (`tryApplyAddonViaCancelRebook`, `tryApplyUpgradeViaCancelRebook` in `src/lib/boulevard.js`). When the safe in-place apply failed and the fallback was enabled, the code ran `cancelAppointment` first and then attempted `bookingCreate`; any failure after the cancel left the booking permanently gone with no recovery path.
+
+**Mitigation already in place:** `ENABLE_CANCEL_REBOOK_FALLBACK` is gated `process.env.NODE_ENV !== 'production'` (`boulevard.js:27-30`), so the destructive fallback cannot run in production today. That neutralizes the live risk but leaves the destructive code reachable in non-production and one edit away from re-exposure.
+
+**Fix (PR A, this entry):** Remove the duration-upgrade cancel-rebook fallback entirely (`tryApplyUpgradeViaCancelRebook` and its single caller in `reverifyAndApplyUpgradeForProfile`). A duration upgrade can now only apply via the safe in-place `updateAppointment` mutation; on any failure it fails closed (`upgrade_mutation_failed`), which the webhook routes to a queued support incident plus the approved finalize-by-team SMS reply, leaving the appointment untouched. Regression test: `__tests__/boulevard-duration-upgrade-append-safety.test.js` (static-source guard plus a behavioral guard that runs with the fallback flag on in non-production and asserts no cancel). The add-on path fallback removal is PR B; removing the now-unused env var is PR C.
+
+**Verify post-deploy:** confirm `BOULEVARD_ENABLE_CANCEL_REBOOK_FALLBACK` is off in production (`vercel env ls production --scope silver-mirror-projects`), and confirm a forced in-place failure routes a duration YES to a support incident and the finalize reply with the original appointment intact.
 
 ---
 

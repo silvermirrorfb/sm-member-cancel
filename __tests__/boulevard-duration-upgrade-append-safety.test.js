@@ -1,12 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const originalEnv = process.env;
 const originalFetch = global.fetch;
-describe('production cancel-rebook fallback safety', () => {
+
+describe('duration-upgrade append safety', () => {
   beforeEach(() => {
     process.env = {
       ...originalEnv,
-      NODE_ENV: 'production',
+      // Non-production on purpose. With the fallback flag on, the only reason a
+      // cancel must not fire is that the cancel-rebook code was deleted.
+      NODE_ENV: 'test',
       BOULEVARD_API_KEY: 'key',
       BOULEVARD_API_SECRET: Buffer.from('secret').toString('base64'),
       BOULEVARD_BUSINESS_ID: 'biz-id',
@@ -24,7 +30,16 @@ describe('production cancel-rebook fallback safety', () => {
     vi.restoreAllMocks();
   });
 
-  it('does not cancel the original appointment from production when the direct duration mutation fails', async () => {
+  it('does not keep destructive duration cancel-rebook code in boulevard.js', () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(path.join(here, '../src/lib/boulevard.js'), 'utf8');
+
+    expect(source).not.toContain('tryApplyUpgradeViaCancelRebook');
+    expect(source).not.toContain('CancelAppointmentForUpgrade');
+    expect(source).not.toContain('applied_cancel_rebook');
+  });
+
+  it('never calls cancelAppointment when the in-place duration upgrade fails, even with the fallback flag on outside production', async () => {
     let cancelCalled = false;
 
     global.fetch = vi.fn(async (_url, init) => {
@@ -34,16 +49,7 @@ describe('production cancel-rebook fallback safety', () => {
 
       if (query.includes('IntrospectType(')) {
         if (typeName === 'Query') {
-          return {
-            ok: true,
-            json: async () => ({
-              data: {
-                __type: {
-                  fields: [{ name: 'appointments' }],
-                },
-              },
-            }),
-          };
+          return { ok: true, json: async () => ({ data: { __type: { fields: [{ name: 'appointments' }] } } }) };
         }
         if (typeName === 'Appointment') {
           return {
@@ -73,17 +79,7 @@ describe('production cancel-rebook fallback safety', () => {
           return {
             ok: true,
             json: async () => ({
-              data: {
-                __type: {
-                  fields: [
-                    {
-                      name: 'notes',
-                      args: [],
-                      type: { kind: 'SCALAR', name: 'String', ofType: null },
-                    },
-                  ],
-                },
-              },
+              data: { __type: { fields: [{ name: 'notes', args: [], type: { kind: 'SCALAR', name: 'String', ofType: null } }] } },
             }),
           };
         }
@@ -97,14 +93,8 @@ describe('production cancel-rebook fallback safety', () => {
                     {
                       name: 'appointments',
                       args: [
-                        {
-                          name: 'first',
-                          type: { kind: 'SCALAR', name: 'Int', ofType: null },
-                        },
-                        {
-                          name: 'after',
-                          type: { kind: 'SCALAR', name: 'String', ofType: null },
-                        },
+                        { name: 'first', type: { kind: 'SCALAR', name: 'Int', ofType: null } },
+                        { name: 'after', type: { kind: 'SCALAR', name: 'String', ofType: null } },
                       ],
                       type: { kind: 'OBJECT', name: 'AppointmentConnection', ofType: null },
                     },
@@ -128,13 +118,7 @@ describe('production cancel-rebook fallback safety', () => {
                 startAt: '2026-03-11T10:00:00.000Z',
                 endAt: '2026-03-11T10:30:00.000Z',
                 notes: 'Original internal note',
-                appointmentServices: [
-                  {
-                    id: 'aps-1',
-                    serviceId: 'svc-30',
-                    staffId: 'prov-1',
-                  },
-                ],
+                appointmentServices: [{ id: 'aps-1', serviceId: 'svc-30', staffId: 'prov-1' }],
               },
             },
           }),
@@ -173,10 +157,7 @@ describe('production cancel-rebook fallback safety', () => {
                     },
                   },
                 ],
-                pageInfo: {
-                  hasNextPage: false,
-                  endCursor: null,
-                },
+                pageInfo: { hasNextPage: false, endCursor: null },
               },
             },
           }),
@@ -184,22 +165,14 @@ describe('production cancel-rebook fallback safety', () => {
       }
 
       if (query.includes('mutation UpgradeAppointment') || query.includes('mutation UpgradeAppointmentAlt')) {
-        return {
-          ok: true,
-          json: async () => ({
-            errors: [{ message: 'serviceId not supported in updateAppointment input' }],
-          }),
-        };
+        return { ok: true, json: async () => ({ errors: [{ message: 'serviceId not supported in updateAppointment input' }] }) };
       }
 
-      if (query.includes('CancelAppointmentForUpgrade')) {
+      if (query.includes('CancelAppointmentForUpgrade') || query.includes('cancelAppointment')) {
         cancelCalled = true;
       }
 
-      return {
-        ok: true,
-        json: async () => ({ data: {} }),
-      };
+      return { ok: true, json: async () => ({ data: {} }) };
     });
 
     vi.resetModules();
@@ -208,12 +181,15 @@ describe('production cancel-rebook fallback safety', () => {
 
     const result = await reverifyAndApplyUpgradeForProfile(
       { clientId: 'client-1', tier: '30', accountStatus: 'ACTIVE' },
-      { appointmentId: 'appt-1', targetDurationMinutes: 50 },
+      { offerKind: 'duration', appointmentId: 'appt-1', targetDurationMinutes: 50 },
       { now: '2026-03-11T08:00:00.000Z', windowHours: 6 },
     );
 
     expect(result.success).toBe(false);
     expect(result.reason).toBe('upgrade_mutation_failed');
     expect(cancelCalled).toBe(false);
+    expect(
+      global.fetch.mock.calls.some(([, init]) => String(JSON.parse(init.body).query || '').includes('CancelAppointmentForUpgrade')),
+    ).toBe(false);
   });
 });
