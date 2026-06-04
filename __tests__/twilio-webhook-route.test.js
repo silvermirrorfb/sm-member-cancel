@@ -360,6 +360,142 @@ describe('twilio webhook route', () => {
     expect(session.lastUpgradeOfferAppointmentId).toBe('appt-pending-1');
   });
 
+  it('logs an outbound confirmation row when a verified upgrade succeeds', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      memberProfile: { clientId: 'client-1', phone: '+12134401333' },
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-verify-1',
+        targetDurationMinutes: 50,
+        currentDurationMinutes: 30,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-verify-ok',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain("You're all set. See you soon.");
+    const outboundCalls = mockLogSmsChatMessages.mock.calls
+      .flatMap(call => call[0])
+      .filter(row => row && row.direction === 'outbound');
+    expect(outboundCalls).toHaveLength(1);
+    expect(outboundCalls[0]).toMatchObject({
+      direction: 'outbound',
+      outcome: 'upgrade_confirmed',
+    });
+    expect(outboundCalls[0].content).toContain("You're all set");
+  });
+
+  it('does not claim success and queues follow-up when the upgrade cannot be verified', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      memberProfile: { clientId: 'client-1', phone: '+12134401333' },
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-verify-2',
+        targetDurationMinutes: 50,
+        currentDurationMinutes: 30,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: false,
+      reason: 'upgrade_verification_failed',
+      reverified: true,
+      opportunity: {
+        appointmentId: 'appt-verify-2',
+        currentDurationMinutes: 30,
+        targetDurationMinutes: 50,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      },
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-verify-fail',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).not.toContain("You're all set");
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(session.pendingUpgradeOffer).toBeNull();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'upgrade_verification_failed',
+    });
+    const outboundCalls = mockLogSmsChatMessages.mock.calls
+      .flatMap(call => call[0])
+      .filter(row => row && row.direction === 'outbound');
+    expect(outboundCalls).toHaveLength(1);
+    expect(outboundCalls[0]).toMatchObject({ direction: 'outbound', outcome: 'manual_followup' });
+  });
+
+  it('logs an outbound row on the generic YES branch (no pending offer)', async () => {
+    // This exercises the SECOND reply site, reached when there is no pending
+    // offer but a fresh eligible opportunity is found. Without this test the
+    // generic-branch logging could be omitted and the pending-offer tests
+    // would still pass.
+    const session = { id: 'sess-1', status: 'active', smsInboundCount: 0 };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+12134401333',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-generic-1',
+      currentDurationMinutes: 30,
+      targetDurationMinutes: 50,
+      pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-generic-ok',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain("You're all set. See you soon.");
+    const outboundCalls = mockLogSmsChatMessages.mock.calls
+      .flatMap(call => call[0])
+      .filter(row => row && row.direction === 'outbound');
+    expect(outboundCalls).toHaveLength(1);
+    expect(outboundCalls[0]).toMatchObject({ direction: 'outbound', outcome: 'upgrade_confirmed' });
+  });
+
   it('returns approved manual confirmation copy when YES has no eligible opportunity', async () => {
     const session = {
       id: 'sess-1',
