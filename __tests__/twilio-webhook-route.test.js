@@ -575,6 +575,61 @@ describe('twilio webhook route', () => {
     expect(mockLogSupportIncident).not.toHaveBeenCalled();
   });
 
+  it('queues manual follow-up when safe add-on append fails', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      memberProfile: {
+        clientId: 'client-append-fail',
+        phone: '+12134401333',
+      },
+      pendingUpgradeOffer: {
+        offerKind: 'addon',
+        appointmentId: 'appt-append-fail',
+        addOnCode: 'antioxidant_peel',
+        addOnName: 'Antioxidant Peel',
+        pricing: { memberPrice: 40, walkinPrice: 50 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: false,
+      reason: 'addon_booking_from_appointment_failed',
+      reverified: true,
+      opportunity: {
+        offerKind: 'addon',
+        appointmentId: 'appt-append-fail',
+        addOnCode: 'antioxidant_peel',
+        addOnName: 'Antioxidant Peel',
+      },
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-addon-append-fail',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    // A failed non-destructive append must never claim the add-on was applied.
+    // The member gets approved manual-confirmation copy, the original appointment
+    // is left untouched, and an ops incident is queued for human follow-up.
+    expect(res.status).toBe(200);
+    expect(text).not.toContain("You're all set");
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(session.pendingUpgradeOffer).toBeNull();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'addon_booking_from_appointment_failed',
+    });
+  });
+
   it('recovers a remote active session by phone and finalizes pending add-on YES without chat fallback', async () => {
     process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
     const remoteSession = {
