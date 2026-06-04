@@ -210,6 +210,28 @@ function queueSupportIncident(incident) {
   });
 }
 
+// Records the outbound upgrade-reply we are about to return as TwiML. Awaited
+// on purpose: on Vercel the function can suspend once the response is returned,
+// so a fire-and-forget write would risk dropping this row. The try/catch keeps
+// a sheet failure from ever breaking the member reply.
+async function logUpgradeReplyOutbound({ sessionId, from, activeSession, offer, upgradeResult, content }) {
+  try {
+    await logSmsChatMessages([{
+      sessionId,
+      timestamp: new Date().toISOString(),
+      direction: 'outbound',
+      phone: from,
+      memberName: activeSession?.memberProfile?.name || null,
+      location: activeSession?.memberProfile?.locationName || null,
+      content,
+      offerType: offer?.offerKind || null,
+      outcome: upgradeResult?.success === true ? 'upgrade_confirmed' : 'manual_followup',
+    }]);
+  } catch (err) {
+    console.error('SMS outbound upgrade reply logging failed:', err);
+  }
+}
+
 function toIncidentPhone(from, profile) {
   return String(profile?.phone || from || '').trim();
 }
@@ -752,6 +774,14 @@ export async function POST(request) {
           const upgradeText = buildUpgradeApplyReply(upgradeResult, upgradeResult?.opportunity || null, pendingOffer);
           const upgradeTwiml = buildTwimlMessage(upgradeText);
           if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
+          await logUpgradeReplyOutbound({
+            sessionId,
+            from,
+            activeSession,
+            offer: pendingOffer,
+            upgradeResult,
+            content: upgradeText,
+          });
           return new NextResponse(upgradeTwiml, {
             status: 200,
             headers: buildTwimlHeaders(rateLimit),
@@ -810,6 +840,14 @@ export async function POST(request) {
         const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer);
         const upgradeTwiml = buildTwimlMessage(upgradeText);
         if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
+        await logUpgradeReplyOutbound({
+          sessionId,
+          from,
+          activeSession,
+          offer: pendingOffer || opportunity,
+          upgradeResult,
+          content: upgradeText,
+        });
         return new NextResponse(upgradeTwiml, {
           status: 200,
           headers: buildTwimlHeaders(rateLimit),
