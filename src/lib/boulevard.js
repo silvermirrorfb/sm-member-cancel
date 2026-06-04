@@ -2584,6 +2584,21 @@ async function tryApplyAppointmentUpgradeMutation(apiUrl, headers, appointmentId
   return { applied: false, reason: 'upgrade_mutation_failed' };
 }
 
+// Read-back guard: the upgrade mutation only echoes back appointment { id },
+// so a Boulevard no-op can still look "applied". Re-fetch the appointment and
+// confirm its service now equals the configured target service id before we
+// treat the upgrade as real. Any fetch failure returns false (fail closed).
+async function verifyAppointmentServiceApplied(apiUrl, headers, appointmentId, expectedServiceId) {
+  const expected = String(expectedServiceId || '').trim();
+  if (!expected) return false;
+  const context = await fetchAppointmentContextById(apiUrl, headers, appointmentId);
+  if (!context) return false;
+  if (String(context.serviceId || '').trim() === expected) return true;
+  return (context.appointmentServices || []).some(
+    service => String(service?.serviceId || '').trim() === expected,
+  );
+}
+
 async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
   const id = String(appointmentId || '').trim();
   if (!id) return null;
@@ -3245,6 +3260,23 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
       reason: applied.reason || 'upgrade_mutation_failed',
       reverified: true,
       opportunity: fresh,
+    };
+  }
+
+  const verified = await verifyAppointmentServiceApplied(
+    auth.apiUrl,
+    auth.headers,
+    fresh.appointmentId,
+    serviceId,
+  );
+  if (!verified) {
+    return {
+      success: false,
+      reason: 'upgrade_verification_failed',
+      reverified: true,
+      opportunity: fresh,
+      mutationRoot: applied.mutationRoot,
+      updatedAppointmentId: applied.updatedId,
     };
   }
 
