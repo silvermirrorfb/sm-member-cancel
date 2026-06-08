@@ -633,6 +633,22 @@ describe('upgrade eligibility engine', () => {
       expect(result.currentDurationMinutes).toBe(30);
       expect(result.targetDurationMinutes).toBe(50);
     });
+
+    it('still offers a former 50-minute member (canceled) with a genuine 30 block (stale tier, no over-correction)', () => {
+      // buildProfile sets profile.tier from the membership name even when the
+      // membership is inactive/canceled. The tier signal must not exclude a
+      // former member who books a real 30-minute service: they should still get
+      // the non-member 30-to-50 offer, exactly as before the tier guard existed.
+      const result = evaluateUpgradeEligibilityFromAppointments(
+        thirtyBlockAppointments,
+        { clientId: 'client-1', tier: '50', accountStatus: 'inactive' },
+        opts
+      );
+      expect(result.eligible).toBe(true);
+      expect(result.currentDurationMinutes).toBe(30);
+      expect(result.targetDurationMinutes).toBe(50);
+      expect(result.isMember).toBe(false);
+    });
   });
 
   it('treats 15 minutes after appointment end as eligible for 30->50', () => {
