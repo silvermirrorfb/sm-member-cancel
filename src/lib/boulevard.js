@@ -2377,7 +2377,17 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   if (Number(targetDurationMinutes) !== 50) {
     return { eligible: false, reason: 'unsupported_upgrade_target' };
   }
-  if (currentDurationMinutes >= 50) {
+  // Already-at-or-above-target exclusion. Gate on the GREATER of the booked-block
+  // bucket and the member's membership tier so a 50 or 90 minute member whose
+  // current booking block happens to bucket to 30 (tier and booked-block
+  // disagree, e.g. a 50-minute member booked into a short or non-ladder service)
+  // is never selected as a 30-to-50 candidate. profileTierDuration is derived
+  // above from profile.tier. When tier is unresolved (null), this falls back to
+  // the block bucket alone, preserving prior behavior.
+  const effectiveCurrentDuration = isFiniteNumber(profileTierDuration)
+    ? Math.max(currentDurationMinutes, profileTierDuration)
+    : currentDurationMinutes;
+  if (effectiveCurrentDuration >= targetDurationMinutes) {
     return { eligible: false, reason: 'already_at_or_above_target_duration' };
   }
 
