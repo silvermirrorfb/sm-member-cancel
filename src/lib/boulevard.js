@@ -2382,15 +2382,17 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   // current booking block happens to bucket to 30 (tier and booked-block
   // disagree, e.g. a 50-minute member booked into a short or non-ladder service)
   // is never selected as a 30-to-50 candidate. profileTierDuration is derived
-  // above from profile.tier. Only apply the tier signal for active members:
-  // buildProfile sets profile.tier from the membership name even for inactive or
-  // canceled memberships, and isMember (above) already treats those as
-  // non-members. Without the isMember gate, a former 50 or 90 minute member who
-  // books a genuine 30-minute service would be wrongly excluded from the
-  // non-member 30-to-50 offer. When tier is unresolved (null) or the account is
-  // inactive/canceled, this falls back to the block bucket alone, preserving
-  // prior behavior.
-  const effectiveCurrentDuration = (isMember && isFiniteNumber(profileTierDuration))
+  // above from profile.tier. Only apply the tier signal when the membership is
+  // genuinely active: buildProfile sets profile.tier from the membership name
+  // even for dead memberships (inactive, canceled, expired, terminated, past
+  // due), so without the status gate a former 50 or 90 minute member who books a
+  // genuine 30-minute service would be wrongly excluded from the non-member
+  // 30-to-50 offer. isInactiveMembershipStatus is the canonical dead-status check
+  // used elsewhere in this file. When tier is unresolved (null) or the membership
+  // is dead, this falls back to the block bucket alone, preserving prior behavior.
+  const tierSignalIsCurrent =
+    isFiniteNumber(profileTierDuration) && !isInactiveMembershipStatus(profile?.accountStatus);
+  const effectiveCurrentDuration = tierSignalIsCurrent
     ? Math.max(currentDurationMinutes, profileTierDuration)
     : currentDurationMinutes;
   if (effectiveCurrentDuration >= targetDurationMinutes) {
