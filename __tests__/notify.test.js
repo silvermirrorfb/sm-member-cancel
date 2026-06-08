@@ -120,3 +120,30 @@ describe('P2-2: SMTP missing does not log PII', () => {
     expect(allWarnCalls).toContain('SMTP not configured');
   });
 });
+
+describe('chatbot incident email identifiers', () => {
+  beforeEach(() => {
+    process.env.SMTP_HOST = 'smtp.test';
+    process.env.SMTP_USER = 'user';
+    process.env.SMTP_PASS = 'pass';
+    process.env.GOOGLE_CHATLOG_SHEET_ID = 'SHEET123';
+    sendMail.mockClear();
+  });
+
+  it('includes session id, session start time, and a chatlog sheet link', async () => {
+    vi.resetModules();
+    const { sendSupportIncidentEmail } = await import('../src/lib/notify.js');
+    await sendSupportIncidentEmail({
+      date: '2026-06-08T12:00:00.000Z',
+      session_id: 'sess_xyz',
+      session_created: '2026-06-08T11:58:00.000Z',
+      issue_type: 'booking_payment_issue',
+      user_message: 'my payment failed',
+    });
+    const body = sendMail.mock.calls[0][0].text;
+    expect(body).toContain('Session ID: sess_xyz');
+    expect(body).toContain('Session started: 2026-06-08T11:58:00.000Z');
+    expect(body).toContain('https://docs.google.com/spreadsheets/d/SHEET123');
+    expect(body).not.toContain('—');
+  });
+});

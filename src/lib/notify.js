@@ -290,12 +290,19 @@ async function sendSupportIncidentEmail(incident) {
     auth: { user, pass },
   });
 
-  const subject = `[Chatbot Incident] ${incident.issue_type} — session ${incident.session_id}`;
+  const subject = `[Chatbot Incident] ${incident.issue_type} for session ${incident.session_id}`;
+  const chatlogSheetId = String(process.env.GOOGLE_CHATLOG_SHEET_ID || '').trim();
+  const chatlogLink = chatlogSheetId
+    ? `https://docs.google.com/spreadsheets/d/${chatlogSheetId}`
+    : 'Not configured';
   const body = `
 New chatbot booking/payment incident detected.
 
-Date: ${incident.date}
 Session ID: ${incident.session_id}
+Session started: ${incident.session_created || 'Not recorded'}
+Transcript (Chatlog Sheet, filter by Session ID): ${chatlogLink}
+
+Date: ${incident.date}
 Issue Type: ${incident.issue_type}
 Name: ${incident.name || 'Not provided'}
 Email: ${incident.email || 'Not provided'}
@@ -1424,6 +1431,7 @@ async function processConversationEnd(summary, transcript) {
 export {
   safeIsoDate,
   sendSummaryEmail,
+  sendSupportIncidentEmail,
   sendReasonAlert,
   sendOpsAlertEmail,
   matchReasonToCategory,

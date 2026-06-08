@@ -835,6 +835,7 @@ export async function POST(request) {
             const incident = {
                   date: new Date().toISOString(),
                   session_id: sessionId,
+                  session_created: sessionCreated,
                   issue_type: 'booking_payment_issue',
                   name: extractName(sanitizedMessage),
                   email: extractEmail(sanitizedMessage),
