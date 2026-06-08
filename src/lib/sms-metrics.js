@@ -59,3 +59,36 @@ export async function getDailySendCount(dateStr) {
     return 0;
   }
 }
+
+const CANDIDATE_KEY_PREFIX = 'sms-candidates:';
+
+// Add `by` candidates to today's counter (metrics timezone). No-op when Redis is
+// not configured. Never throws. Uses INCRBY because a scan run finds many at once.
+export async function incrementDailyCandidateCount(by = 1, when = new Date()) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const n = Number(by);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  const key = `${CANDIDATE_KEY_PREFIX}${localDateStr(when)}`;
+  try {
+    const total = await redis.incrby(key, n);
+    if (total === n) await redis.expire(key, SENT_TTL_SECONDS);
+    return true;
+  } catch (err) {
+    console.warn('[sms-metrics] candidate incr failed:', err?.message || err);
+    return false;
+  }
+}
+
+export async function getDailyCandidateCount(dateStr) {
+  const redis = getRedis();
+  if (!redis) return 0;
+  try {
+    const v = await redis.get(`${CANDIDATE_KEY_PREFIX}${dateStr}`);
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  } catch (err) {
+    console.warn('[sms-metrics] candidate get failed:', err?.message || err);
+    return 0;
+  }
+}

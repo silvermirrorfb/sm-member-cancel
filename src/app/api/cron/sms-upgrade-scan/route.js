@@ -9,6 +9,7 @@ import {
   scanAppointments,
 } from '../../../../lib/boulevard';
 import { sendOpsAlertEmail, tallyRunSummary, classifyUpgradeScanRun, buildUpgradeScanAlert } from '../../../../lib/notify';
+import { incrementDailyCandidateCount } from '../../../../lib/sms-metrics';
 import { getRegistryCounts } from '../../../../lib/sms-member-registry';
 import { isWithinSendWindow, getNextWindowStartIso } from '../../../../lib/sms-window';
 
@@ -255,6 +256,10 @@ export async function GET(request) {
     console.log('[sms-upgrade-scan]', JSON.stringify(payload));
     return NextResponse.json(payload);
   }
+
+  // Record how many candidates this run found, so the daily health check can word
+  // a zero-send day correctly. This is copy-only signal; it never gates the alert.
+  await incrementDailyCandidateCount(candidates.length).catch(() => {});
 
   const automationBaseUrl = String(
     process.env.SMS_AUTOMATION_BASE_URL || 'https://sm-member-cancel.vercel.app',
