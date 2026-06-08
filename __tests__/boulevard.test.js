@@ -649,6 +649,24 @@ describe('upgrade eligibility engine', () => {
       expect(result.targetDurationMinutes).toBe(50);
       expect(result.isMember).toBe(false);
     });
+
+    it.each(['EXPIRED', 'TERMINATED', 'PAST_DUE'])(
+      'still offers a former 50-minute member with a %s membership and a genuine 30 block',
+      (status) => {
+        // isInactiveMembershipStatus treats EXPIRED/TERMINATED/PAST_DUE as not
+        // active. The tier signal must defer to that canonical status check, not a
+        // narrow inactive|cancel match, so these former members keep the 30-to-50
+        // offer instead of being excluded as already-at-target on a stale tier.
+        const result = evaluateUpgradeEligibilityFromAppointments(
+          thirtyBlockAppointments,
+          { clientId: 'client-1', tier: '50', accountStatus: status },
+          opts
+        );
+        expect(result.eligible).toBe(true);
+        expect(result.currentDurationMinutes).toBe(30);
+        expect(result.targetDurationMinutes).toBe(50);
+      }
+    );
   });
 
   it('treats 15 minutes after appointment end as eligible for 30->50', () => {
