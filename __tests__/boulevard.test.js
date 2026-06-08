@@ -568,6 +568,73 @@ describe('upgrade eligibility engine', () => {
     expect(result.targetDurationMinutes).toBe(50);
   });
 
+  describe('already-at-or-above-target tier exclusion', () => {
+    // A 30-minute booked block (buckets to 30) plus a later same-provider
+    // appointment leaving a 40-minute gap. Identical to the eligible fixtures
+    // above; only profile.tier changes between cases.
+    const thirtyBlockAppointments = [
+      {
+        id: 'appt-1',
+        clientId: 'client-1',
+        providerId: 'prov-1',
+        startOn: '2026-06-05T10:00:00.000Z',
+        endOn: '2026-06-05T10:30:00.000Z',
+        status: 'BOOKED',
+      },
+      {
+        id: 'appt-2',
+        clientId: 'other',
+        providerId: 'prov-1',
+        startOn: '2026-06-05T11:10:00.000Z',
+        endOn: '2026-06-05T11:40:00.000Z',
+        status: 'BOOKED',
+      },
+    ];
+    const opts = { now: '2026-06-05T08:00:00.000Z', windowHours: 6 };
+
+    it('excludes a 50-minute-tier member whose booked block buckets to 30 (Amy case)', () => {
+      const result = evaluateUpgradeEligibilityFromAppointments(
+        thirtyBlockAppointments,
+        { clientId: 'client-1', tier: '50', accountStatus: 'active' },
+        opts
+      );
+      expect(result.eligible).toBe(false);
+      expect(result.reason).toBe('already_at_or_above_target_duration');
+    });
+
+    it('excludes a 90-minute-tier member whose booked block buckets to 30', () => {
+      const result = evaluateUpgradeEligibilityFromAppointments(
+        thirtyBlockAppointments,
+        { clientId: 'client-1', tier: '90', accountStatus: 'active' },
+        opts
+      );
+      expect(result.eligible).toBe(false);
+      expect(result.reason).toBe('already_at_or_above_target_duration');
+    });
+
+    it('still offers a genuine 30-minute-tier member with a 30 block (no over-correction)', () => {
+      const result = evaluateUpgradeEligibilityFromAppointments(
+        thirtyBlockAppointments,
+        { clientId: 'client-1', tier: '30', accountStatus: 'active' },
+        opts
+      );
+      expect(result.eligible).toBe(true);
+      expect(result.currentDurationMinutes).toBe(30);
+      expect(result.targetDurationMinutes).toBe(50);
+    });
+
+    it('falls back to the block signal when tier is unresolved (null)', () => {
+      const result = evaluateUpgradeEligibilityFromAppointments(
+        thirtyBlockAppointments,
+        { clientId: 'client-1', tier: null, accountStatus: 'active' },
+        opts
+      );
+      expect(result.eligible).toBe(true);
+      expect(result.currentDurationMinutes).toBe(30);
+      expect(result.targetDurationMinutes).toBe(50);
+    });
+  });
+
   it('treats 15 minutes after appointment end as eligible for 30->50', () => {
     const appointments = [
       {
