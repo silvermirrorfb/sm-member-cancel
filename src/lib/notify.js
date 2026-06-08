@@ -365,6 +365,114 @@ async function sendOpsAlertEmail({ subject, text }) {
   }
 }
 
+// Ops alert formatting. Every ops alert reads the same way for a non-engineer: a
+// plain-English verdict on top, a one-line "What to do", then a "Technical detail"
+// block for engineering. technical is an array of already-formatted lines.
+function formatOpsAlert({ verdict, whatToDo, technical }) {
+  const verdictLines = Array.isArray(verdict) ? verdict : [verdict];
+  return [
+    ...verdictLines,
+    '',
+    `What to do: ${whatToDo}`,
+    '',
+    'Technical detail (for engineering):',
+    ...(technical || []),
+  ].join('\n');
+}
+
+// Fold the per-candidate cron results into the run summary. Pure so the tally
+// (especially addonSends) is unit-tested directly without the route harness.
+function tallyRunSummary(results) {
+  const summary = {
+    total: results.length,
+    sent: 0, skipped: 0, errors: 0, addonSends: 0,
+    skippedByReason: {}, errorsByReason: {}, httpStatusCodes: {},
+  };
+  for (const val of results) {
+    if (val.httpStatus != null) {
+      const code = String(val.httpStatus);
+      summary.httpStatusCodes[code] = (summary.httpStatusCodes[code] || 0) + 1;
+    }
+    if (val.status === 'sent') {
+      summary.sent++;
+      if (val.offerKind === 'addon') summary.addonSends++;
+    } else if (val.status === 'error' || !val.ok) {
+      summary.errors++;
+      const reason = val.reason || 'unknown';
+      summary.errorsByReason[reason] = (summary.errorsByReason[reason] || 0) + 1;
+    } else {
+      summary.skipped++;
+      const reason = val.reason || 'unknown';
+      summary.skippedByReason[reason] = (summary.skippedByReason[reason] || 0) + 1;
+    }
+  }
+  return summary;
+}
+
+// Decide whether a single scan run needs a human. Healthy runs stay silent: at
+// most one transient error absorbed (errors <= 1) and no add-on sent. Returns
+// { shouldAlert, conditions } where conditions is a subset of ['errors', 'addon'].
+function classifyUpgradeScanRun(summary) {
+  const errors = Number(summary?.errors || 0);
+  const addonSends = Number(summary?.addonSends || 0);
+  const conditions = [];
+  if (errors >= 2) conditions.push('errors');
+  if (addonSends >= 1) conditions.push('addon');
+  return { shouldAlert: conditions.length > 0, conditions };
+}
+
+function buildUpgradeScanAlert(summary, conditions) {
+  const errors = Number(summary?.errors || 0);
+  const addonSends = Number(summary?.addonSends || 0);
+  const verdict = [];
+  if (conditions.includes('errors')) {
+    verdict.push(`Needs attention: the upgrade scan hit ${errors} errors in a single run. A healthy run absorbs at most one transient hiccup, so this one needs an engineer to look.`);
+  }
+  if (conditions.includes('addon')) {
+    verdict.push(`Needs attention: an add-on offer was actually texted to a member (${addonSends} this run). Add-on texts are supposed to be impossible from this pipeline, so the safeguard may have broken. Please have engineering check immediately.`);
+  }
+  const technical = [
+    `total=${summary?.total ?? 0} sent=${summary?.sent ?? 0} skipped=${summary?.skipped ?? 0} errors=${errors} addonSends=${addonSends}`,
+    `errorsByReason: ${JSON.stringify(summary?.errorsByReason || {})}`,
+    `skippedByReason: ${JSON.stringify(summary?.skippedByReason || {})}`,
+    `httpStatusCodes: ${JSON.stringify(summary?.httpStatusCodes || {})}`,
+    'Logs: Vercel cron logs, filter "[sms-upgrade-scan]" at error level.',
+  ];
+  return {
+    subject: `[Silver Mirror] Needs attention: SMS upgrade scan`,
+    text: formatOpsAlert({
+      verdict,
+      whatToDo: 'forward this to engineering. No member action is needed from you.',
+      technical,
+    }),
+  };
+}
+
+// Daily zero-send. ALWAYS fires when sends < threshold; the candidate count only
+// softens the wording. Never gate the email on candidates: a broken or disabled
+// scan records zero candidates, and suppressing on candidates==0 would re-open
+// the silent-outage hole the daily check exists to catch.
+function buildDailyZeroSendAlert({ dateStr, sends, candidates, threshold }) {
+  const quiet = Number(candidates) === 0;
+  const verdict = quiet
+    ? `Heads up: no upgrade texts went out yesterday (${dateStr}), and 0 eligible members were scanned. This may be a genuinely quiet day, so verify the scan is running before treating it as an outage.`
+    : `Needs attention: no upgrade texts went out yesterday (${dateStr}) even though ${candidates} eligible members were scanned. ${sends} send(s) recorded, below the threshold of ${threshold}.`;
+  const whatToDo = quiet
+    ? 'confirm the scan actually ran yesterday; if it ran and there were truly no eligible members, no action is needed.'
+    : 'forward this to engineering. Sending likely stalled (env flag off, Boulevard or Twilio failing, or the approval gate holding everything).';
+  const technical = [
+    `date=${dateStr} sends=${sends} candidates=${candidates} threshold=${threshold}`,
+    '1. Vercel cron logs for "[sms-upgrade-scan]": summary.sent and summary.skippedByReason.',
+    '2. SMS_CRON_ENABLED / SMS_REQUIRE_MANUAL_LIVE_APPROVAL / SMS_UPGRADE_STATUS env values.',
+    '3. Redis registry counts (HLEN sms-registry:loc:*).',
+    'See docs/outbound-sms-system-and-issues.md and QA_ISSUES.md (outbound-sms section).',
+  ];
+  return {
+    subject: `[Silver Mirror] ${quiet ? 'Heads up' : 'Needs attention'}: outbound SMS on ${dateStr}`,
+    text: formatOpsAlert({ verdict, whatToDo, technical }),
+  };
+}
+
 function buildSubjectLine(summary) {
   const outcome = summary.outcome || 'UNKNOWN';
   const name = summary.client_name || 'Unknown Member';
@@ -1328,4 +1436,8 @@ export {
   logCallbackQueueEntry,
   logMissedCallEvent,
   processConversationEnd,
+  tallyRunSummary,
+  classifyUpgradeScanRun,
+  buildUpgradeScanAlert,
+  buildDailyZeroSendAlert,
 };
