@@ -23,9 +23,13 @@ vi.mock('../src/lib/sms-window.js', () => ({
   getNextWindowStartIso: () => new Date().toISOString(),
 }));
 
-vi.mock('../src/lib/notify.js', () => ({
-  sendOpsAlertEmail,
-}));
+vi.mock('../src/lib/notify.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    sendOpsAlertEmail,
+  };
+});
 
 vi.mock('@upstash/redis', () => ({
   Redis: RedisMock,
@@ -272,32 +276,34 @@ describe('GET /api/cron/sms-upgrade-scan (appointment-discovery mode)', () => {
     expect(body.summary.errorsByReason).toEqual({ non_json_response: 1 });
   });
 
-  it('fires inline alert once per hour when sent=0 and errors>0', async () => {
+  it('fires inline alert once per hour when errors>=2', async () => {
     process.env.UPSTASH_REDIS_REST_URL = 'https://r.test';
     process.env.UPSTASH_REDIS_REST_TOKEN = 'tok';
 
+    // Two candidates so the run produces errors=2, which meets the alert threshold.
     scanAppointments.mockImplementation(async (_url, _headers, ctx) => {
       if (String(ctx.locationId).includes('Bryant')) {
         return {
           appointments: [
             { id: 'a1', clientId: 'c1', clientFirstName: 'Katherine', clientLastName: 'Lee', clientEmail: 'k@example.com', clientPhone: '+15551112222', locationId: 'Bryant Park', startOn: future(2) },
+            { id: 'a2', clientId: 'c2', clientFirstName: 'Sam', clientLastName: 'Park', clientEmail: 's@example.com', clientPhone: '+15553334444', locationId: 'Bryant Park', startOn: future(4) },
           ],
         };
       }
       return { appointments: [] };
     });
     globalThis.fetch = vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) }));
-    // First SET NX wins, second loses (key already set within the hour bucket).
+    // First SET NX wins (new condition key), second loses (same key on second run).
     redisSet.mockResolvedValueOnce('OK').mockResolvedValueOnce(null);
 
     const { GET } = await loadRoute();
     await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
     await GET(new Request('https://app.test/api/cron/sms-upgrade-scan'));
 
-    expect(redisSet).toHaveBeenCalledTimes(2);
     expect(sendOpsAlertEmail).toHaveBeenCalledTimes(1);
+    expect(redisSet).toHaveBeenCalledTimes(2);
     const firstCall = redisSet.mock.calls[0];
-    expect(firstCall[0]).toMatch(/^sms-error-alert:/);
+    expect(firstCall[0]).toMatch(/^sms-alert:errors:/);
     expect(firstCall[2]).toEqual({ nx: true, ex: 3600 });
   });
 });

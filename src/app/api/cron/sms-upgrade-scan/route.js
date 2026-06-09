@@ -8,7 +8,8 @@ import {
   resolveBoulevardLocationInput,
   scanAppointments,
 } from '../../../../lib/boulevard';
-import { sendOpsAlertEmail } from '../../../../lib/notify';
+import { sendOpsAlertEmail, tallyRunSummary, classifyUpgradeScanRun, buildUpgradeScanAlert } from '../../../../lib/notify';
+import { incrementDailyCandidateCount } from '../../../../lib/sms-metrics';
 import { getRegistryCounts } from '../../../../lib/sms-member-registry';
 import { isWithinSendWindow, getNextWindowStartIso } from '../../../../lib/sms-window';
 
@@ -68,30 +69,19 @@ function getAlertRedis() {
   return cachedAlertRedis;
 }
 
-async function maybeAlertInlineFailure(summary) {
+async function maybeAlertForRun(summary, conditions) {
   const redis = getAlertRedis();
   const hourBucket = new Date().toISOString().slice(0, 13);
-  const alertKey = `sms-error-alert:${hourBucket}`;
-  if (redis) {
-    const set = await redis.set(alertKey, '1', { nx: true, ex: 3600 });
-    if (!set) return false;
+  // Per-condition dedup so an early errors alert does not mask a later add-on
+  // breach in the same hour. Each condition is rate-limited to once per hour.
+  const fresh = [];
+  for (const cond of conditions) {
+    if (!redis) { fresh.push(cond); continue; }
+    const set = await redis.set(`sms-alert:${cond}:${hourBucket}`, '1', { nx: true, ex: 3600 });
+    if (set) fresh.push(cond);
   }
-  const subject = `[Silver Mirror] SMS cron showing HTTP errors with zero sends`;
-  const text = [
-    `The sms-upgrade-scan cron just completed a run with summary.sent=0 and summary.errors=${summary.errors}.`,
-    '',
-    `Total candidates: ${summary.total}`,
-    `Sent: ${summary.sent}`,
-    `Skipped: ${summary.skipped}`,
-    `Errors: ${summary.errors}`,
-    `errorsByReason: ${JSON.stringify(summary.errorsByReason || {})}`,
-    `skippedByReason: ${JSON.stringify(summary.skippedByReason || {})}`,
-    `httpStatusCodes: ${JSON.stringify(summary.httpStatusCodes || {})}`,
-    '',
-    'This alert is rate-limited to once per hour. Check Vercel logs for [sms-upgrade-scan] entries at error level.',
-    '',
-    'See docs/outbound-sms-system-and-issues.md and QA_ISSUES.md (outbound-sms section).',
-  ].join('\n');
+  if (fresh.length === 0) return false;
+  const { subject, text } = buildUpgradeScanAlert(summary, fresh);
   const result = await sendOpsAlertEmail({ subject, text });
   return result?.sent === true;
 }
@@ -194,6 +184,7 @@ async function checkOneCandidate(candidate, endpoint, automationToken, now) {
       candidate: candidateName,
       status: r.status || 'unknown',
       reason: r.reason || r.offerKind || null,
+      offerKind: r.offerKind || null,
       httpStatus: res.status,
       ok: true,
     };
@@ -266,6 +257,10 @@ export async function GET(request) {
     return NextResponse.json(payload);
   }
 
+  // Record how many candidates this run found, so the daily health check can word
+  // a zero-send day correctly. This is copy-only signal; it never gates the alert.
+  await incrementDailyCandidateCount(candidates.length).catch(() => {});
+
   const automationBaseUrl = String(
     process.env.SMS_AUTOMATION_BASE_URL || 'https://sm-member-cancel.vercel.app',
   ).trim();
@@ -291,31 +286,7 @@ export async function GET(request) {
     }
   }
 
-  const summary = {
-    total: allResults.length,
-    sent: 0,
-    skipped: 0,
-    errors: 0,
-    skippedByReason: {},
-    errorsByReason: {},
-    httpStatusCodes: {},
-  };
-  for (const val of allResults) {
-    if (val.httpStatus != null) {
-      const code = String(val.httpStatus);
-      summary.httpStatusCodes[code] = (summary.httpStatusCodes[code] || 0) + 1;
-    }
-    if (val.status === 'sent') summary.sent++;
-    else if (val.status === 'error' || !val.ok) {
-      summary.errors++;
-      const reason = val.reason || 'unknown';
-      summary.errorsByReason[reason] = (summary.errorsByReason[reason] || 0) + 1;
-    } else {
-      summary.skipped++;
-      const reason = val.reason || 'unknown';
-      summary.skippedByReason[reason] = (summary.skippedByReason[reason] || 0) + 1;
-    }
-  }
+  const summary = tallyRunSummary(allResults);
 
   const payload = {
     ok: true,
@@ -331,8 +302,9 @@ export async function GET(request) {
   } else {
     console.log('[sms-upgrade-scan]', JSON.stringify(summaryLogPayload));
   }
-  if (summary.sent === 0 && summary.errors > 0) {
-    await maybeAlertInlineFailure(summary).catch(err => {
+  const { shouldAlert, conditions } = classifyUpgradeScanRun(summary);
+  if (shouldAlert) {
+    await maybeAlertForRun(summary, conditions).catch(err => {
       console.error('[sms-upgrade-scan] inline alert failed:', err?.message || err);
     });
   }
