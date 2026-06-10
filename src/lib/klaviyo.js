@@ -3,6 +3,11 @@ import { normalizePhone } from './sms-sessions';
 const DEFAULT_BASE_URL = 'https://a.klaviyo.com/api';
 const DEFAULT_REVISION = process.env.KLAVIYO_REVISION || '2026-01-15';
 const LOOKUP_TIMEOUT_MS = Number(process.env.KLAVIYO_LOOKUP_TIMEOUT_MS || 10000);
+const MAX_PROFILE_PAGES = 5;
+// Explicit revocation values. NEVER_SUBSCRIBED and missing consent are
+// "never set" and intentionally NOT in this set: a never-set sibling profile
+// must not veto a SUBSCRIBED profile on the same phone.
+const REVOKED_CONSENT_VALUES = new Set(['UNSUBSCRIBED', 'SUPPRESSED', 'REVOKED']);
 
 function parseEmail(value) {
   const email = String(value || '').trim().toLowerCase();
@@ -74,6 +79,72 @@ async function fetchProfileByFilter(config, filterQuery) {
   }
 }
 
+async function fetchProfilesPageByUrl(config, absoluteUrl) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LOOKUP_TIMEOUT_MS);
+  try {
+    const response = await fetch(absoluteUrl, {
+      method: 'GET',
+      headers: createHeaders(config),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => null);
+    return { response, payload };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Collects EVERY profile matching the filter, following links.next. The gate
+// must see all profiles on a phone: deciding consent from whichever profile
+// the API returns first is the defect this exists to fix. Fail closed on any
+// non-OK page, unparseable payload, or a next link that survives the page cap.
+async function fetchAllProfilesByFilter(config, filterQuery) {
+  const profiles = [];
+  let pageResult = await fetchProfileByFilter(config, filterQuery);
+  for (let page = 0; page < MAX_PROFILE_PAGES; page++) {
+    const { response, payload } = pageResult;
+    if (!response.ok) {
+      return { ok: false, status: response.status, profiles: null, overflow: false };
+    }
+    if (!payload || !Array.isArray(payload.data)) {
+      return { ok: false, status: response.status, profiles: null, overflow: false };
+    }
+    profiles.push(...payload.data);
+    const rawNext = payload?.links?.next;
+    const nextUrl = typeof rawNext === 'string' && rawNext.trim() ? rawNext : null;
+    if (!nextUrl) {
+      return { ok: true, status: response.status, profiles, overflow: false };
+    }
+    if (page === MAX_PROFILE_PAGES - 1) {
+      // A next link survives the page cap: ambiguous profile set, do not
+      // fetch a page we will not evaluate; fail closed below.
+      break;
+    }
+    pageResult = await fetchProfilesPageByUrl(config, nextUrl);
+  }
+  return { ok: false, status: null, profiles: null, overflow: true };
+}
+
+function classifyProfile(profile) {
+  const smsMarketing = readSmsMarketing(profile?.attributes || {});
+  const consent = normalizeConsent(smsMarketing?.consent);
+  const canReceive = parseCanReceive(smsMarketing?.can_receive_sms_marketing);
+  return {
+    profile,
+    smsMarketing,
+    consent,
+    canReceive,
+    satisfies: consent === 'SUBSCRIBED' && canReceive !== false,
+    revoked: REVOKED_CONSENT_VALUES.has(consent),
+    // An explicit false receive flag is an operational suppression signal and
+    // vetoes the phone with the same weight as revocation (Matt, 2026-06-10).
+    // parseCanReceive returns false only for an explicit false; absent or null
+    // stays null so a never-set sibling profile does not veto.
+    receiveBlocked: canReceive === false,
+  };
+}
+
 async function checkKlaviyoSmsOptIn(input = {}) {
   const config = getConfig();
   if (!config.configured) {
@@ -100,12 +171,12 @@ async function checkKlaviyoSmsOptIn(input = {}) {
   }
 
   try {
-    const { response, payload } = await fetchProfileByFilter(config, selection.filter);
-    if (!response.ok) {
+    const fetched = await fetchAllProfilesByFilter(config, selection.filter);
+    if (!fetched.ok) {
       return {
         allowed: false,
-        reason: 'klaviyo_lookup_error',
-        status: response.status,
+        reason: fetched.overflow ? 'klaviyo_profile_overflow' : 'klaviyo_lookup_error',
+        ...(fetched.status ? { status: fetched.status } : {}),
         matchedBy: selection.matchedBy,
         profileId: null,
         consent: null,
@@ -113,8 +184,8 @@ async function checkKlaviyoSmsOptIn(input = {}) {
       };
     }
 
-    const profile = Array.isArray(payload?.data) ? payload.data[0] : null;
-    if (!profile) {
+    const classified = fetched.profiles.map(classifyProfile);
+    if (classified.length === 0) {
       return {
         allowed: false,
         reason: 'klaviyo_profile_not_found',
@@ -125,23 +196,49 @@ async function checkKlaviyoSmsOptIn(input = {}) {
       };
     }
 
-    const smsMarketing = readSmsMarketing(profile.attributes || {});
-    const consent = normalizeConsent(smsMarketing?.consent);
-    const canReceive = parseCanReceive(smsMarketing?.can_receive_sms_marketing);
-    const allowedByConsent = consent === 'SUBSCRIBED';
-    const allowedByReceiveFlag = canReceive !== false;
-    const allowed = allowedByConsent && allowedByReceiveFlag;
+    const satisfying = classified.filter(c => c.satisfies);
+    const revoked = classified.filter(c => c.revoked);
+    const receiveBlocked = classified.filter(c => c.receiveBlocked);
+
+    let allowed = false;
+    let reason = null;
+    let deciding = null;
+    if (revoked.length > 0) {
+      // Explicit revocation anywhere on the phone wins, even over a
+      // SUBSCRIBED sibling profile. klaviyo_sms_revoked marks the new
+      // sibling-veto case; a plain unsubscribed phone keeps the legacy reason.
+      reason = satisfying.length > 0 ? 'klaviyo_sms_revoked' : 'klaviyo_sms_not_subscribed';
+      deciding = revoked[0];
+    } else if (receiveBlocked.length > 0) {
+      // can_receive_sms_marketing false on any profile vetoes the phone, same
+      // weight as revocation; a SUBSCRIBED sibling does not rescue it.
+      reason = 'klaviyo_sms_blocked';
+      deciding = receiveBlocked[0];
+    } else if (satisfying.length > 0) {
+      allowed = true;
+      deciding = satisfying[0];
+    } else {
+      reason = 'klaviyo_sms_not_subscribed';
+      deciding = classified[0];
+    }
+
+    console.log(
+      `[klaviyo-gate] matchedBy=${selection.matchedBy} profiles=${classified.length} ` +
+      `verdict=${allowed ? 'allowed' : 'blocked'}${allowed ? '' : ` reason=${reason}`} ` +
+      `decidingProfileId=${deciding?.profile?.id || 'none'}`,
+    );
 
     return {
       allowed,
-      reason: allowed ? null : allowedByConsent ? 'klaviyo_sms_blocked' : 'klaviyo_sms_not_subscribed',
+      reason: allowed ? null : reason,
       matchedBy: selection.matchedBy,
-      profileId: profile.id || null,
-      consent: consent || null,
-      canReceiveSmsMarketing: canReceive,
-      method: smsMarketing?.method || null,
-      consentTimestamp: smsMarketing?.consent_timestamp || null,
-      lastUpdated: smsMarketing?.last_updated || null,
+      profileId: deciding?.profile?.id || null,
+      consent: deciding?.consent || null,
+      canReceiveSmsMarketing: deciding ? deciding.canReceive : null,
+      method: deciding?.smsMarketing?.method || null,
+      consentTimestamp: deciding?.smsMarketing?.consent_timestamp || null,
+      lastUpdated: deciding?.smsMarketing?.last_updated || null,
+      profilesEvaluated: classified.length,
     };
   } catch {
     return {
