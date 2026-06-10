@@ -127,19 +127,28 @@ async function fetchAllProfilesByFilter(config, filterQuery) {
       // so fail closed instead.
       return { ok: false, status: response.status, profiles: null, overflow: false };
     }
-    const nextUrl = rawNext.trim();
-    let nextLinkSafe = false;
+    let nextParsed = null;
     try {
-      const nextParsed = new URL(nextUrl);
-      const baseParsed = new URL(config.baseUrl);
-      nextLinkSafe = nextParsed.protocol === 'https:' && nextParsed.host === baseParsed.host;
+      const candidate = new URL(rawNext.trim());
+      const baseHost = new URL(config.baseUrl).host;
+      if (candidate.protocol === 'https:' && candidate.host === baseHost) {
+        nextParsed = candidate;
+      }
     } catch {
-      nextLinkSafe = false;
+      nextParsed = null;
     }
-    if (!nextLinkSafe) {
+    if (!nextParsed) {
       // The API key rides on every page request. Never follow a pagination
       // link that leaves the configured Klaviyo host or drops https.
       return { ok: false, status: response.status, profiles: null, overflow: false };
+    }
+    // Later pages must keep requesting subscription data. If the next link
+    // ever drops the param, every page-2+ profile would lack subscriptions,
+    // classify as never-set, and a page-2 revocation would silently fail
+    // open behind a page-1 SUBSCRIBED profile.
+    const fieldsParam = String(nextParsed.searchParams.get('additional-fields[profile]') || '');
+    if (!fieldsParam.includes('subscriptions')) {
+      nextParsed.searchParams.set('additional-fields[profile]', 'subscriptions');
     }
     if (page === MAX_PROFILE_PAGES - 1) {
       // A next link survives the page cap: ambiguous profile set, do not
@@ -152,7 +161,7 @@ async function fetchAllProfilesByFilter(config, filterQuery) {
       // fail closed as a lookup error (slowness, not profile volume).
       return { ok: false, status: null, profiles: null, overflow: false };
     }
-    pageResult = await fetchProfilesPageByUrl(config, nextUrl, Math.min(LOOKUP_TIMEOUT_MS, remainingMs));
+    pageResult = await fetchProfilesPageByUrl(config, nextParsed.toString(), Math.min(LOOKUP_TIMEOUT_MS, remainingMs));
   }
   return { ok: false, status: null, profiles: null, overflow: true };
 }
@@ -284,9 +293,10 @@ async function checkKlaviyoSmsOptIn(input = {}) {
       profilesEvaluated: classified.length,
     };
   } catch (err) {
-    // Long digit runs are scrubbed so a phone number can never reach logs
-    // via an error message that echoes a request URL.
-    const detail = String(err?.message || err).slice(0, 160).replace(/\d{7,}/g, '<redacted>');
+    // Long digit runs are scrubbed BEFORE truncation so a phone number can
+    // never reach logs, even partially, via an error message that echoes a
+    // request URL.
+    const detail = String(err?.message || err).replace(/\d{7,}/g, '<redacted>').slice(0, 160);
     console.error(
       `[klaviyo-gate] matchedBy=${selection.matchedBy} verdict=blocked ` +
       `reason=klaviyo_lookup_error error=${String(err?.name || 'Error')}: ${detail}`,

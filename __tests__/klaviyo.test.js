@@ -98,7 +98,9 @@ describe('klaviyo sms opt-in check', () => {
     expect(result.profilesEvaluated).toBe(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(decodeURIComponent(String(fetchMock.mock.calls[0][0]))).toContain('equals(phone_number,"+16017578889")');
-    expect(String(fetchMock.mock.calls[1][0])).toBe(nextUrl);
+    const page2Url = decodeURIComponent(String(fetchMock.mock.calls[1][0]));
+    expect(page2Url).toContain('page[cursor]=abc123');
+    expect(page2Url).toContain('additional-fields[profile]=subscriptions');
     const page2Headers = fetchMock.mock.calls[1][1].headers;
     expect(page2Headers.Authorization).toBe('Klaviyo-API-Key pk_test_123');
     expect(page2Headers.revision).toBe('2026-01-15');
@@ -266,6 +268,26 @@ describe('klaviyo sms opt-in check', () => {
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe('klaviyo_lookup_error');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the total pagination budget is exhausted', async () => {
+    vi.useFakeTimers();
+    try {
+      const nextUrl = 'https://a.klaviyo.com/api/profiles/?page%5Bcursor%5D=slow';
+      const fetchMock = vi.fn().mockImplementationOnce(async () => {
+        vi.advanceTimersByTime(21000);
+        return pageResponse([profileFixture('klyv-slow', SUBSCRIBED)], nextUrl);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await checkKlaviyoSmsOptIn({ phone: '+16017578889' });
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toBe('klaviyo_lookup_error');
+      expect(result.status).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('allows subscribed marketing profile', async () => {
