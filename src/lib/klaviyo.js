@@ -8,10 +8,12 @@ const MAX_PROFILE_PAGES = 5;
 // slow-but-successful pages could hold a candidate for 5x the per-page
 // timeout and starve the cron run that calls the gate per candidate.
 const PROFILE_PAGES_TOTAL_BUDGET_MS = LOOKUP_TIMEOUT_MS * 2;
-// Explicit revocation values. NEVER_SUBSCRIBED and missing consent are
-// "never set" and intentionally NOT in this set: a never-set sibling profile
-// must not veto a SUBSCRIBED profile on the same phone.
-const REVOKED_CONSENT_VALUES = new Set(['UNSUBSCRIBED', 'SUPPRESSED', 'REVOKED']);
+// Consent allowlist (owner decision, 2026-06-10): only SUBSCRIBED and the
+// never-set states (missing or empty consent, NEVER_SUBSCRIBED) do not veto.
+// Any other consent value, including states Klaviyo may introduce later,
+// vetoes the phone with the same weight as an explicit revocation, so the
+// gate fails closed on unknown consent states.
+const NON_VETO_CONSENT_VALUES = new Set(['', 'SUBSCRIBED', 'NEVER_SUBSCRIBED']);
 
 function parseEmail(value) {
   const email = String(value || '').trim().toLowerCase();
@@ -68,6 +70,10 @@ async function fetchProfileByFilter(config, filterQuery, timeoutMs = LOOKUP_TIME
   const url = new URL(`${config.baseUrl}/profiles/`);
   url.searchParams.set('filter', filterQuery);
   url.searchParams.set('additional-fields[profile]', 'subscriptions');
+  // Klaviyo's maximum page size. Default is 20, which would force five
+  // sequential round trips to see 100 profiles; at 100 every realistic
+  // profile set resolves in one page and the overflow cap covers 500.
+  url.searchParams.set('page[size]', '100');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -176,7 +182,7 @@ function classifyProfile(profile) {
     consent,
     canReceive,
     satisfies: consent === 'SUBSCRIBED' && canReceive !== false,
-    revoked: REVOKED_CONSENT_VALUES.has(consent),
+    revoked: !NON_VETO_CONSENT_VALUES.has(consent),
     // An explicit can_receive_sms_marketing: false is an operational
     // suppression signal and vetoes the phone with the same weight as
     // revocation, even when that profile's consent is never-set; a SUBSCRIBED

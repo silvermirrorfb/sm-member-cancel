@@ -172,6 +172,43 @@ describe('klaviyo sms opt-in check', () => {
     expect(result.profileId).toBe('klyv-veto');
   });
 
+  it('blocks when a sibling profile carries an unknown consent value', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      pageResponse([profileFixture('klyv-sub', SUBSCRIBED), profileFixture('klyv-unknown', { consent: 'PAUSED' })]),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await checkKlaviyoSmsOptIn({ phone: '+16017578889' });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe('klaviyo_sms_revoked');
+    expect(result.profileId).toBe('klyv-unknown');
+  });
+
+  it('keeps the never-set states non-vetoing under the consent allowlist', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      pageResponse([
+        profileFixture('klyv-sub', SUBSCRIBED),
+        profileFixture('klyv-nsub', { consent: 'NEVER_SUBSCRIBED' }),
+      ]),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await checkKlaviyoSmsOptIn({ phone: '+16017578889' });
+    expect(result.allowed).toBe(true);
+    expect(result.profileId).toBe('klyv-sub');
+  });
+
+  it('requests the maximum page size so realistic profile sets resolve in one page', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      pageResponse([profileFixture('klyv-sub', SUBSCRIBED)]),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await checkKlaviyoSmsOptIn({ phone: '+16017578889' });
+    expect(result.allowed).toBe(true);
+    expect(decodeURIComponent(String(fetchMock.mock.calls[0][0]))).toContain('page[size]=100');
+  });
+
   it('fails closed when Klaviyo returns an unparseable body', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
