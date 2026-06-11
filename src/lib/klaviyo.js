@@ -374,7 +374,12 @@ async function postRevocationJob(config, profileId, selection, timeoutMs = LOOKU
     });
     if (!response.ok && response.status !== 202) {
       const text = await response.text().catch(() => '');
-      return { ok: false, status: response.status, detail: text.slice(0, 160) };
+      // Scrub digit runs at the source: Klaviyo validation errors echo the
+      // posted phone_number, and these details sit in failure records that
+      // future code might log. Empty bodies fall back to the status code so
+      // a genuine HTTP failure is never mislabeled downstream.
+      const detail = text.replace(/\d{7,}/g, '<redacted>').slice(0, 160) || `http_${response.status}`;
+      return { ok: false, status: response.status, detail };
     }
     return { ok: true, status: response.status };
   } catch (err) {
@@ -477,7 +482,7 @@ async function unsubscribeKlaviyoSms(input = {}) {
     if (attempt.ok) {
       revokedProfileIds.push(id);
     } else {
-      failed.push({ id, status: attempt.status ?? null, detail: attempt.detail || 'revocation_budget_exhausted' });
+      failed.push({ id, status: attempt.status ?? null, detail: attempt.detail });
     }
   }
 
