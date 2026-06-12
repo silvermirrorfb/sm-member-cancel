@@ -608,6 +608,41 @@ describe('klaviyo sms unsubscribe', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('does not retry a 4xx revocation failure', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(pageResponse([profileFixture('klyv-bad400', SUBSCRIBED)]))
+      .mockResolvedValueOnce({ ok: false, status: 400, text: async () => 'bad request' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('unsubscribe_failed');
+    expect(result.status).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    errorSpy.mockRestore();
+  });
+
+  it('trips the circuit breaker after consecutive failures instead of storming Klaviyo', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const profiles = ['klyv-s1', 'klyv-s2', 'klyv-s3', 'klyv-s4', 'klyv-s5', 'klyv-s6', 'klyv-s7']
+      .map(id => profileFixture(id, SUBSCRIBED));
+    const fetchMock = vi.fn().mockImplementation(async (url) => {
+      if (String(url).includes('/profile-subscription-bulk-delete-jobs/')) {
+        return { ok: false, status: 429, text: async () => 'rate limited' };
+      }
+      return pageResponse(profiles);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('unsubscribe_failed');
+    expect(result.failedProfileIds).toHaveLength(7);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    errorSpy.mockRestore();
+  });
+
   it('stops posting at the revocation budget and reports the unattempted profile', async () => {
     vi.useFakeTimers();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

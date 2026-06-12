@@ -21,6 +21,12 @@ const STOP_SKIP_CONSENT_VALUES = new Set(['UNSUBSCRIBED', 'SUPPRESSED', 'REVOKED
 // Wall-clock cap for the whole revocation loop. The Twilio webhook awaits
 // this call inline and Twilio allows roughly 15 seconds end to end.
 const STOP_REVOCATION_BUDGET_MS = 10000;
+// Circuit breaker: the wall-clock budget alone cannot stop a request storm
+// when Klaviyo fails FAST (instant 429/400 responses barely advance the
+// clock, and overflow can hold up to 500 targets). After this many
+// consecutive failures the remaining targets are marked failed without
+// posting, so one STOP cannot amplify a Klaviyo incident.
+const STOP_REVOCATION_MAX_CONSECUTIVE_FAILURES = 5;
 
 function parseEmail(value) {
   const email = String(value || '').trim().toLowerCase();
@@ -465,15 +471,23 @@ async function unsubscribeKlaviyoSms(input = {}) {
   const deadlineMs = Date.now() + STOP_REVOCATION_BUDGET_MS;
   const revokedProfileIds = [];
   const failed = [];
+  let consecutiveFailures = 0;
   for (const target of targets) {
     const id = target.profile.id;
+    if (consecutiveFailures >= STOP_REVOCATION_MAX_CONSECUTIVE_FAILURES) {
+      failed.push({ id, status: null, detail: 'revocation_aborted_consecutive_failures' });
+      continue;
+    }
     let remainingMs = deadlineMs - Date.now();
     if (remainingMs <= 0) {
       failed.push({ id, status: null, detail: 'revocation_budget_exhausted' });
       continue;
     }
     let attempt = await postRevocationJob(config, id, selection, Math.min(LOOKUP_TIMEOUT_MS, remainingMs));
-    if (!attempt.ok) {
+    // Retry only network errors and 5xx. A 4xx is deterministic (a 400
+    // will 400 again) and an immediate retry on 429 makes a rate-limit
+    // storm worse, exactly when the breaker is trying to calm it.
+    if (!attempt.ok && (attempt.status === null || attempt.status >= 500)) {
       remainingMs = deadlineMs - Date.now();
       if (remainingMs > 0) {
         attempt = await postRevocationJob(config, id, selection, Math.min(LOOKUP_TIMEOUT_MS, remainingMs));
@@ -481,8 +495,10 @@ async function unsubscribeKlaviyoSms(input = {}) {
     }
     if (attempt.ok) {
       revokedProfileIds.push(id);
+      consecutiveFailures = 0;
     } else {
       failed.push({ id, status: attempt.status ?? null, detail: attempt.detail });
+      consecutiveFailures += 1;
     }
   }
 
