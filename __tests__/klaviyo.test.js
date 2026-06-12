@@ -608,6 +608,111 @@ describe('klaviyo sms unsubscribe', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('fails loud when the STOP lookup returns a 5xx', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({}) }));
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('lookup_failed');
+    expect(result.status).toBe(503);
+    errorSpy.mockRestore();
+  });
+
+  it('fails loud and scrubs the phone when the STOP lookup throws', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect failed for +16017578889')));
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('lookup_error');
+    expect(result.error).not.toContain('6017578889');
+    errorSpy.mockRestore();
+  });
+
+  it.each(['SUPPRESSED', 'REVOKED'])('skips a %s profile on STOP without posting', async (consent) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(pageResponse([profileFixture('klyv-skip', { consent }), profileFixture('klyv-live', SUBSCRIBED)]))
+      .mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({}), text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.revokedProfileIds).toEqual(['klyv-live']);
+    expect(result.alreadyRevokedProfileIds).toEqual(['klyv-skip']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('resets the breaker on success so interleaved failures never abort', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const profiles = Array.from({ length: 10 }, (_, i) => profileFixture(`klyv-m${i}`, SUBSCRIBED));
+    let post = 0;
+    const fetchMock = vi.fn().mockImplementation(async (url) => {
+      if (String(url).includes('/profile-subscription-bulk-delete-jobs/')) {
+        post += 1;
+        return post % 5 === 0
+          ? { ok: true, status: 202, json: async () => ({}), text: async () => '' }
+          : { ok: false, status: 400, text: async () => 'bad' };
+      }
+      return pageResponse(profiles);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(fetchMock).toHaveBeenCalledTimes(11);
+    expect(result.revokedProfileIds).toEqual(['klyv-m4', 'klyv-m9']);
+    errorSpy.mockRestore();
+  });
+
+  it('keeps klaviyo_profile_overflow as the reason when posts also fail', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let page = 0;
+    const fetchMock = vi.fn().mockImplementation(async (url) => {
+      if (String(url).includes('/profile-subscription-bulk-delete-jobs/')) {
+        return { ok: false, status: 400, text: async () => 'bad' };
+      }
+      page += 1;
+      return pageResponse([profileFixture(`klyv-o${page}`, SUBSCRIBED)], 'https://a.klaviyo.com/api/profiles/?page%5Bcursor%5D=loop');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('klaviyo_profile_overflow');
+    expect(result.overflowed).toBe(true);
+    expect(result.failedProfileIds.length).toBeGreaterThan(0);
+    expect(result.status).toBe(400);
+    errorSpy.mockRestore();
+  });
+
+  it('fails loud when fetched profiles have no usable id', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      pageResponse([{ attributes: {} }, { id: '', attributes: {} }]),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('unpostable_profiles');
+    expect(result.unpostableCount).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  });
+
+  it('revokes every profile on an email match regardless of sms consent', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(pageResponse([profileFixture('klyv-e1', UNSUBSCRIBED_M), profileFixture('klyv-e2', SUBSCRIBED)]))
+      .mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({}), text: async () => '' })
+      .mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({}), text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ email: 'person@example.com' });
+    expect(result.matchedBy).toBe('email');
+    expect(result.revokedProfileIds).toEqual(['klyv-e1', 'klyv-e2']);
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(body.data.attributes.profiles.data[0].attributes.subscriptions.email.marketing.consent).toBe('UNSUBSCRIBED');
+  });
+
   it('does not retry a 4xx revocation failure', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const fetchMock = vi.fn()
