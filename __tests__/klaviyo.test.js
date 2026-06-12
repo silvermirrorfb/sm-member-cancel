@@ -699,6 +699,20 @@ describe('klaviyo sms unsubscribe', () => {
     errorSpy.mockRestore();
   });
 
+  it('treats a phone-shaped profile id as unpostable so it cannot reach logs', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      pageResponse([profileFixture('16017578889', SUBSCRIBED)]),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await unsubscribeKlaviyoSms({ phone: '+16017578889' });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('unpostable_profiles');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  });
+
   it('revokes every profile on an email match regardless of sms consent', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(pageResponse([profileFixture('klyv-e1', UNSUBSCRIBED_M), profileFixture('klyv-e2', SUBSCRIBED)]))

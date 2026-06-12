@@ -342,13 +342,18 @@ function scrubLogDetail(value) {
   return String(value ?? '').replace(/\d{7,}/g, '<redacted>').slice(0, 160);
 }
 
-// Klaviyo profile ids are opaque short tokens. Coerce to a trimmed string and
-// reject anything that is not a tight id shape, so a malformed payload cannot
-// inject newlines into log lines, smuggle a phone-length digit run past the
-// scrub, or post an empty/numeric id that Klaviyo would reject.
+// Klaviyo profile ids are opaque short alphanumeric tokens (ULID-shaped).
+// Coerce to a trimmed string and reject anything that is not a tight id shape,
+// so a malformed payload cannot inject newlines into log lines or post an
+// empty id that Klaviyo would reject. Also reject any 7+ digit run (the same
+// threshold scrubLogDetail uses) so a phone number copied into the id field
+// cannot bypass the scrub and reach logs verbatim; such ids are treated as
+// unpostable and fail loud upstream.
 function normalizeProfileId(rawId) {
   const id = String(rawId ?? '').trim();
-  return /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : null;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
+  if (/\d{7,}/.test(id)) return null;
+  return id;
 }
 
 // One revocation job per profile via profile-subscription-bulk-delete-jobs,
