@@ -22,6 +22,27 @@ const MAX_CANDIDATES_PER_RUN = Math.max(1, Number(process.env.SMS_CRON_MAX_CANDI
 const PARALLEL_BATCH = 5;
 const BATCH_DELAY_MS = 5000;
 
+// Gate-infrastructure failures: the consent gate could not be evaluated (the
+// Klaviyo lookup errored, threw, or returned too many profiles to decide
+// safely). These are fail-closed safety stops, NOT legitimate "not subscribed"
+// decisions, so a run full of them is unhealthy and must count as errors, not
+// skips, or a full Klaviyo outage would report a healthy all-skips run.
+const GATE_INFRA_FAILURE_REASONS = new Set([
+  'klaviyo_lookup_error',
+  'klaviyo_profile_overflow',
+  'lookup_failed',
+]);
+
+// Non-PII context for error logs: opaque ids and location only, never the
+// member's name, email, or phone.
+function candidateLogContext(candidate) {
+  return {
+    clientId: String(candidate?.clientId || '') || null,
+    appointmentId: String(candidate?.appointmentId || '') || null,
+    location: String(candidate?.locationName || '') || null,
+  };
+}
+
 function isCronAuthorized(request) {
   const secret = String(process.env.CRON_SECRET || '').trim();
   if (!secret) return process.env.NODE_ENV !== 'production';
@@ -140,8 +161,11 @@ async function discoverCandidates(auth, runLocationMap, nowMs) {
   return candidates;
 }
 
+// Returns an ARRAY of normalized result rows (one downstream response can carry
+// several), so the run summary tallies every row instead of only results[0].
 async function checkOneCandidate(candidate, endpoint, automationToken, now) {
   const candidateName = `${candidate.firstName} ${candidate.lastName}`.trim();
+  const ctx = candidateLogContext(candidate);
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -159,43 +183,50 @@ async function checkOneCandidate(candidate, endpoint, automationToken, now) {
       cache: 'no-store',
     });
     if (!res.ok) {
-      return {
-        candidate: candidateName,
-        status: 'error',
-        reason: `http_${res.status}`,
-        httpStatus: res.status,
-        ok: false,
-      };
+      // Capture the response body so a recurring http_500 names its own root
+      // cause in the logs the next time it fires, instead of being swallowed.
+      let detail = '';
+      try {
+        if (typeof res.text === 'function') detail = String(await res.text()).slice(0, 500);
+      } catch {
+        // body already consumed or unavailable; the status alone still logs.
+      }
+      console.error('[sms-upgrade-scan] candidate request failed', JSON.stringify({ ...ctx, httpStatus: res.status, detail }));
+      return [{ candidate: candidateName, status: 'error', reason: `http_${res.status}`, httpStatus: res.status, ok: false }];
     }
     let payload = null;
     try {
       payload = await res.json();
     } catch (parseErr) {
+      console.error('[sms-upgrade-scan] candidate non-JSON response', JSON.stringify({ ...ctx, httpStatus: res.status, detail: parseErr?.message || 'parse_failed' }));
+      return [{ candidate: candidateName, status: 'error', reason: 'non_json_response', httpStatus: res.status, ok: false }];
+    }
+    const rows = Array.isArray(payload?.results) ? payload.results : [];
+    if (rows.length === 0) {
+      // The downstream accepted the request but returned no result row for a
+      // candidate the cron discovered. That is a pipeline inconsistency, not a
+      // healthy skip; surface it as an error rather than the silent 'unknown'
+      // bucket that masked the 5-day outbound-sms #10 outage.
+      console.error('[sms-upgrade-scan] candidate returned no result rows', JSON.stringify({ ...ctx, httpStatus: res.status }));
+      return [{ candidate: candidateName, status: 'error', reason: 'no_result_rows', httpStatus: res.status, ok: false }];
+    }
+    return rows.map(r => {
+      const gateInfraFailure = GATE_INFRA_FAILURE_REASONS.has(String(r.reason || ''));
+      if (gateInfraFailure) {
+        console.error('[sms-upgrade-scan] consent gate could not be evaluated', JSON.stringify({ ...ctx, reason: r.reason }));
+      }
       return {
         candidate: candidateName,
-        status: 'error',
-        reason: 'non_json_response',
+        status: gateInfraFailure ? 'error' : (r.status || 'unknown'),
+        reason: r.reason || r.offerKind || null,
+        offerKind: r.offerKind || null,
         httpStatus: res.status,
-        ok: false,
+        ok: !gateInfraFailure,
       };
-    }
-    const r = payload?.results?.[0] || {};
-    return {
-      candidate: candidateName,
-      status: r.status || 'unknown',
-      reason: r.reason || r.offerKind || null,
-      offerKind: r.offerKind || null,
-      httpStatus: res.status,
-      ok: true,
-    };
+    });
   } catch (err) {
-    return {
-      candidate: candidateName,
-      status: 'error',
-      reason: err?.message || 'fetch_failed',
-      httpStatus: null,
-      ok: false,
-    };
+    console.error('[sms-upgrade-scan] candidate evaluation threw', JSON.stringify({ ...ctx, detail: err?.message || String(err) }));
+    return [{ candidate: candidateName, status: 'error', reason: err?.message || 'fetch_failed', httpStatus: null, ok: false }];
   }
 }
 
@@ -275,11 +306,15 @@ export async function GET(request) {
       batch.map(c => checkOneCandidate(c, endpoint, automationToken, now)),
     );
     for (const r of batchSettled) {
-      allResults.push(
-        r.status === 'fulfilled'
-          ? r.value
-          : { candidate: '?', status: 'error', reason: r.reason?.message || 'rejected', ok: false },
-      );
+      if (r.status === 'fulfilled' && Array.isArray(r.value)) {
+        allResults.push(...r.value);
+      } else {
+        // checkOneCandidate catches internally, so a rejection here should be
+        // impossible; log it and count one error rather than abort the run.
+        const detail = r.reason?.message || 'rejected';
+        console.error('[sms-upgrade-scan] candidate settled as rejected', JSON.stringify({ detail }));
+        allResults.push({ candidate: '?', status: 'error', reason: detail, httpStatus: null, ok: false });
+      }
     }
     if (i + PARALLEL_BATCH < candidates.length) {
       await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
