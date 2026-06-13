@@ -14,6 +14,19 @@ const PROFILE_PAGES_TOTAL_BUDGET_MS = LOOKUP_TIMEOUT_MS * 2;
 // vetoes the phone with the same weight as an explicit revocation, so the
 // gate fails closed on unknown consent states.
 const NON_VETO_CONSENT_VALUES = new Set(['', 'SUBSCRIBED', 'NEVER_SUBSCRIBED']);
+// STOP suppression skips ONLY explicit revocation states. Unknown consent
+// values are targeted: unknown vetoes the gate and gets revoked on STOP,
+// so both directions fail toward suppression (owner decision, 2026-06-10).
+const STOP_SKIP_CONSENT_VALUES = new Set(['UNSUBSCRIBED', 'SUPPRESSED', 'REVOKED']);
+// Wall-clock cap for the whole revocation loop. The Twilio webhook awaits
+// this call inline and Twilio allows roughly 15 seconds end to end.
+const STOP_REVOCATION_BUDGET_MS = 10000;
+// Circuit breaker: the wall-clock budget alone cannot stop a request storm
+// when Klaviyo fails FAST (instant 429/400 responses barely advance the
+// clock, and overflow can hold up to 500 targets). After this many
+// consecutive failures the remaining targets are marked failed without
+// posting, so one STOP cannot amplify a Klaviyo incident.
+const STOP_REVOCATION_MAX_CONSECUTIVE_FAILURES = 5;
 
 function parseEmail(value) {
   const email = String(value || '').trim().toLowerCase();
@@ -169,7 +182,10 @@ async function fetchAllProfilesByFilter(config, filterQuery) {
     }
     pageResult = await fetchProfilesPageByUrl(config, nextParsed.toString(), Math.min(LOOKUP_TIMEOUT_MS, remainingMs));
   }
-  return { ok: false, status: null, profiles: null, overflow: true };
+  // Overflow keeps the accumulated profiles: the consent gate ignores them
+  // (it returns early on !ok), but the STOP path revokes what is in hand
+  // before failing loud (owner decision, 2026-06-10).
+  return { ok: false, status: null, profiles, overflow: true };
 }
 
 function classifyProfile(profile) {
@@ -318,41 +334,33 @@ async function checkKlaviyoSmsOptIn(input = {}) {
   }
 }
 
-async function unsubscribeKlaviyoSms(input = {}) {
-  const config = getConfig();
-  if (!config.configured) {
-    return { ok: false, reason: 'klaviyo_not_configured' };
-  }
+// Scrub long digit runs (E.164 phone numbers) BEFORE truncation so a phone
+// can never reach logs, even partially, via an error string that echoes a
+// request URL or posted body. Compliance-critical: keep this the single
+// source of the redaction so a future edit cannot weaken one copy.
+function scrubLogDetail(value) {
+  return String(value ?? '').replace(/\d{7,}/g, '<redacted>').slice(0, 160);
+}
 
-  const selection = buildFilter(input.phone, input.email);
-  if (!selection) {
-    return { ok: false, reason: 'no_phone_or_email' };
-  }
+// Klaviyo profile ids are opaque short alphanumeric tokens (ULID-shaped).
+// Coerce to a trimmed string and reject anything that is not a tight id shape,
+// so a malformed payload cannot inject newlines into log lines or post an
+// empty id that Klaviyo would reject. Also reject any 7+ digit run (the same
+// threshold scrubLogDetail uses) so a phone number copied into the id field
+// cannot bypass the scrub and reach logs verbatim; such ids are treated as
+// unpostable and fail loud upstream.
+function normalizeProfileId(rawId) {
+  const id = String(rawId ?? '').trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
+  if (/\d{7,}/.test(id)) return null;
+  return id;
+}
 
-  // Find the profile first so we get the ID
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), LOOKUP_TIMEOUT_MS);
-  let profileId = null;
-  try {
-    const { response, payload } = await fetchProfileByFilter(config, selection.filter);
-    if (!response.ok) {
-      return { ok: false, reason: 'lookup_failed', status: response.status };
-    }
-    const first = Array.isArray(payload?.data) ? payload.data[0] : null;
-    profileId = first?.id || null;
-    if (!profileId) {
-      // No profile exists in Klaviyo for this phone, nothing to unsubscribe.
-      // This is fine; treat as success so the STOP flow continues.
-      return { ok: true, reason: 'no_profile_found', matchedBy: selection.matchedBy };
-    }
-  } catch (err) {
-    clearTimeout(timeout);
-    return { ok: false, reason: 'lookup_error', error: String(err?.message || err) };
-  }
-  clearTimeout(timeout);
-
-  // Unsubscribe via profile-subscription-bulk-delete-jobs.
-  // This is Klaviyo's canonical endpoint for honoring an opt-out.
+// One revocation job per profile via profile-subscription-bulk-delete-jobs,
+// Klaviyo's canonical endpoint for honoring an opt-out. Per-profile posts
+// (rather than one bulk job) make per-profile retry and partial-failure
+// reporting possible; profile counts per phone are tiny in practice.
+async function postRevocationJob(config, profileId, selection, timeoutMs = LOOKUP_TIMEOUT_MS) {
   const unsubPayload = {
     data: {
       type: 'profile-subscription-bulk-delete-job',
@@ -380,9 +388,8 @@ async function unsubscribeKlaviyoSms(input = {}) {
       },
     },
   };
-
-  const controller2 = new AbortController();
-  const timeout2 = setTimeout(() => controller2.abort(), LOOKUP_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${config.baseUrl}/profile-subscription-bulk-delete-jobs/`, {
       method: 'POST',
@@ -391,20 +398,205 @@ async function unsubscribeKlaviyoSms(input = {}) {
         'content-type': 'application/json',
       },
       body: JSON.stringify(unsubPayload),
-      signal: controller2.signal,
+      signal: controller.signal,
     });
     if (!response.ok && response.status !== 202) {
       const text = await response.text().catch(() => '');
-      console.warn(`[klaviyo-unsub] Unsubscribe failed for profile ${profileId}:`, response.status, text.slice(0, 200));
-      return { ok: false, reason: 'unsubscribe_failed', status: response.status, profileId };
+      // Empty bodies fall back to the status code so a genuine HTTP failure
+      // is never mislabeled as a budget/breaker abort downstream.
+      const detail = scrubLogDetail(text) || `http_${response.status}`;
+      return { ok: false, status: response.status, detail };
     }
-    console.log(`[klaviyo-unsub] Unsubscribed profile ${profileId} via ${selection.matchedBy}`);
-    return { ok: true, reason: 'unsubscribed', profileId, matchedBy: selection.matchedBy };
+    return { ok: true, status: response.status };
   } catch (err) {
-    return { ok: false, reason: 'unsubscribe_error', error: String(err?.message || err), profileId };
+    return { ok: false, status: null, detail: scrubLogDetail(err?.message || err) };
   } finally {
-    clearTimeout(timeout2);
+    clearTimeout(timeout);
   }
+}
+
+async function unsubscribeKlaviyoSms(input = {}) {
+  const config = getConfig();
+  if (!config.configured) {
+    return { ok: false, reason: 'klaviyo_not_configured' };
+  }
+
+  const selection = buildFilter(input.phone, input.email);
+  if (!selection) {
+    return { ok: false, reason: 'no_phone_or_email' };
+  }
+
+  // Fetch EVERY profile on the contact through the same paginated,
+  // host-pinned, budgeted helper the consent gate uses. Revoking only the
+  // first profile leaves duplicate profiles SUBSCRIBED, so other Klaviyo
+  // senders could still text a number that texted STOP.
+  let fetched;
+  try {
+    fetched = await fetchAllProfilesByFilter(config, selection.filter);
+  } catch (err) {
+    const detail = scrubLogDetail(err?.message || err);
+    console.error(`[klaviyo-unsub] STOP lookup threw matchedBy=${selection.matchedBy} error=${detail}`);
+    return { ok: false, reason: 'lookup_error', error: detail };
+  }
+
+  // Overflow still holds every profile fetched before the cap. Revoke what
+  // is in hand FIRST, then fail loud: posting nothing on overflow would
+  // leave the number maximally exposed at the exact moment we hold hundreds
+  // of revocable profiles (owner decision, 2026-06-10).
+  const overflowed = fetched.overflow === true;
+  if (!fetched.ok && !overflowed) {
+    console.error(
+      `[klaviyo-unsub] STOP lookup failed matchedBy=${selection.matchedBy} reason=lookup_failed` +
+      `${fetched.status ? ` status=${fetched.status}` : ''}`,
+    );
+    return { ok: false, reason: 'lookup_failed', ...(fetched.status ? { status: fetched.status } : {}) };
+  }
+
+  // Classify every fetched profile, then dedupe by normalized id. On an id
+  // collision across pages (the dataset shifted mid-pagination), prefer the
+  // occurrence that is NOT already revoked: re-revoking a revoked profile is
+  // harmless, skipping a now-live one would leave it SUBSCRIBED. Profiles
+  // without a usable id cannot be posted; count them so a fetched-but-
+  // unpostable profile fails loud instead of silently reporting success.
+  const byId = new Map();
+  let unpostableCount = 0;
+  for (const profile of fetched.profiles || []) {
+    const id = normalizeProfileId(profile?.id);
+    if (!id) { unpostableCount += 1; continue; }
+    const entry = { id, consent: classifyProfile(profile).consent };
+    const existing = byId.get(id);
+    if (!existing) { byId.set(id, entry); continue; }
+    if (STOP_SKIP_CONSENT_VALUES.has(existing.consent) && !STOP_SKIP_CONSENT_VALUES.has(entry.consent)) {
+      byId.set(id, entry);
+    }
+  }
+  const classified = [...byId.values()];
+  if (classified.length === 0) {
+    if (overflowed) {
+      console.error(`[klaviyo-unsub] STOP overflow with no usable profiles matchedBy=${selection.matchedBy}`);
+      return { ok: false, reason: 'klaviyo_profile_overflow', overflowed: true, matchedBy: selection.matchedBy };
+    }
+    if (unpostableCount > 0) {
+      // Profiles exist but none can be posted: cannot honor the STOP, fail loud.
+      console.error(`[klaviyo-unsub] STOP only unpostable profiles matchedBy=${selection.matchedBy} unpostable=${unpostableCount}`);
+      return { ok: false, reason: 'unpostable_profiles', matchedBy: selection.matchedBy, unpostableCount };
+    }
+    // No profile exists in Klaviyo for this contact, nothing to unsubscribe.
+    // This is fine; treat as success so the STOP flow continues.
+    console.log(`[klaviyo-unsub] STOP no profile found matchedBy=${selection.matchedBy}`);
+    return { ok: true, reason: 'no_profile_found', matchedBy: selection.matchedBy };
+  }
+
+  // Skip ONLY explicit revocation states; unknown consent values are
+  // targeted so both the gate (veto) and STOP (revoke) fail toward
+  // suppression. Phone matches only: the sms consent signal means nothing
+  // for an email match.
+  const targets = selection.matchedBy === 'phone'
+    ? classified.filter(c => !STOP_SKIP_CONSENT_VALUES.has(c.consent))
+    : classified;
+  const targetIds = new Set(targets.map(c => c.id));
+  const alreadyRevokedProfileIds = classified
+    .filter(c => !targetIds.has(c.id))
+    .map(c => c.id);
+
+  const deadlineMs = Date.now() + STOP_REVOCATION_BUDGET_MS;
+  const revokedProfileIds = [];
+  const failed = [];
+  let consecutiveFailures = 0;
+  for (const target of targets) {
+    const id = target.id;
+    if (consecutiveFailures >= STOP_REVOCATION_MAX_CONSECUTIVE_FAILURES) {
+      failed.push({ id, status: null, detail: 'revocation_aborted_consecutive_failures' });
+      continue;
+    }
+    let remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) {
+      failed.push({ id, status: null, detail: 'revocation_budget_exhausted' });
+      continue;
+    }
+    let attempt = await postRevocationJob(config, id, selection, Math.min(LOOKUP_TIMEOUT_MS, remainingMs));
+    // Retry only network errors and 5xx. A 4xx is deterministic (a 400
+    // will 400 again) and an immediate retry on 429 makes a rate-limit
+    // storm worse, exactly when the breaker is trying to calm it.
+    if (!attempt.ok && (attempt.status === null || attempt.status >= 500)) {
+      remainingMs = deadlineMs - Date.now();
+      if (remainingMs > 0) {
+        attempt = await postRevocationJob(config, id, selection, Math.min(LOOKUP_TIMEOUT_MS, remainingMs));
+      }
+    }
+    if (attempt.ok) {
+      revokedProfileIds.push(id);
+      consecutiveFailures = 0;
+    } else {
+      failed.push({ id, status: attempt.status ?? null, detail: attempt.detail });
+      consecutiveFailures += 1;
+    }
+  }
+
+  const profileId = targets[0]?.id || classified[0]?.id || null;
+  const failedProfileIds = failed.map(f => f.id);
+  // Prefer the last REAL HTTP status; breaker/budget aborts carry null and
+  // would otherwise mask the 429 that tripped the breaker.
+  const lastStatus = [...failed].reverse().find(f => f.status !== null)?.status ?? null;
+  // An unpostable profile was fetched but could not be revoked, so the STOP
+  // is not fully honored even if every postable target succeeded.
+  const notFullyHonored = failed.length > 0 || unpostableCount > 0;
+
+  if (overflowed || notFullyHonored) {
+    console.error(
+      `[klaviyo-unsub] STOP ${overflowed ? 'OVERFLOW' : 'revocation FAILED'} matchedBy=${selection.matchedBy} ` +
+      `revokedProfiles=${revokedProfileIds.join(',') || 'none'} ` +
+      `failedProfiles=${failed.map(f => `${f.id}:${f.detail}`).join(',') || 'none'} ` +
+      `unpostable=${unpostableCount} ` +
+      `alreadyRevoked=${alreadyRevokedProfileIds.length} ` +
+      `profilesEvaluated=${classified.length}` +
+      `${lastStatus ? ` lastStatus=${lastStatus}` : ''}`,
+    );
+  }
+
+  const baseResult = {
+    profileId,
+    matchedBy: selection.matchedBy,
+    revokedProfileIds,
+    failedProfileIds,
+    alreadyRevokedProfileIds,
+    profilesEvaluated: classified.length,
+    ...(unpostableCount > 0 ? { unpostableCount } : {}),
+  };
+
+  if (overflowed) {
+    // Overflow wins over partial_unsubscribe as the reason when both apply.
+    return {
+      ok: false,
+      reason: 'klaviyo_profile_overflow',
+      overflowed: true,
+      ...(lastStatus ? { status: lastStatus } : {}),
+      ...baseResult,
+    };
+  }
+
+  if (notFullyHonored) {
+    return {
+      ok: false,
+      reason: revokedProfileIds.length === 0 ? 'unsubscribe_failed' : 'partial_unsubscribe',
+      ...(lastStatus ? { status: lastStatus } : {}),
+      ...baseResult,
+    };
+  }
+
+  console.log(
+    `[klaviyo-unsub] STOP honored matchedBy=${selection.matchedBy} profiles=${classified.length} ` +
+    `revoked=${revokedProfileIds.length} alreadyRevoked=${alreadyRevokedProfileIds.length}`,
+  );
+  return {
+    ok: true,
+    reason: 'unsubscribed',
+    profileId,
+    matchedBy: selection.matchedBy,
+    revokedProfileIds,
+    alreadyRevokedProfileIds,
+    profilesEvaluated: classified.length,
+  };
 }
 
 export {
