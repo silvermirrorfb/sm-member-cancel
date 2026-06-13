@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { Redis } from '@upstash/redis';
 import { buildMemberDraft, renderDraftForAlert, renderDraftForHtml } from './member-draft.js';
 
 const DEFAULT_SUPPORT_INCIDENT_SHEET_ID = '15Wame-TJbihEAKEnlL51rhSWRsiVpehz7RO1Gsa9s4c';
@@ -369,6 +370,89 @@ async function sendOpsAlertEmail({ subject, text }) {
   } catch (err) {
     console.error('Ops alert email send failed:', err);
     return { sent: false, reason: err.message };
+  }
+}
+
+// Shared by the producer (buildUpgradeSupportIncident in the SMS webhook) and the
+// consumer gate below, so the two can never drift and silently stop the email.
+const SMS_UPGRADE_INCIDENT_ISSUE_TYPE = 'sms_upgrade_manual_followup';
+
+let cachedIncidentRedis = null;
+function getUpgradeIncidentRedis() {
+  if (cachedIncidentRedis) return cachedIncidentRedis;
+  const url = String(process.env.UPSTASH_REDIS_REST_URL || '').trim();
+  const token = String(process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  if (!url || !token) return null;
+  cachedIncidentRedis = new Redis({ url, token });
+  return cachedIncidentRedis;
+}
+
+// Emails a human when a member replied YES to an upgrade but it could not be
+// applied automatically (manual follow-up) or failed read-back verification, so
+// the YES is not just written to a sheet and forgotten. Same recipient set as the
+// ops alerts. Plain English, no timeline promises, no em dashes. Safe no-op when
+// SMTP is unconfigured (sendOpsAlertEmail handles that).
+async function sendUpgradeIncidentEmail(incident) {
+  const reason = String(incident?.reason || '').trim() || 'manual_confirmation_required';
+  const isVerificationFailed = /verif|notes_sync_failed/i.test(reason);
+  const headline = isVerificationFailed
+    ? 'A member replied YES to an upgrade and we tried to apply it, but the read-back check did not confirm it went through. Someone needs to look at the booking and finish it by hand.'
+    : 'A member replied YES to an upgrade but it could not be applied automatically. Someone needs to finish it by hand. Until then the member is expecting the change and it has not happened yet.';
+  const chatlogId = String(process.env.GOOGLE_CHATLOG_SHEET_ID || '').trim();
+  const chatlogLink = chatlogId ? `https://docs.google.com/spreadsheets/d/${chatlogId}` : 'not configured';
+  const technical = [
+    `member: ${incident?.name || 'unknown'}`,
+    `phone: ${incident?.phone || 'unknown'}`,
+    `location: ${incident?.location || 'unknown'}`,
+    `appointment: ${incident?.appointment_id || 'unknown'}`,
+    `offer/outcome: ${reason}`,
+    `when: ${incident?.date || ''}`,
+    `session: ${incident?.session_id || 'unknown'}`,
+    `detail: ${incident?.user_message || ''}`,
+    `Chatlog Sheet: ${chatlogLink}`,
+  ];
+  return sendOpsAlertEmail({
+    subject: '[Silver Mirror] Needs attention: a member said YES and the upgrade needs manual follow-up',
+    text: formatOpsAlert({
+      verdict: [headline],
+      whatToDo: 'have the team finish this upgrade for the member, then mark the incident handled. No member action is needed.',
+      technical,
+    }),
+  });
+}
+
+// Dedupe per member + appointment so a member who replies YES several times does
+// not generate a flood of identical ops emails. Mirrors the ops-alert dedupe
+// pattern (Redis SET NX EX). Never throws: a notify failure must never break the
+// member-facing reply the caller returns next.
+async function notifyUpgradeIncidentOnce(incident) {
+  try {
+    // Only the SMS upgrade YES follow-up incidents get this "member said YES"
+    // email. queueSupportIncident is a generic funnel, so gate here to be safe
+    // if it is ever reused for an unrelated incident type.
+    if (String(incident?.issue_type || '') !== SMS_UPGRADE_INCIDENT_ISSUE_TYPE) {
+      return { sent: false, skipped: true };
+    }
+    // Dedupe is best-effort spam protection only. A Redis failure must NOT
+    // suppress the email; fail open toward notifying the human.
+    let deduped = false;
+    try {
+      const redis = getUpgradeIncidentRedis();
+      if (redis) {
+        const who = String(incident?.phone || incident?.session_id || 'unknown').replace(/\s+/g, '');
+        const appt = String(incident?.appointment_id || 'noappt').replace(/\s+/g, '');
+        const fresh = await redis.set(`sms-upgrade-incident:${who}:${appt}`, '1', { nx: true, ex: 86400 });
+        if (!fresh) deduped = true;
+      }
+    } catch (dedupeErr) {
+      console.error('SMS upgrade incident dedupe check failed, sending anyway:', dedupeErr);
+    }
+    if (deduped) return { sent: false, deduped: true };
+    const result = await sendUpgradeIncidentEmail(incident);
+    return { sent: result?.sent === true, deduped: false };
+  } catch (err) {
+    console.error('SMS upgrade incident notification failed:', err);
+    return { sent: false, deduped: false };
   }
 }
 
@@ -1434,6 +1518,9 @@ export {
   sendSupportIncidentEmail,
   sendReasonAlert,
   sendOpsAlertEmail,
+  sendUpgradeIncidentEmail,
+  notifyUpgradeIncidentOnce,
+  SMS_UPGRADE_INCIDENT_ISSUE_TYPE,
   matchReasonToCategory,
   logToGoogleSheets,
   logChatMessages,

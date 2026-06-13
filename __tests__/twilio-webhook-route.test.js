@@ -20,6 +20,7 @@ const mockLookupMember = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockReverifyAndApplyUpgradeForProfile = vi.fn();
 const mockLogSupportIncident = vi.fn();
+const mockNotifyUpgradeIncidentOnce = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 const originalEnv = process.env;
 
@@ -63,6 +64,8 @@ vi.mock('../src/lib/boulevard.js', () => ({
 vi.mock('../src/lib/notify.js', () => ({
   logSupportIncident: (...args) => mockLogSupportIncident(...args),
   logSmsChatMessages: (...args) => mockLogSmsChatMessages(...args),
+  notifyUpgradeIncidentOnce: (...args) => mockNotifyUpgradeIncidentOnce(...args),
+  SMS_UPGRADE_INCIDENT_ISSUE_TYPE: 'sms_upgrade_manual_followup',
 }));
 
 import { POST } from '../src/app/api/sms/twilio/webhook/route.js';
@@ -106,6 +109,7 @@ describe('twilio webhook route', () => {
       email: { sent: true },
       sheet: { logged: true },
     });
+    mockNotifyUpgradeIncidentOnce.mockReset().mockResolvedValue({ sent: true, deduped: false });
     mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
   });
 
@@ -448,11 +452,52 @@ describe('twilio webhook route', () => {
       issue_type: 'sms_upgrade_manual_followup',
       reason: 'upgrade_verification_failed',
     });
+    // A verification-failed YES must also notify a human (not just log a sheet row).
+    expect(mockNotifyUpgradeIncidentOnce).toHaveBeenCalledTimes(1);
+    expect(mockNotifyUpgradeIncidentOnce.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'upgrade_verification_failed',
+      appointment_id: 'appt-verify-2',
+    });
     const outboundCalls = mockLogSmsChatMessages.mock.calls
       .flatMap(call => call[0])
       .filter(row => row && row.direction === 'outbound');
     expect(outboundCalls).toHaveLength(1);
     expect(outboundCalls[0]).toMatchObject({ direction: 'outbound', outcome: 'manual_followup' });
+  });
+
+  it('a rejected incident notification never breaks the member-facing reply', async () => {
+    mockNotifyUpgradeIncidentOnce.mockRejectedValue(new Error('notify exploded'));
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      memberProfile: { clientId: 'client-1', phone: '+12134401333' },
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-verify-3',
+        targetDurationMinutes: 50,
+        currentDurationMinutes: 30,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'upgrade_verification_failed', reverified: true });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-verify-fail-3',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('Our team will confirm before your appointment.');
+    expect(mockNotifyUpgradeIncidentOnce).toHaveBeenCalledTimes(1);
   });
 
   it('logs an outbound row on the generic YES branch (no pending offer)', async () => {

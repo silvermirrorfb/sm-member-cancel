@@ -74,6 +74,8 @@ vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
 vi.mock('../src/lib/notify.js', () => ({
   logSupportIncident: (...args) => mockLogSupportIncident(...args),
   logSmsChatMessages: (...args) => mockLogSmsChatMessages(...args),
+  notifyUpgradeIncidentOnce: () => Promise.resolve({ sent: false, deduped: false }),
+  SMS_UPGRADE_INCIDENT_ISSUE_TYPE: 'sms_upgrade_manual_followup',
 }));
 
 const { POST } = await import('../src/app/api/sms/twilio/webhook/route.js');
