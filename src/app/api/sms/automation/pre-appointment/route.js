@@ -386,8 +386,12 @@ export async function POST(request) {
       0,
       asInt(body.reminderToleranceMinutes, asInt(process.env.SMS_REMINDER_TOLERANCE_MINUTES, 15)),
     );
-    // SMS_ENABLE_ADDON_FALLBACK is the authoritative kill switch for add-on SMS
-    // offers. Fail closed: unset or false means add-on offers are OFF, and no
+    // SMS_ENABLE_ADDON_FALLBACK is the authoritative kill switch for whether
+    // add-on SMS offers are built at all. The "fallback" in the legacy name is
+    // not permission to use Boulevard cancel-rebook behavior: that destructive
+    // path was removed from boulevard.js, so add-on application now only ever
+    // uses the non-destructive append flow and fails closed to manual follow-up.
+    // Fail closed: unset or false means add-on offers are OFF, and no
     // per-request (body) or per-candidate flag can turn them back on. Those flags
     // can only further restrict. Path 1 ships add-on OFF (this default); Path 2
     // enables add-on offers by setting the env var to true.
