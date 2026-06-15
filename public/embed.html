@@ -189,7 +189,7 @@
     } else {
       // Open
       if (!iframeLoaded) {
-        iframe.src = WIDGET_ORIGIN + '/widget';
+        iframe.src = WIDGET_ORIGIN + '/widget?autofocus=1';
         iframeLoaded = true;
       }
       popup.style.display = 'flex';

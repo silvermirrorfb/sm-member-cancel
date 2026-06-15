@@ -49,7 +49,7 @@
       isOpen = false;
     } else {
       if (!loaded) {
-        document.getElementById('sm-chat-iframe').src = WIDGET_URL + '/widget';
+        document.getElementById('sm-chat-iframe').src = WIDGET_URL + '/widget?autofocus=1';
         loaded = true;
       }
       popup.style.display = 'flex';
