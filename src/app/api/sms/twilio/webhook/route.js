@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import {
   createSession,
   getAllActiveSessions,
@@ -205,21 +205,27 @@ function shouldQueueUpgradeFollowupIncident(upgradeResult) {
 }
 
 function queueSupportIncident(incident) {
-  logSupportIncident(incident).catch(err => {
-    console.error('SMS support incident logging failed:', err);
-  });
-  // Also email a human: a sheet row alone left three YES members unworked. Deduped
-  // per member+appointment inside notify. Fire-and-forget like the sheet log so it
-  // can never delay or break the member-facing reply.
-  notifyUpgradeIncidentOnce(incident).catch(err => {
-    console.error('SMS upgrade incident email failed:', err);
+  // Deferred behind after() so neither the sheet write nor the incident email sits
+  // on Twilio's reply budget, and so Vercel keeps the function alive until both
+  // complete (a bare fire-and-forget can be dropped when the function suspends).
+  // A sheet row alone left three YES members unworked, hence also the email. The
+  // two run concurrently, not serialized: a slow sheet write must never delay or
+  // drop the human-alert email (and vice versa).
+  after(async () => {
+    const sheet = logSupportIncident(incident).catch(err => {
+      console.error('SMS support incident logging failed:', err);
+    });
+    const email = notifyUpgradeIncidentOnce(incident).catch(err => {
+      console.error('SMS upgrade incident email failed:', err);
+    });
+    await Promise.allSettled([sheet, email]);
   });
 }
 
-// Records the outbound upgrade-reply we are about to return as TwiML. Awaited
-// on purpose: on Vercel the function can suspend once the response is returned,
-// so a fire-and-forget write would risk dropping this row. The try/catch keeps
-// a sheet failure from ever breaking the member reply.
+// Records the outbound upgrade-reply we are about to return as TwiML. Scheduled
+// via after() at the call site: it must not sit on Twilio's reply budget, and
+// after() keeps the function alive on Vercel until the write completes so the row
+// is not dropped. The try/catch keeps a sheet failure from ever breaking the reply.
 async function logUpgradeReplyOutbound({ sessionId, from, activeSession, offer, upgradeResult, content }) {
   try {
     await logSmsChatMessages([{
@@ -431,21 +437,23 @@ export async function POST(request) {
         console.warn('[sms-webhook] Could not update registry/stop-set:', e.message);
       }
 
-      // Propagate unsubscribe to Klaviyo so pre-appointment Klaviyo gate
-      // will also block future outbound sends. Without this, a STOP only
-      // protects inbound replies, not outbound marketing.
-      // TCPA compliance: unsubscribe must be honored across all channels.
-      try {
-        const { unsubscribeKlaviyoSms } = await import('../../../../../lib/klaviyo');
-        if (typeof unsubscribeKlaviyoSms === 'function') {
-          const result = await unsubscribeKlaviyoSms({ phone: from });
-          if (!result.ok) {
-            console.warn(`[sms-webhook] Klaviyo unsubscribe returned ${result.reason}`);
+      // Propagate unsubscribe to Klaviyo so the pre-appointment Klaviyo gate also
+      // blocks future outbound sends. Deferred via after() so a slow Klaviyo call
+      // never sits on Twilio's reply budget; the authoritative local stop-set write
+      // above already blocks immediately. TCPA: unsubscribe honored across channels.
+      after(async () => {
+        try {
+          const { unsubscribeKlaviyoSms } = await import('../../../../../lib/klaviyo');
+          if (typeof unsubscribeKlaviyoSms === 'function') {
+            const result = await unsubscribeKlaviyoSms({ phone: from });
+            if (!result.ok) {
+              console.warn(`[sms-webhook] Klaviyo unsubscribe returned ${result.reason}`);
+            }
           }
+        } catch (e) {
+          console.error('[sms-webhook] Deferred Klaviyo unsubscribe failed:', e?.message || e);
         }
-      } catch (e) {
-        console.warn('[sms-webhook] Could not propagate unsubscribe to Klaviyo:', e.message);
-      }
+      });
 
       try {
         await logSmsChatMessages([{
@@ -781,14 +789,14 @@ export async function POST(request) {
           const upgradeText = buildUpgradeApplyReply(upgradeResult, upgradeResult?.opportunity || null, pendingOffer);
           const upgradeTwiml = buildTwimlMessage(upgradeText);
           if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
-          await logUpgradeReplyOutbound({
+          after(() => logUpgradeReplyOutbound({
             sessionId,
             from,
             activeSession,
             offer: pendingOffer,
             upgradeResult,
             content: upgradeText,
-          });
+          }));
           return new NextResponse(upgradeTwiml, {
             status: 200,
             headers: buildTwimlHeaders(rateLimit),
@@ -847,14 +855,14 @@ export async function POST(request) {
         const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer);
         const upgradeTwiml = buildTwimlMessage(upgradeText);
         if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
-        await logUpgradeReplyOutbound({
+        after(() => logUpgradeReplyOutbound({
           sessionId,
           from,
           activeSession,
           offer: pendingOffer || opportunity,
           upgradeResult,
           content: upgradeText,
-        });
+        }));
         return new NextResponse(upgradeTwiml, {
           status: 200,
           headers: buildTwimlHeaders(rateLimit),

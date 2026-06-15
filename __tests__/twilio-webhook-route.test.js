@@ -24,6 +24,14 @@ const mockNotifyUpgradeIncidentOnce = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 const originalEnv = process.env;
 
+// Deferred post-reply work runs via next/server `after()`. Run callbacks inline so
+// these tests still observe the deferred Klaviyo/Sheets/incident calls; real NextResponse
+// is preserved. (Ordering/non-blocking is covered in webhook-defer-post-reply.test.js.)
+vi.mock('next/server', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, after: (cb) => { cb(); } };
+});
+
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
   getClientIP: (...args) => mockGetClientIP(...args),

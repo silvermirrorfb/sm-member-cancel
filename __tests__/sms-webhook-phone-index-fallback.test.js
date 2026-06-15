@@ -25,6 +25,13 @@ const mockBindPhoneToSession = vi.fn();
 const mockCreateSession = vi.fn();
 const originalEnv = process.env;
 
+// Post-reply work runs via next/server `after()`; run callbacks inline here so the
+// route behaves as before. Real NextResponse is preserved.
+vi.mock('next/server', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, after: (cb) => { cb(); } };
+});
+
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
   getClientIP: (...args) => mockGetClientIP(...args),
