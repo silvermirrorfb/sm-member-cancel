@@ -106,6 +106,16 @@ function buildSmsWebHandoffReply() {
   return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
 }
 
+// One canned escalation for a member who replies to a live upgrade offer with something
+// other than YES or NO (e.g. "can I use credits", "I'm already 50 minutes"). Routes them to
+// their location instead of dropping the reply into the general chat bot. Plain English, no
+// timeline promise, no em dashes. Low volume, so this is a fixed message, not a built-out flow.
+function buildOffScriptEscalationReply(locationName) {
+  const loc = String(locationName || '').trim();
+  const where = loc ? `your Silver Mirror ${loc} team` : 'your Silver Mirror location';
+  return `Thanks for your reply. For help with this, ${where} is the best contact. You can call (888) 677-0055 or ask the team at your visit.`;
+}
+
 function isAffirmative(text) {
   return YES_KEYWORDS.test(String(text || '').toLowerCase());
 }
@@ -132,12 +142,15 @@ function isSmsDurationOfferAllowed(opportunity) {
 function buildDurationPricingText(opportunity) {
   const pricing = opportunity?.pricing || null;
   if (!pricing) return '';
-  const current = Number(opportunity?.currentDurationMinutes || 0) || null;
   const target = Number(opportunity?.targetDurationMinutes || 0) || null;
+  // Echo the exact figure the offer quoted: buildDurationOfferMessage (pre-appointment)
+  // keys the duration offer off walkinDelta ("$50 more"), so the confirmation reads from the
+  // same field and can never contradict the offer. No total and no "members get 20% off"
+  // claim: the offer never quoted a total or a member discount on the duration upgrade, so
+  // stating either here is the contradiction this reconciliation removes.
   const delta = Number(pricing.walkinDelta || 0);
-  const total = Number(pricing.walkinTotal || 0);
-  if (!current || !target || !Number.isFinite(delta) || !Number.isFinite(total)) return '';
-  return `${current}->${target} is +$${delta} ($${total} total; members get 20% off).`;
+  if (!target || !Number.isFinite(delta) || delta <= 0) return '';
+  return `That extends your facial to ${target} minutes for $${delta} more.`;
 }
 
 function getAllowedAddonDisplayName(value) {
@@ -868,6 +881,27 @@ export async function POST(request) {
           headers: buildTwimlHeaders(rateLimit),
         });
       }
+    }
+
+    // Off-script reply to a LIVE upgrade offer (we are past the YES/NO handler above, so this
+    // reply is neither YES nor NO): one canned escalation that routes the member to their
+    // location instead of dropping into the general chat bot. A reply with no live offer still
+    // goes to chat, preserving the general SMS conversation path.
+    const offscriptOffer = activeSession?.pendingUpgradeOffer || null;
+    const offscriptOfferLive =
+      smsUpgradeLive &&
+      offscriptOffer &&
+      !isPendingOfferExpired(offscriptOffer) &&
+      !(offscriptOffer.offerKind === 'duration' && !isSmsDurationOfferAllowed(offscriptOffer));
+    if (offscriptOfferLive) {
+      const escalationTwiml = buildTwimlMessage(
+        buildOffScriptEscalationReply(activeSession?.memberProfile?.locationName),
+      );
+      if (messageSid) storeReplyForMessageSid(messageSid, escalationTwiml);
+      return new NextResponse(escalationTwiml, {
+        status: 200,
+        headers: buildTwimlHeaders(rateLimit),
+      });
     }
 
     const reply = await runChatMessageForSms(sessionId, body, from);
