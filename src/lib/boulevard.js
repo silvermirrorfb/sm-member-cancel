@@ -1555,8 +1555,14 @@ function prepBufferMinutesForDuration(durationMinutes) {
 }
 
 function isCanceledAppointment(appt) {
-  const status = String(appt?.status || '').toUpperCase();
+  // Boulevard's Appointment type exposes a `cancelled` boolean but has no
+  // canceledAt/cancelledAt field, so the timestamp branch below is permanently
+  // dead on the live schema and cancellation detection rode entirely on the
+  // state string. Honor the boolean first so detection no longer depends on the
+  // state enum staying in the list.
+  if (appt?.cancelled === true) return true;
   if (appt?.canceledAt) return true;
+  const status = String(appt?.status || '').toUpperCase();
   return ['CANCELED', 'CANCELLED', 'NO_SHOW', 'DELETED', 'VOID'].includes(status);
 }
 
@@ -2053,6 +2059,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
   const locationObjectField = pickFirstAvailableField(fieldSet, ['location']);
   const statusField = pickFirstAvailableField(fieldSet, ['status', 'state', 'appointmentStatus']);
   const canceledAtField = pickFirstAvailableField(fieldSet, ['canceledAt', 'cancelledAt']);
+  const cancelledBooleanField = pickFirstAvailableField(fieldSet, ['cancelled', 'canceled']);
   const startField = pickFirstAvailableField(fieldSet, ['startOn', 'startAt', 'startsAt', 'startTime', 'startDateTime', 'start']);
   const endField = pickFirstAvailableField(fieldSet, ['endOn', 'endAt', 'endsAt', 'endTime', 'endDateTime', 'end']);
 
@@ -2099,6 +2106,7 @@ async function scanAppointments(apiUrl, headers, context = {}) {
   else if (locationObjectField) selectedFields.push(`${locationObjectField} { id }`);
   if (statusField) selectedFields.push(statusField);
   if (canceledAtField) selectedFields.push(canceledAtField);
+  if (cancelledBooleanField) selectedFields.push(cancelledBooleanField);
 
   const queryFieldDetailMap = await getTypeFieldDetailMap(apiUrl, headers, queryTypeName);
   let successfulEmptyStrategy = null;
@@ -2211,8 +2219,18 @@ async function scanAppointments(apiUrl, headers, context = {}) {
               : readNodeFieldAsString(node, null, locationObjectField) || null,
             status: statusField ? String(node[statusField] || '') : null,
             canceledAt: canceledAtField ? node[canceledAtField] : null,
+            cancelled:
+              cancelledBooleanField &&
+              node[cancelledBooleanField] !== undefined &&
+              node[cancelledBooleanField] !== null
+                ? Boolean(node[cancelledBooleanField])
+                : null,
           };
           if (!normalized.id || !normalized.startOn || !normalized.endOn || !normalized.clientId) continue;
+          // Drop cancelled rows at the scan source so no consumer (cron discovery,
+          // pre-appointment discovery, eligibility, reverify) can turn a cancelled
+          // appointment into an outbound-SMS candidate.
+          if (isCanceledAppointment(normalized)) continue;
           appointments.push(normalized);
         }
 
@@ -2627,6 +2645,18 @@ async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
       return detail && isScalarOrEnumGraphqlKind(detail.kind);
     });
   const noteSelection = noteFieldCandidates.join('\n        ');
+  // This separate-fetch path bypasses scanAppointments, so the scan-source
+  // cancelled-row filter does not cover it. Introspection-gate the cancelled
+  // boolean (so the query never breaks on a schema lacking it) and fail closed
+  // below, mirroring the scan guard. Without this, the add-on reverify path and
+  // the provider-context recovery path could still act on a cancelled target.
+  const cancelledFieldCandidates = ['cancelled', 'canceled']
+    .filter(fieldName => {
+      const detail = appointmentFieldDetailMap?.get(fieldName) || null;
+      return detail && isScalarOrEnumGraphqlKind(detail.kind);
+    });
+  const cancelledField = cancelledFieldCandidates[0] || null;
+  const cancelledSelection = cancelledField || '';
   const query = `
     query FetchAppointmentContext($id: ID!) {
       appointment(id: $id) {
@@ -2636,6 +2666,7 @@ async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
         startAt
         endAt
         ${noteSelection}
+        ${cancelledSelection}
         appointmentServices {
           id
           serviceId
@@ -2654,6 +2685,8 @@ async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
   if (!data || data.__error) return null;
   const appointment = data?.data?.appointment || null;
   if (!appointment?.id) return null;
+  // Fail closed on a cancelled target so no downstream apply path acts on it.
+  if (cancelledField && appointment[cancelledField] === true) return null;
   const services = Array.isArray(appointment.appointmentServices) ? appointment.appointmentServices : [];
   const primaryService = services.find(service => String(service?.staffId || '').trim()) || services[0] || null;
   return {
@@ -3786,6 +3819,7 @@ export {
   lookupMember,
   getClientById,
   scanAppointments,
+  fetchAppointmentContextById,
   buildAppointmentWindowQuery,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
