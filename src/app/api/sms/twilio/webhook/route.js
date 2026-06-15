@@ -29,7 +29,7 @@ import {
   reverifyAndApplyUpgradeForProfile,
 } from '../../../../../lib/boulevard';
 import { lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
-import { logSmsChatMessages, logSupportIncident } from '../../../../../lib/notify';
+import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
 // Cap on the slow O(N) phone-scan fallback. Twilio's webhook timeout is
@@ -208,6 +208,12 @@ function queueSupportIncident(incident) {
   logSupportIncident(incident).catch(err => {
     console.error('SMS support incident logging failed:', err);
   });
+  // Also email a human: a sheet row alone left three YES members unworked. Deduped
+  // per member+appointment inside notify. Fire-and-forget like the sheet log so it
+  // can never delay or break the member-facing reply.
+  notifyUpgradeIncidentOnce(incident).catch(err => {
+    console.error('SMS upgrade incident email failed:', err);
+  });
 }
 
 // Records the outbound upgrade-reply we are about to return as TwiML. Awaited
@@ -268,11 +274,12 @@ function buildUpgradeSupportIncident({
   return {
     date: new Date().toISOString(),
     session_id: sessionId,
-    issue_type: 'sms_upgrade_manual_followup',
+    issue_type: SMS_UPGRADE_INCIDENT_ISSUE_TYPE,
     name: String(profile?.fullName || '').trim() || null,
     email: String(profile?.email || '').trim() || null,
     phone: toIncidentPhone(from, profile) || null,
     location: String(profile?.location || opportunity?.locationName || pendingOffer?.locationName || '').trim() || null,
+    appointment_id: String(pendingOffer?.appointmentId || opportunity?.appointmentId || '').trim() || null,
     user_message: toIncidentSummary({ from, incomingText, pendingOffer, opportunity, upgradeResult }),
     reason,
   };
