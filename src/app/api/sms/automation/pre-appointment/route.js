@@ -40,6 +40,7 @@ import {
   buildSmsUpgradePendingReply,
   isSmsUpgradeLive,
 } from '../../../../../lib/sms-upgrade-policy';
+import { resolveUpgradePrice } from '../../../../../lib/upgrade-pricing';
 
 const OFFER_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_MIN || 15);
 const REMINDER_YES_WINDOW_MINUTES = Number(process.env.YES_RESPONSE_WINDOW_REMINDER_MIN || 10);
@@ -193,15 +194,14 @@ function isPendingOfferExpired(offer) {
 }
 
 function buildDurationOfferMessage(opportunity, options = {}) {
-  if (!opportunity?.pricing) return null;
   const reminder = options.reminder === true;
   const firstName = asText(options.firstName);
-  const pricing = opportunity.pricing;
-  const delta = Number(pricing.walkinDelta || 50);
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
   if (reminder) {
     return `${greeting} just a reminder - the upgrade to 50 minutes is still available for your appointment today. Reply YES or NO.`;
   }
+  const delta = Number(opportunity?.deltaDollars);
+  if (!Number.isFinite(delta) || delta <= 0) return null;
   return `${greeting} good news - there's room to extend your facial today to 50 minutes for just $${delta} more. Reply YES to upgrade or NO to keep your current booking.`;
 }
 
@@ -1016,6 +1016,30 @@ export async function POST(request) {
         }
       }
 
+      // Tier-aware pricing for duration offers: quote the member's real upgrade
+      // delta (grandfathered rates included), never a flat $50, and never a
+      // non-30-minute member. Fail closed (skip) per resolveUpgradePrice.
+      if (selectedOffer.offerKind === 'duration') {
+        const upgradePrice = resolveUpgradePrice(profile);
+        if (!upgradePrice) {
+          results.push({
+            candidate: { firstName, lastName, email: email || null, phone: phone || null },
+            profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+            status: 'skipped',
+            reason: 'duration_price_unresolved',
+            sessionId: session.id,
+            appointmentId,
+            matchedContact,
+            source: work.source,
+            queueId: work.queueId,
+          });
+          continue;
+        }
+        selectedOffer.deltaDollars = upgradePrice.deltaDollars;
+        selectedOffer.totalDollars = upgradePrice.totalDollars;
+        selectedOffer.isMember = upgradePrice.isMember;
+      }
+
       const offerMessage = buildOutboundOfferMessage(selectedOffer, {
         reminder: offerType === 'reminder',
         timeZone: sendTimezone,
@@ -1103,6 +1127,8 @@ export async function POST(request) {
           addOnCode: selectedOffer.addOnCode || null,
           addOnName: selectedOffer.addOnName || null,
           isMember: selectedOffer.isMember === true,
+          deltaDollars: Number.isFinite(Number(selectedOffer.deltaDollars)) ? Number(selectedOffer.deltaDollars) : null,
+          totalDollars: Number.isFinite(Number(selectedOffer.totalDollars)) ? Number(selectedOffer.totalDollars) : null,
           pricing: selectedOffer.pricing || null,
           createdAt: pending?.createdAt || nowIso,
           expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
