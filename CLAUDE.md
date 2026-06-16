@@ -247,3 +247,13 @@ When uncertain, the answer is: stop, surface the question to Matt, wait.
 - Cancel bot deep dive: `docs/cancel-bot-system-and-issues.md`
 - Travis decisions: `docs/CHATBOT_SCRIPT_DECISIONS_2026-05-05.md`
 - M-Central master: `~/Documents/M-Central/CLAUDE.md`
+
+## External IDs and references
+- Google Sheets logging:
+  - Cancellations sheet: `1zq3a5VrYVKXNu_ITfPcMcX6jZNTJepzNGIcy49c6uTg`
+  - Chatlogs sheet: `1Wu7th9Z9tO9nQuy7j2FyEgm1YKhDwvgcVPZDprE8z-Y`
+- Vercel project: `prj_2eN5VZwqjEZ01m28Zr6PrGj3b8oX`
+
+## Parallel Zapier bot (still live)
+- A parallel Zapier bot is STILL ACTIVE on silvermirror.com and handles a significant share of cancellation traffic. Do NOT assume this system handles all cancellation sessions.
+- Share as of 2026-04-19 (verify, may have changed): ~48% of sessions.
