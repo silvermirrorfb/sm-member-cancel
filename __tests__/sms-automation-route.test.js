@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockLookupMember = vi.fn();
 const mockGetClientById = vi.fn();
-const mockResolveUpgradePrice = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockResolveBoulevardLocationInput = vi.fn();
 const mockGetBoulevardAuthContext = vi.fn();
@@ -73,10 +72,6 @@ vi.mock('../src/lib/notify.js', () => ({
   logSmsChatMessages: (...args) => mockLogSmsChatMessages(...args),
 }));
 
-vi.mock('../src/lib/upgrade-pricing.js', () => ({
-  resolveUpgradePrice: (...args) => mockResolveUpgradePrice(...args),
-}));
-
 import { POST } from '../src/app/api/sms/automation/pre-appointment/route.js';
 
 describe('sms automation route', () => {
@@ -122,7 +117,6 @@ describe('sms automation route', () => {
     });
     mockScanAppointments.mockResolvedValue({ appointments: [] });
     mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
-    mockResolveUpgradePrice.mockReturnValue({ deltaDollars: 40, totalDollars: 139, isMember: true });
   });
 
   it('queues candidates outside send window before any lookups', async () => {
@@ -196,6 +190,9 @@ describe('sms automation route', () => {
         clientId: 'client-1',
         phone: '+19175551234',
         tier: '30',
+        hasMembership: true,
+        accountStatus: 'ACTIVE',
+        monthlyRate: 99,
         firstName: 'Debbie',
         name: 'Debbie Von Ahrens',
       }); // phone hit
@@ -416,6 +413,9 @@ describe('sms automation route', () => {
       clientId: 'client-1',
       phone: '+19175551234',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Debbie',
       name: 'Debbie Von Ahrens',
       email: 'debbie@example.com',
@@ -517,6 +517,9 @@ describe('sms automation route', () => {
       clientId: 'client-1',
       phone: '+19175551234',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Debbie',
       name: 'Debbie Von Ahrens',
       email: 'debbie@example.com',
@@ -986,7 +989,6 @@ describe('sms automation route', () => {
       isMember: true, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
       startOn: '2026-03-09T18:00:00Z',
     });
-    mockResolveUpgradePrice.mockReturnValue({ deltaDollars: 40, totalDollars: 139, isMember: true });
     mockSendTwilioSms.mockResolvedValue({ sid: 'SM123' });
 
     const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
@@ -1020,7 +1022,6 @@ describe('sms automation route', () => {
       isMember: false, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
       startOn: '2026-03-09T18:00:00Z',
     });
-    mockResolveUpgradePrice.mockReturnValue({ deltaDollars: 50, totalDollars: 169, isMember: false });
     mockSendTwilioSms.mockResolvedValue({ sid: 'SM124' });
 
     const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
@@ -1051,7 +1052,6 @@ describe('sms automation route', () => {
       isMember: true, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
       startOn: '2026-03-09T18:00:00Z',
     });
-    mockResolveUpgradePrice.mockReturnValue(null);
 
     const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
       method: 'POST',
