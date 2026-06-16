@@ -1016,28 +1016,36 @@ export async function POST(request) {
         }
       }
 
-      // Tier-aware pricing for duration offers: quote the member's real upgrade
-      // delta (grandfathered rates included), never a flat $50, and never a
-      // non-30-minute member. Fail closed (skip) per resolveUpgradePrice.
+      // Tier-aware pricing for duration offers. On a reminder for an existing
+      // offer, reuse the originally-persisted price: the member was already quoted
+      // a specific delta and must never be quoted more at confirmation. Only the
+      // initial offer (or a pending offer with no persisted price) resolves fresh,
+      // and fails closed (skip) when an active member's price cannot be resolved.
       if (selectedOffer.offerKind === 'duration') {
-        const upgradePrice = resolveUpgradePrice(profile);
-        if (!upgradePrice) {
-          results.push({
-            candidate: { firstName, lastName, email: email || null, phone: phone || null },
-            profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
-            status: 'skipped',
-            reason: 'duration_price_unresolved',
-            sessionId: session.id,
-            appointmentId,
-            matchedContact,
-            source: work.source,
-            queueId: work.queueId,
-          });
-          continue;
+        if (offerType === 'reminder' && Number.isFinite(Number(pending?.deltaDollars))) {
+          selectedOffer.deltaDollars = Number(pending.deltaDollars);
+          selectedOffer.totalDollars = Number.isFinite(Number(pending?.totalDollars)) ? Number(pending.totalDollars) : null;
+          selectedOffer.isMember = pending.isMember === true;
+        } else {
+          const upgradePrice = resolveUpgradePrice(profile);
+          if (!upgradePrice) {
+            results.push({
+              candidate: { firstName, lastName, email: email || null, phone: phone || null },
+              profile: { clientId: profile.clientId || null, phone: profilePhone, tier: profile.tier || null },
+              status: 'skipped',
+              reason: 'duration_price_unresolved',
+              sessionId: session.id,
+              appointmentId,
+              matchedContact,
+              source: work.source,
+              queueId: work.queueId,
+            });
+            continue;
+          }
+          selectedOffer.deltaDollars = upgradePrice.deltaDollars;
+          selectedOffer.totalDollars = upgradePrice.totalDollars;
+          selectedOffer.isMember = upgradePrice.isMember;
         }
-        selectedOffer.deltaDollars = upgradePrice.deltaDollars;
-        selectedOffer.totalDollars = upgradePrice.totalDollars;
-        selectedOffer.isMember = upgradePrice.isMember;
       }
 
       const offerMessage = buildOutboundOfferMessage(selectedOffer, {

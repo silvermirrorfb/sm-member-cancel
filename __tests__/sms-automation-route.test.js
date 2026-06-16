@@ -1077,4 +1077,60 @@ describe('sms automation route', () => {
     expect(body.results[0].reason).toBe('duration_price_unresolved');
     expect(mockSendTwilioSms).not.toHaveBeenCalled();
   });
+
+  it('reminder reuses the originally-quoted price instead of recomputing', async () => {
+    // Profile now has monthlyRate: 79, so live resolver would produce deltaDollars: 60.
+    // The original offer was quoted at deltaDollars: 40 (monthlyRate was 99 at send time).
+    // On a reminder, the route must reuse 40, not recompute 60.
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1', phone: '+19175551234', tier: '30',
+      hasMembership: true, accountStatus: 'ACTIVE', monthlyRate: 79,
+      firstName: 'Debbie', name: 'Debbie Von Ahrens', email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-1', targetDurationMinutes: 50, currentDurationMinutes: 30,
+      isMember: true, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    // offerState has initialSentAt so hasPriorOffer is true and reminder window triggers.
+    mockGetUpgradeOfferState.mockReturnValue({
+      initialSentAt: '2026-03-09T12:00:00Z',
+      reminderSentAt: null,
+    });
+    // Session carries the originally-quoted prices from the initial send.
+    mockCreateSession.mockReturnValue({
+      id: 'sess-1',
+      status: 'active',
+      pendingUpgradeOffer: {
+        appointmentId: 'appt-1',
+        createdAt: '2026-03-09T12:00:00Z',
+        expiresAt: '2026-03-09T12:15:00Z',
+        deltaDollars: 40,
+        totalDollars: 139,
+        isMember: true,
+      },
+    });
+    mockSendTwilioSms.mockResolvedValue({ sid: 'SM-reminder-1' });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: false, liveApproval: true,
+        now: '2026-03-09T17:00:00Z',
+        sendTimezone: 'America/New_York', sendStartHour: 9, sendEndHour: 17,
+        candidates: [{ firstName: 'Debbie', lastName: 'Von Ahrens', email: 'debbie@example.com', phone: '+1 (917) 555-1234' }],
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(body.results[0].status).toBe('sent');
+    expect(body.results[0].offerType).toBe('reminder');
+    // deltaDollars must be 40 (original), NOT 60 (what live resolver would return for monthlyRate 79).
+    const persisted = mockSaveSession.mock.calls.at(-1)[0].pendingUpgradeOffer;
+    expect(persisted.deltaDollars).toBe(40);
+    expect(persisted.totalDollars).toBe(139);
+    expect(persisted.isMember).toBe(true);
+  });
 });
