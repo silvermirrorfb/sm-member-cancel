@@ -24,15 +24,19 @@ const mockGetOutboundQueueSnapshot = vi.fn();
 const mockCheckKlaviyoSmsOptIn = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 
-vi.mock('../src/lib/boulevard.js', () => ({
-  lookupMember: (...args) => mockLookupMember(...args),
-  getClientById: (...args) => mockGetClientById(...args),
-  evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
-  formatProfileForPrompt: (...args) => mockFormatProfileForPrompt(...args),
-  resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
-  getBoulevardAuthContext: (...args) => mockGetBoulevardAuthContext(...args),
-  scanAppointments: (...args) => mockScanAppointments(...args),
-}));
+vi.mock('../src/lib/boulevard.js', async (importActual) => {
+  const actual = await importActual();
+  return {
+    lookupMember: (...args) => mockLookupMember(...args),
+    getClientById: (...args) => mockGetClientById(...args),
+    evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
+    formatProfileForPrompt: (...args) => mockFormatProfileForPrompt(...args),
+    resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
+    getBoulevardAuthContext: (...args) => mockGetBoulevardAuthContext(...args),
+    scanAppointments: (...args) => mockScanAppointments(...args),
+    isInactiveMembershipStatus: actual.isInactiveMembershipStatus,
+  };
+});
 
 vi.mock('../src/lib/sessions.js', () => ({
   createSession: (...args) => mockCreateSession(...args),

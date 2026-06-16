@@ -1,7 +1,7 @@
 // __tests__/upgrade-pricing.test.js
 import { describe, it, expect, vi } from 'vitest';
 import { resolveUpgradePrice, MEMBER_50_MIN_TOTAL } from '../src/lib/upgrade-pricing.js';
-import { CURRENT_RATES } from '../src/lib/boulevard.js';
+import { CURRENT_RATES, isInactiveMembershipStatus } from '../src/lib/boulevard.js';
 
 describe('resolveUpgradePrice', () => {
   // Active member with a confirmed 30-minute tier.
@@ -67,5 +67,29 @@ describe('resolveUpgradePrice', () => {
 
   it('keeps the member total in sync with the canonical rate table (drift guard)', () => {
     expect(MEMBER_50_MIN_TOTAL).toBe(CURRENT_RATES['50']);
+  });
+});
+
+describe('resolveUpgradePrice membership-status classification', () => {
+  const at = (accountStatus) => ({ clientId: 'c', hasMembership: true, tier: '30', monthlyRate: 99, accountStatus });
+
+  it('treats every canonical dead status as a non-member (flat $50/$169), not a member', () => {
+    for (const dead of ['INACTIVE', 'CANCELED', 'CANCELLED', 'PAST_DUE', 'EXPIRED', 'TERMINATED']) {
+      expect(resolveUpgradePrice(at(dead))).toEqual({ deltaDollars: 50, totalDollars: 169, isMember: false });
+    }
+  });
+
+  it('keeps an active, paused, pending, or empty-status 30-min member on member pricing (+$40)', () => {
+    for (const live of ['ACTIVE', 'active', 'PAUSED', 'PENDING', '']) {
+      expect(resolveUpgradePrice(at(live))).toEqual({ deltaDollars: 40, totalDollars: 139, isMember: true });
+    }
+  });
+
+  it('classification matches the canonical isInactiveMembershipStatus helper (no drift)', () => {
+    for (const status of ['ACTIVE', 'INACTIVE', 'CANCELLED', 'CANCELED', 'EXPIRED', 'TERMINATED', 'PAST_DUE', 'PAUSED', 'PENDING', '']) {
+      const result = resolveUpgradePrice(at(status));
+      // A 30-min member with a resolvable rate is priced as a member exactly when the status is NOT dead.
+      expect(result.isMember).toBe(!isInactiveMembershipStatus(status));
+    }
   });
 });

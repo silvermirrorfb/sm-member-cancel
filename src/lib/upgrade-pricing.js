@@ -5,6 +5,8 @@
 // (in a later PR) written to the Boulevard booking line at apply time.
 // All amounts are PRE-TAX US dollars; tax settles at in-store checkout.
 
+import { isInactiveMembershipStatus } from './boulevard.js';
+
 // Member 50-minute total. Mirrors CURRENT_RATES['50'] in boulevard.js (the
 // canonical member rate table); the drift-guard test keeps them equal.
 const MEMBER_50_MIN_TOTAL = 139;
@@ -18,9 +20,7 @@ const NONMEMBER_UPGRADE = { deltaDollars: 50, totalDollars: 169 };
 // non-30-minute member.
 function resolveUpgradePrice(profile) {
   const tier = String(profile?.tier || '').trim();
-  const status = String(profile?.accountStatus || '').toLowerCase();
-  const inactive = /inactive|cancel/i.test(status);
-  const believedMember = (profile?.hasMembership === true || Boolean(tier)) && !inactive;
+  const believedMember = (profile?.hasMembership === true || Boolean(tier)) && !isInactiveMembershipStatus(profile?.accountStatus);
 
   // Non-member / walk-in / repeat non-member / cancelled member -> flat price.
   if (!believedMember) {
