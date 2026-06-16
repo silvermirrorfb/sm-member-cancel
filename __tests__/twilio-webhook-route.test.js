@@ -313,6 +313,8 @@ describe('twilio webhook route', () => {
         appointmentId: 'appt-pending-1',
         targetDurationMinutes: 50,
         currentDurationMinutes: 30,
+        deltaDollars: 50,
+        totalDollars: 169,
         pricing: { walkinDelta: 50, walkinTotal: 169 },
         expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       },
@@ -416,6 +418,8 @@ describe('twilio webhook route', () => {
         appointmentId: 'appt-verify-2',
         targetDurationMinutes: 50,
         currentDurationMinutes: 30,
+        deltaDollars: 50,
+        totalDollars: 169,
         pricing: { walkinDelta: 50, walkinTotal: 169 },
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       },
@@ -478,6 +482,8 @@ describe('twilio webhook route', () => {
         appointmentId: 'appt-verify-3',
         targetDurationMinutes: 50,
         currentDurationMinutes: 30,
+        deltaDollars: 50,
+        totalDollars: 169,
         pricing: { walkinDelta: 50, walkinTotal: 169 },
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       },
@@ -873,6 +879,8 @@ describe('twilio webhook route', () => {
         appointmentId: 'appt-1',
         currentDurationMinutes: 30,
         targetDurationMinutes: 50,
+        deltaDollars: 50,
+        totalDollars: 169,
         pricing: { walkinDelta: 50, walkinTotal: 169 },
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       },
@@ -935,6 +943,8 @@ describe('twilio webhook route', () => {
         appointmentId: 'appt-2',
         currentDurationMinutes: 30,
         targetDurationMinutes: 50,
+        deltaDollars: 50,
+        totalDollars: 169,
         pricing: { walkinDelta: 50, walkinTotal: 169 },
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
       },
@@ -983,5 +993,63 @@ describe('twilio webhook route', () => {
       phone: '+12134401333',
       location: 'Penn Quarter',
     });
+  });
+
+  it('echoes the persisted member delta at confirmation (pre-tax, no total claim)', async () => {
+    const session = {
+      id: 'sess-1', status: 'active', smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration', appointmentId: 'appt-1', targetDurationMinutes: 50,
+        currentDurationMinutes: 30, isMember: true, deltaDollars: 40, totalDollars: 139,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({ clientId: 'client-1', phone: '+12134401333', tier: '30', accountStatus: 'ACTIVE' });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-1', currentDurationMinutes: 30, targetDurationMinutes: 50, isMember: true,
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'upgrade_mutation_disabled' });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST', headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-conf-1',
+    });
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('for $40 more');
+    expect(text).not.toContain('20% off');
+    expect(text).not.toContain('total');
+    expect(text).not.toContain('%'); // zero percentage language anywhere in the duration confirmation
+  });
+
+  it('echoes the persisted non-member delta at confirmation', async () => {
+    const session = {
+      id: 'sess-2', status: 'active', smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration', appointmentId: 'appt-2', targetDurationMinutes: 50,
+        currentDurationMinutes: 30, isMember: false, deltaDollars: 50, totalDollars: 169,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-2');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({ clientId: 'client-2', phone: '+12134401334', tier: null, accountStatus: null });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-2', currentDurationMinutes: 30, targetDurationMinutes: 50, isMember: false,
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'upgrade_mutation_disabled' });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST', headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401334&Body=Yes&MessageSid=SM-in-conf-2',
+    });
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(text).toContain('for $50 more');
   });
 });

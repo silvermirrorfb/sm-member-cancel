@@ -130,14 +130,14 @@ function isSmsDurationOfferAllowed(opportunity) {
 }
 
 function buildDurationPricingText(opportunity) {
-  const pricing = opportunity?.pricing || null;
-  if (!pricing) return '';
-  const current = Number(opportunity?.currentDurationMinutes || 0) || null;
   const target = Number(opportunity?.targetDurationMinutes || 0) || null;
-  const delta = Number(pricing.walkinDelta || 0);
-  const total = Number(pricing.walkinTotal || 0);
-  if (!current || !target || !Number.isFinite(delta) || !Number.isFinite(total)) return '';
-  return `${current}->${target} is +$${delta} ($${total} total; members get 20% off).`;
+  // Echo the exact pre-tax delta the offer quoted. The offer keys off the
+  // persisted deltaDollars (tier-aware), so the confirmation reads the same
+  // field and can never contradict the offer. No total and no "20% off" claim:
+  // the duration offer quoted neither, and tax settles at in-store checkout.
+  const delta = Number(opportunity?.deltaDollars);
+  if (!target || !Number.isFinite(delta) || delta <= 0) return '';
+  return `That extends your facial to ${target} minutes for $${delta} more.`;
 }
 
 function getAllowedAddonDisplayName(value) {
