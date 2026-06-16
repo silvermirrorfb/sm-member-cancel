@@ -310,6 +310,9 @@ describe('sms automation route', () => {
       clientId: 'client-1',
       phone: '+19175551234',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Debbie',
       name: 'Debbie Von Ahrens',
     });
@@ -343,6 +346,7 @@ describe('sms automation route', () => {
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.summary.total).toBe(1);
+    expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].source).toBe('queued');
     expect(body.results[0].queueId).toBe('q-2');
   });
@@ -902,6 +906,9 @@ describe('sms automation route', () => {
       clientId: 'client-dur',
       phone: '+19175550002',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Casey',
       name: 'Casey Guest',
       email: 'casey@example.com',
@@ -910,7 +917,7 @@ describe('sms automation route', () => {
       eligible: true,
       appointmentId: 'appt-dur',
       targetDurationMinutes: 50,
-      pricing: { memberTotal: 99, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
       isMember: true,
       currentDurationMinutes: 30,
       startOn: '2026-03-09T18:00:00Z',
@@ -940,12 +947,9 @@ describe('sms automation route', () => {
     const res = await POST(req);
     const body = await res.json();
     expect(res.status).toBe(200);
-    // Duration upgrade should NOT be skipped by the addon gate.
-    // It may go to dry_run (the happy path) or to another non-gate skip reason.
-    if (body.results[0].status === 'skipped') {
-      expect(body.results[0].reason).not.toMatch(/addon/i);
-    }
-    expect(body.results[0].offerKind).not.toBe('addon');
+    // Duration upgrade must NOT be gated by the addon path: it proceeds as a duration offer.
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].offerKind).toBe('duration');
   });
 
   it('with enableAddonFallback=true in body but env=false: addon stays blocked (kill switch cannot be bypassed by a request flag)', async () => {
