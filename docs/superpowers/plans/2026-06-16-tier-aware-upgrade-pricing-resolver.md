@@ -459,6 +459,7 @@ it('echoes the persisted member delta at confirmation (pre-tax, no total claim)'
   expect(text).toContain('for $40 more');
   expect(text).not.toContain('20% off');
   expect(text).not.toContain('total');
+  expect(text).not.toContain('%'); // zero percentage language anywhere in the duration confirmation
 });
 
 it('echoes the persisted non-member delta at confirmation', async () => {
