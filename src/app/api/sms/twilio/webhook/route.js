@@ -408,50 +408,29 @@ async function runChatMessageForSms(sessionId, body, from) {
   return payload?.message || null;
 }
 
-// All slow YES/NO post-reply work. Runs in deferWork() after the member-facing
-// reply has already been returned: resolve the member, attempt the Boulevard
-// apply, queue a support incident on failure, clear the pending offer, and log
-// the outbound row. Never touched by the reply path's latency budget. Mirrors
-// the prior inline branch logic; the only behavior change is that it no longer
-// blocks the reply and never calls the chat route on a YES/NO.
+// Slow YES post-reply work. Runs in deferWork() AFTER the reply has been sent and
+// AFTER the pending offer has already been cleared + persisted synchronously on
+// the reply path (idempotency: a rapid second YES must not see the same offer and
+// enqueue a second apply for the same appointment). Resolves the member, attempts
+// the Boulevard apply, queues a support incident on failure, caches the resolved
+// profile, and logs the outbound row. Never blocks the reply; never calls chat.
+// Only invoked for affirmative (YES) replies.
 async function runDeferredIntentWork({
   sessionId,
   from,
   activeSession,
   pendingOffer,
   hasPendingOffer,
-  affirmative,
   intentText,
   smsUpgradeLive,
   sentReplyText,
 }) {
-  // Clear a stale / blocked / expired pending offer regardless of intent.
-  if (activeSession?.pendingUpgradeOffer && !hasPendingOffer) {
-    activeSession.pendingUpgradeOffer = null;
-    await saveSession(activeSession);
-  }
-
-  // NO: keep the appointment as-is; clear the live pending offer.
-  if (!affirmative) {
-    if (hasPendingOffer && activeSession) {
-      activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-      activeSession.pendingUpgradeOffer = null;
-      await saveSession(activeSession);
-    }
-    return;
-  }
-
-  // YES while SMS upgrades are on hold: nothing to apply, just clear.
+  // YES while SMS upgrades are on hold: nothing to apply.
   if (hasPendingOffer && !smsUpgradeLive) {
-    if (activeSession) {
-      activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-      activeSession.pendingUpgradeOffer = null;
-      await saveSession(activeSession);
-    }
     return;
   }
 
-  // YES while the apply mutation is disabled: queue the manual-follow-up incident, clear.
+  // YES while the apply mutation is disabled: queue the manual-follow-up incident.
   if (!isUpgradeMutationEnabled()) {
     const disabledReason = (hasPendingOffer && String(pendingOffer?.offerKind || '').toLowerCase() === 'addon')
       ? 'manual_addon_confirmation'
@@ -464,11 +443,6 @@ async function runDeferredIntentWork({
       pendingOffer,
       upgradeResult: { success: false, reason: disabledReason },
     }));
-    if (hasPendingOffer && activeSession) {
-      activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-      activeSession.pendingUpgradeOffer = null;
-      await saveSession(activeSession);
-    }
     return;
   }
 
@@ -537,11 +511,6 @@ async function runDeferredIntentWork({
       opportunity: upgradeResult?.opportunity || null,
       upgradeResult,
     }));
-  }
-  if (activeSession) {
-    activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId || offerForLog?.appointmentId || null;
-    activeSession.pendingUpgradeOffer = null;
-    await saveSession(activeSession);
   }
   await logUpgradeReplyOutbound({
     sessionId,
@@ -822,10 +791,9 @@ export async function POST(request) {
       // ~15s window (the silent-YES cause). Copy matches what production sends
       // today: NO declines; a live pending-offer YES echoes the persisted
       // (tier-aware) price as a manual-confirm; any other YES uses the approved
-      // generic confirmation. The Boulevard apply, incident, Sheets logging, and
-      // pending-offer clear all run in deferWork below. When the booking-edit
-      // apply (outbound-sms #13) is enabled, a result-specific follow-up SMS is
-      // the next enhancement; the immediate reply stays instant and deterministic.
+      // generic confirmation. When the booking-edit apply (outbound-sms #13) is
+      // enabled, a result-specific follow-up SMS is the next enhancement; the
+      // immediate reply stays instant and deterministic.
       let replyText;
       if (!affirmative) {
         replyText = 'No problem - we will keep your appointment as-is.';
@@ -839,17 +807,33 @@ export async function POST(request) {
       const intentTwiml = buildTwimlMessage(replyText);
       if (messageSid) storeReplyForMessageSid(messageSid, intentTwiml);
 
-      deferWork(() => runDeferredIntentWork({
-        sessionId,
-        from,
-        activeSession,
-        pendingOffer,
-        hasPendingOffer,
-        affirmative,
-        intentText,
-        smsUpgradeLive,
-        sentReplyText: replyText,
-      }));
+      // Clear + persist the pending offer SYNCHRONOUSLY before replying. This is a
+      // fast Redis session write (not Sheets/Boulevard), and it must happen on the
+      // reply path so a rapid second YES/NO cannot read the same offer and enqueue
+      // a duplicate apply for the same appointment. The captured offer below still
+      // drives the deferred apply.
+      if (activeSession?.pendingUpgradeOffer) {
+        activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId
+          || activeSession.lastUpgradeOfferAppointmentId || null;
+        activeSession.pendingUpgradeOffer = null;
+        await saveSession(activeSession);
+      }
+
+      // Slow work (member lookup, Boulevard apply, incident, outbound log) runs
+      // off the reply path. Only a YES has apply work; a NO is fully handled by
+      // the synchronous clear above.
+      if (affirmative) {
+        deferWork(() => runDeferredIntentWork({
+          sessionId,
+          from,
+          activeSession,
+          pendingOffer,
+          hasPendingOffer,
+          intentText,
+          smsUpgradeLive,
+          sentReplyText: replyText,
+        }));
+      }
 
       return new NextResponse(intentTwiml, {
         status: 200,
