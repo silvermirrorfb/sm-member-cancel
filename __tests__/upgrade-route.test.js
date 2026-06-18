@@ -4,6 +4,7 @@ const sessionStore = new Map();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockReverifyAndApplyUpgradeForProfile = vi.fn();
 const mockSendMessage = vi.fn();
+const mockResolveUpgradePrice = vi.fn(() => ({ deltaDollars: 50, totalDollars: 169, isMember: false }));
 
 vi.mock('../src/lib/sessions.js', () => ({
   getSession: (id) => sessionStore.get(id) || null,
@@ -44,6 +45,10 @@ vi.mock('../src/lib/boulevard.js', () => ({
   verifyMemberIdentity: vi.fn(() => true),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
   reverifyAndApplyUpgradeForProfile: (...args) => mockReverifyAndApplyUpgradeForProfile(...args),
+}));
+
+vi.mock('../src/lib/upgrade-pricing.js', () => ({
+  resolveUpgradePrice: (...args) => mockResolveUpgradePrice(...args),
 }));
 
 vi.mock('../src/lib/notify.js', () => ({
