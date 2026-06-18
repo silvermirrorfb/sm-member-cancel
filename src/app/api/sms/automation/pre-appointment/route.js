@@ -202,7 +202,7 @@ function buildDurationOfferMessage(opportunity, options = {}) {
   if (reminder) {
     return `${greeting} just a reminder - the upgrade to 50 minutes is still available for your appointment today. Reply YES or NO.`;
   }
-  return `${greeting} good news - there's room to extend your facial today to 50 minutes for just $${delta} more. Reply YES to upgrade or NO to keep your current booking.`;
+  return `${greeting} good news: we can extend today's facial to 50 minutes for $${delta} more. Want to add it? Reply YES or NO.`;
 }
 
 function buildAddonOfferMessage(offer, options = {}) {

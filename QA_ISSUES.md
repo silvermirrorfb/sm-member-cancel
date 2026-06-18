@@ -217,6 +217,47 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 
 ---
 
+### outbound-sms #12
+**Status:** FIXED IN CODE 2026-06-18 by PR `fix/sms-offer-copy-untruncated`. Bump to VERIFIED FIXED after merge + production deploy + live canary.
+**Severity:** trust-erosion (also lost revenue: silently removed the upsell call-to-action for named guests)
+**Discovered:** 2026-06-18 (owner-reported: received an offer that was a bare statement with no way to respond)
+
+**Symptom:** Members received the duration-upgrade offer as a statement with no ask, e.g. "Hi Matt, good news - there's room to extend your facial today to 50 minutes for just $50 more." with the "Reply YES..." sentence missing. Members with no/short first names sometimes saw the full ask, so it looked intermittent.
+
+**Root cause:** The send path runs the offer through `trimSmsBodyShort` (`src/lib/twilio.js`), a self-imposed 150-char short-SMS limiter that, when over the cap, keeps only the first complete sentence. The approved copy plus a personalized "Hi {firstName}," greeting was 151+ chars for most names (151 for "Matt"), so the trimmer dropped the entire final sentence (the YES/NO ask). Live since the limiter landed on 2026-03-29 (commit 8f41a13); the offer send has piped through `trimSmsBodyShort` since 2026-03-21 (6bc2669). The existing route test mocked `trimSmsBodyShort` to a pass-through, so it never caught the truncation.
+
+**Fix (this PR):** Shortened the initial duration-offer copy to a single-segment message that keeps a real question and the YES/NO ask: "Hi {firstName}, good news: we can extend today's facial to 50 minutes for ${delta} more. Want to add it? Reply YES or NO." (109-116 chars across realistic names, well under the cap). Changed the route test to use the REAL `trimSmsBodyShort` and added a regression test (`__tests__/sms-automation-route.test.js`) asserting the built offer survives the real send-time trimmer with its ask intact. Copy wording approved by Matt 2026-06-18.
+
+**Verify post-deploy:** trigger a dry-run offer for a named guest in production and confirm the sent body ends with "Reply YES or NO." (not "$X more.").
+
+---
+
+### outbound-sms #13
+**Status:** OPEN (RCA complete 2026-06-15: `~/sm-rca-apply-path-2026-06-15.md`; rebuild plan written `docs/superpowers/plans/2026-06-15-sms-duration-upgrade-apply-rebuild.md` but NOT built). Owner opted in 2026-06-18 to build it; two decisions (service-swap vs set-duration; repricing/notifyClient) pending.
+**Severity:** trust-erosion (the system tells members an upgrade is handled when the booking is never changed)
+**Discovered:** documented 2026-06-15 (failure mode noted as far back as 2026-03-11)
+
+**Symptom:** A YES to a duration upgrade never actually lengthens the booking in Boulevard. 100% of YES since 2026-06-04 fell to the "our team will confirm" manual fallback; the booking stays at 30 minutes.
+
+**Root cause:** `tryApplyAppointmentUpgradeMutation` sends `updateAppointment(input:{id, serviceId})`, but Boulevard's `UpdateAppointmentInput` has no `serviceId` field (and `appointmentUpdate` does not exist). Both candidates fail GraphQL validation; `silentErrors: true` swallows the rejection; the call returns `upgrade_mutation_failed` and the webhook replies with the manual-confirm copy. Changing a booked service requires Boulevard's booking-edit flow (`bookingCreateFromAppointment` -> add/remove service -> `bookingComplete`), the same in-place mechanism the add-on path uses.
+
+**Fix shape:** Build the booking-flow apply per the plan; stop swallowing the apply error into the support incident. Separate scoped PR.
+
+---
+
+### outbound-sms #14
+**Status:** OPEN (queued after #13 per owner 2026-06-18)
+**Severity:** customer-harm (a YES can get zero reply)
+**Discovered:** 2026-06-18
+
+**Symptom:** Owner replied YES and received no reply at all. Code returns a TwiML reply on every signature-valid inbound, and production shows zero 403s and 200s on the webhook, so the silence is not a code-logic gap.
+
+**Root cause (leading):** The webhook does slow synchronous work before returning the reply (Google Sheets logging, Boulevard profile lookup, and the multi-call `reverifyAndApplyUpgradeForProfile` + read-back). Twilio discards a TwiML reply if the webhook does not respond within ~15s; the function's own comment budgets only 3s for "the rest of the handler" after a 12s phone-scan deadline (`route.js:35-39`), which the Boulevard apply path can exceed. When it does, the member gets nothing while Vercel logs a 200 (the function finishes after Twilio gave up) and the Google Sheet still records an outcome. Pinning a specific message requires the Twilio message log (delivery status), which needs Twilio console access.
+
+**Fix shape:** Acknowledge the YES with an instant approved reply inside the 15s window, then do the Boulevard apply asynchronously (queue/deferred) and send the result as a follow-up message. Separate scoped PR.
+
+---
+
 ## Cancel bot issues
 
 ### cancel-bot #1
