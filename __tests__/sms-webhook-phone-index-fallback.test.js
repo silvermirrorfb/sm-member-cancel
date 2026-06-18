@@ -102,6 +102,11 @@ function activeSessionNoProfile() {
   };
 }
 
+// PR-B: the member lookup (phone-index getClientById / lookupMember fallback)
+// now runs in the webhook's deferred work, not on the reply path. Flush it
+// before asserting which lookup fired.
+const flushDeferred = () => new Promise(resolve => setTimeout(resolve, 10));
+
 describe('twilio webhook phone-index lookup fallback', () => {
   beforeEach(() => {
     process.env = {
@@ -144,6 +149,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
     // path is a genuine hit and must short-circuit without a scan.
     mockGetClientById.mockResolvedValue({ clientId: 'urn:blvd:Client:abc', firstName: 'Test', lastName: 'Member', phone: '+12025551234' });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:abc');
     expect(mockLookupMember).not.toHaveBeenCalled();
@@ -153,6 +159,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
     mockLookupClientIdByPhoneFromIndex.mockResolvedValue(null);
     mockLookupMember.mockResolvedValue({ clientId: 'urn:blvd:Client:fast', firstName: 'Fast', lastName: 'Path' });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
     expect(mockGetClientById).not.toHaveBeenCalled();
@@ -163,6 +170,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
     mockGetClientById.mockResolvedValue(null);
     mockLookupMember.mockResolvedValue({ clientId: 'urn:blvd:Client:resolved' });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:stale');
     expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
@@ -185,6 +193,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
       phone: '+12025551234',
     });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:wrongnum');
     // A stale index must NOT short-circuit; the webhook must verify the phone

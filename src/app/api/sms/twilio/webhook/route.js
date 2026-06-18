@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import {
   createSession,
   getAllActiveSessions,
@@ -104,6 +104,26 @@ const ALLOWED_ADDON_NAME_SET = new Set([
 
 function buildSmsWebHandoffReply() {
   return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
+}
+
+// Run slow post-reply work without blocking the member-facing reply. Twilio
+// discards a webhook reply that takes longer than ~15s, so the YES/NO path must
+// return TwiML immediately and push Sheets logging, Boulevard apply, incident
+// email, and session writes here. The work STARTS now (concurrent with sending
+// the reply) and after() keeps the serverless function alive on Vercel until it
+// settles. Outside a request scope (unit tests, non-Vercel) after() throws, so
+// the detached promise is the fallback; a thrown task is swallowed so it can
+// never affect the reply that already went out.
+function deferWork(fn) {
+  const run = Promise.resolve()
+    .then(fn)
+    .catch(err => console.error('[sms-webhook] deferred work failed:', err?.message || err));
+  try {
+    after(() => run);
+  } catch {
+    // No request scope available (tests / non-Vercel runtime): the detached
+    // `run` above still executes; nothing else to do.
+  }
 }
 
 function isAffirmative(text) {
@@ -373,6 +393,150 @@ async function runChatMessageForSms(sessionId, body, from) {
   return payload?.message || null;
 }
 
+// All slow YES/NO post-reply work. Runs in deferWork() after the member-facing
+// reply has already been returned: resolve the member, attempt the Boulevard
+// apply, queue a support incident on failure, clear the pending offer, and log
+// the outbound row. Never touched by the reply path's latency budget. Mirrors
+// the prior inline branch logic; the only behavior change is that it no longer
+// blocks the reply and never calls the chat route on a YES/NO.
+async function runDeferredIntentWork({
+  sessionId,
+  from,
+  activeSession,
+  pendingOffer,
+  hasPendingOffer,
+  affirmative,
+  intentText,
+  smsUpgradeLive,
+  sentReplyText,
+}) {
+  // Clear a stale / blocked / expired pending offer regardless of intent.
+  if (activeSession?.pendingUpgradeOffer && !hasPendingOffer) {
+    activeSession.pendingUpgradeOffer = null;
+    await saveSession(activeSession);
+  }
+
+  // NO: keep the appointment as-is; clear the live pending offer.
+  if (!affirmative) {
+    if (hasPendingOffer && activeSession) {
+      activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
+      activeSession.pendingUpgradeOffer = null;
+      await saveSession(activeSession);
+    }
+    return;
+  }
+
+  // YES while SMS upgrades are on hold: nothing to apply, just clear.
+  if (hasPendingOffer && !smsUpgradeLive) {
+    if (activeSession) {
+      activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
+      activeSession.pendingUpgradeOffer = null;
+      await saveSession(activeSession);
+    }
+    return;
+  }
+
+  // YES while the apply mutation is disabled: queue the manual-follow-up incident, clear.
+  if (!isUpgradeMutationEnabled()) {
+    const disabledReason = (hasPendingOffer && String(pendingOffer?.offerKind || '').toLowerCase() === 'addon')
+      ? 'manual_addon_confirmation'
+      : 'upgrade_mutation_disabled';
+    queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile: activeSession?.memberProfile || null,
+      pendingOffer,
+      upgradeResult: { success: false, reason: disabledReason },
+    }));
+    if (hasPendingOffer && activeSession) {
+      activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
+      activeSession.pendingUpgradeOffer = null;
+      await saveSession(activeSession);
+    }
+    return;
+  }
+
+  // Resolve the member (Boulevard). Background, so no Twilio deadline pressure.
+  let profile = activeSession?.memberProfile || null;
+  if (!profile) {
+    profile = await lookupProfileWithDeadline(from, lookupMember);
+    if (activeSession && profile) {
+      activeSession.memberId = profile.clientId || null;
+      activeSession.memberProfile = profile;
+      await saveSession(activeSession);
+    }
+  }
+  if (!profile) {
+    queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile: null,
+      pendingOffer,
+      upgradeResult: {
+        success: false,
+        reason: hasPendingOffer ? 'pending_offer_context_unrecoverable' : 'member_lookup_failed_after_yes',
+      },
+    }));
+    return;
+  }
+
+  // Apply against the exact pending offer when we have one; otherwise re-derive.
+  let upgradeResult;
+  let offerForLog;
+  if (hasPendingOffer) {
+    upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, pendingOffer);
+    offerForLog = pendingOffer;
+  } else {
+    const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
+    if (!opportunity?.eligible || !isSmsDurationOfferAllowed(opportunity)) {
+      queueSupportIncident(buildUpgradeSupportIncident({
+        sessionId,
+        from,
+        incomingText: intentText,
+        profile,
+        opportunity,
+        upgradeResult: {
+          success: false,
+          reason: opportunity?.eligible ? 'duration_offer_not_allowed' : (opportunity?.reason || 'no_opportunity_after_yes'),
+        },
+      }));
+      return;
+    }
+    upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, {
+      appointmentId: opportunity.appointmentId || null,
+      targetDurationMinutes: opportunity.targetDurationMinutes || null,
+    });
+    offerForLog = opportunity;
+  }
+
+  if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
+    queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile,
+      pendingOffer,
+      opportunity: upgradeResult?.opportunity || null,
+      upgradeResult,
+    }));
+  }
+  if (activeSession) {
+    activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId || offerForLog?.appointmentId || null;
+    activeSession.pendingUpgradeOffer = null;
+    await saveSession(activeSession);
+  }
+  await logUpgradeReplyOutbound({
+    sessionId,
+    from,
+    activeSession,
+    offer: offerForLog,
+    upgradeResult,
+    content: sentReplyText,
+  });
+}
+
 export async function POST(request) {
   let rateLimit = null;
   try {
@@ -601,7 +765,8 @@ export async function POST(request) {
 
     const sessionId = await resolveSessionIdForPhone(from);
     const activeSession = await getSession(sessionId);
-    await logSmsChatMessages([{
+    // Inbound logging is Sheets I/O; never block the reply on it.
+    deferWork(() => logSmsChatMessages([{
       sessionId,
       timestamp: new Date().toISOString(),
       direction: 'inbound',
@@ -611,7 +776,7 @@ export async function POST(request) {
       content: body,
       offerType: activeSession?.pendingUpgradeOffer?.offerKind || null,
       outcome: (isAffirmative(body) || isNegative(body)) ? 'intent_response' : 'message_received',
-    }]);
+    }]));
     if (activeSession) {
       const currentCount = Number(activeSession.smsInboundCount || 0);
       activeSession.smsInboundCount = currentCount + 1;
@@ -629,237 +794,51 @@ export async function POST(request) {
 
     const intentText = String(body || '').trim();
     if (isAffirmative(intentText) || isNegative(intentText)) {
+      const affirmative = isAffirmative(intentText);
       const pendingOffer = activeSession?.pendingUpgradeOffer || null;
       const pendingOfferBlocked =
         pendingOffer?.offerKind === 'duration' &&
         !isSmsDurationOfferAllowed(pendingOffer);
       const hasPendingOffer = pendingOffer && !pendingOfferBlocked && !isPendingOfferExpired(pendingOffer);
-      if (activeSession?.pendingUpgradeOffer && !hasPendingOffer) {
-        activeSession.pendingUpgradeOffer = null;
-        await saveSession(activeSession);
+
+      // Deterministic, instant reply. It NEVER awaits Sheets or Boulevard and
+      // never calls the chat route, so Twilio always gets TwiML well inside its
+      // ~15s window (the silent-YES cause). Copy matches what production sends
+      // today: NO declines; a live pending-offer YES echoes the persisted
+      // (tier-aware) price as a manual-confirm; any other YES uses the approved
+      // generic confirmation. The Boulevard apply, incident, Sheets logging, and
+      // pending-offer clear all run in deferWork below. When the booking-edit
+      // apply (outbound-sms #13) is enabled, a result-specific follow-up SMS is
+      // the next enhancement; the immediate reply stays instant and deterministic.
+      let replyText;
+      if (!affirmative) {
+        replyText = 'No problem - we will keep your appointment as-is.';
+      } else if (hasPendingOffer && !smsUpgradeLive) {
+        replyText = buildSmsUpgradePendingReply();
+      } else if (hasPendingOffer) {
+        replyText = buildPendingOfferFinalizeReply(pendingOffer);
+      } else {
+        replyText = YES_NO_PENDING_MANUAL_REPLY;
       }
+      const intentTwiml = buildTwimlMessage(replyText);
+      if (messageSid) storeReplyForMessageSid(messageSid, intentTwiml);
 
-      if (hasPendingOffer && isNegative(intentText)) {
-        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-        activeSession.pendingUpgradeOffer = null;
-        await saveSession(activeSession);
-        const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
-        if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
-        return new NextResponse(declineTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
+      deferWork(() => runDeferredIntentWork({
+        sessionId,
+        from,
+        activeSession,
+        pendingOffer,
+        hasPendingOffer,
+        affirmative,
+        intentText,
+        smsUpgradeLive,
+        sentReplyText: replyText,
+      }));
 
-      const pendingOfferKind = String(pendingOffer?.offerKind || 'duration').toLowerCase();
-      const canFinalizeWithoutMutation = hasPendingOffer && !isUpgradeMutationEnabled();
-      if (isAffirmative(intentText) && hasPendingOffer && !smsUpgradeLive) {
-        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-        activeSession.pendingUpgradeOffer = null;
-        await saveSession(activeSession);
-        const pendingTwiml = buildTwimlMessage(buildSmsUpgradePendingReply());
-        if (messageSid) storeReplyForMessageSid(messageSid, pendingTwiml);
-        return new NextResponse(pendingTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-      if (isAffirmative(intentText) && canFinalizeWithoutMutation) {
-        const incident = buildUpgradeSupportIncident({
-          sessionId,
-          from,
-          incomingText: intentText,
-          profile: activeSession?.memberProfile || null,
-          pendingOffer,
-          upgradeResult: {
-            success: false,
-            reason: pendingOfferKind === 'addon' ? 'manual_addon_confirmation' : 'upgrade_mutation_disabled',
-          },
-        });
-        queueSupportIncident(incident);
-        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-        activeSession.pendingUpgradeOffer = null;
-        await saveSession(activeSession);
-        const teamFinalizeTwiml = buildTwimlMessage(buildPendingOfferFinalizeReply(pendingOffer));
-        if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
-        return new NextResponse(teamFinalizeTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      if (isAffirmative(intentText) && !isUpgradeMutationEnabled()) {
-        const incident = buildUpgradeSupportIncident({
-          sessionId,
-          from,
-          incomingText: intentText,
-          profile: activeSession?.memberProfile || null,
-          upgradeResult: { success: false, reason: 'upgrade_mutation_disabled' },
-        });
-        queueSupportIncident(incident);
-        const fallbackTwiml = buildTwimlMessage(
-          'Thanks for replying YES. We received your request and our team will confirm it before your appointment.',
-        );
-        if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
-        return new NextResponse(fallbackTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      let profile = activeSession?.memberProfile || null;
-      if (!profile) {
-        profile = await lookupProfileWithDeadline(from, lookupMember);
-        if (activeSession && profile) {
-          activeSession.memberId = profile.clientId || null;
-          activeSession.memberProfile = profile;
-          await saveSession(activeSession);
-        }
-      }
-
-      if (!profile && isNegative(intentText)) {
-        const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
-        if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
-        return new NextResponse(declineTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      if (!profile && isAffirmative(intentText)) {
-        const incident = buildUpgradeSupportIncident({
-          sessionId,
-          from,
-          incomingText: intentText,
-          profile: activeSession?.memberProfile || null,
-          pendingOffer,
-          upgradeResult: {
-            success: false,
-            reason: hasPendingOffer ? 'pending_offer_context_unrecoverable' : 'member_lookup_failed_after_yes',
-          },
-        });
-        queueSupportIncident(incident);
-        const fallbackTwiml = buildTwimlMessage(YES_NO_PENDING_MANUAL_REPLY);
-        if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
-        return new NextResponse(fallbackTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      if (profile) {
-        if (isNegative(intentText)) {
-          const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
-          if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
-          return new NextResponse(declineTwiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-
-        // Deterministic YES handling: if we have a live pending offer, reverify against
-        // that exact appointment/target instead of doing a fresh generic opportunity pick.
-        if (isAffirmative(intentText) && hasPendingOffer) {
-          const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, pendingOffer);
-          if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
-            const incident = buildUpgradeSupportIncident({
-              sessionId,
-              from,
-              incomingText: intentText,
-              profile,
-              pendingOffer,
-              opportunity: upgradeResult?.opportunity || null,
-              upgradeResult,
-            });
-            queueSupportIncident(incident);
-          }
-          if (activeSession) {
-            activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-            activeSession.pendingUpgradeOffer = null;
-            await saveSession(activeSession);
-          }
-          const upgradeText = buildUpgradeApplyReply(upgradeResult, upgradeResult?.opportunity || null, pendingOffer);
-          const upgradeTwiml = buildTwimlMessage(upgradeText);
-          if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
-          await logUpgradeReplyOutbound({
-            sessionId,
-            from,
-            activeSession,
-            offer: pendingOffer,
-            upgradeResult,
-            content: upgradeText,
-          });
-          return new NextResponse(upgradeTwiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-
-        const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
-        if (opportunity?.eligible && !isSmsDurationOfferAllowed(opportunity)) {
-          const reply = await runChatMessageForSms(sessionId, body, from);
-          const twiml = buildTwimlMessage(reply || GENERIC_FAILURE_REPLY);
-          if (messageSid) storeReplyForMessageSid(messageSid, twiml);
-          return new NextResponse(twiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-        if (!opportunity?.eligible) {
-          // If YES arrives without recoverable pending context, fail safe to approved manual confirmation copy.
-          const incident = buildUpgradeSupportIncident({
-            sessionId,
-            from,
-            incomingText: intentText,
-            profile,
-            opportunity,
-            upgradeResult: { success: false, reason: opportunity?.reason || 'no_opportunity_after_yes' },
-          });
-          queueSupportIncident(incident);
-          const fallbackTwiml = buildTwimlMessage(YES_NO_PENDING_MANUAL_REPLY);
-          if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
-          return new NextResponse(fallbackTwiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-
-        const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, {
-          appointmentId: opportunity.appointmentId || null,
-          targetDurationMinutes: opportunity.targetDurationMinutes || null,
-        });
-        if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
-          const incident = buildUpgradeSupportIncident({
-            sessionId,
-            from,
-            incomingText: intentText,
-            profile,
-            opportunity,
-            upgradeResult,
-          });
-          queueSupportIncident(incident);
-        }
-        if (activeSession) {
-          activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId || opportunity?.appointmentId || null;
-          activeSession.pendingUpgradeOffer = null;
-          await saveSession(activeSession);
-        }
-        const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer);
-        const upgradeTwiml = buildTwimlMessage(upgradeText);
-        if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
-        await logUpgradeReplyOutbound({
-          sessionId,
-          from,
-          activeSession,
-          offer: pendingOffer || opportunity,
-          upgradeResult,
-          content: upgradeText,
-        });
-        return new NextResponse(upgradeTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
+      return new NextResponse(intentTwiml, {
+        status: 200,
+        headers: buildTwimlHeaders(rateLimit),
+      });
     }
 
     const reply = await runChatMessageForSms(sessionId, body, from);
