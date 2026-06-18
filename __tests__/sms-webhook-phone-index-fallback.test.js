@@ -201,22 +201,20 @@ describe('twilio webhook phone-index lookup fallback', () => {
     expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
   });
 
-  it('registry miss + scan exceeds 12s deadline: returns 200 with manual-confirm TwiML in <13s', async () => {
+  it('returns the manual-confirm reply instantly without waiting for the slow scan', async () => {
+    // PR-B: the member lookup (and its scan) run in deferred work, not on the
+    // reply path. Even if the scan never resolves, the reply returns at once.
+    // Fake timers keep the deferred 45s scan deadline from leaking a real timer.
     vi.useFakeTimers();
     mockLookupClientIdByPhoneFromIndex.mockResolvedValue(null);
-    mockLookupMember.mockReturnValue(new Promise(() => {})); // never resolves
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockLookupMember.mockReturnValue(new Promise(() => {})); // scan never resolves
 
-    const postPromise = POST(makeFormRequest());
-    // Advance past the 12s scan deadline (PHONE_SCAN_DEADLINE_MS).
-    await vi.advanceTimersByTimeAsync(12_500);
-    const res = await postPromise;
+    // No timer advancement: if the reply awaited the scan, this would hang.
+    const res = await POST(makeFormRequest());
 
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('our team will confirm'); // YES_NO_PENDING_MANUAL_REPLY substring
-    const errMessages = consoleErrorSpy.mock.calls.flat().join(' ');
-    expect(errMessages).toContain('phone-scan timeout');
-    consoleErrorSpy.mockRestore();
+    vi.useRealTimers();
   });
 });

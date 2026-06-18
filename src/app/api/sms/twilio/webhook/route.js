@@ -32,13 +32,23 @@ import { lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../..
 import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
+// The reply returns in milliseconds, but deferWork() (after()) keeps the
+// function alive for the background apply, which may run a slow Boulevard scan
+// plus the booking-edit apply. Give it headroom well beyond the deferred scan
+// deadline so successful background applies are never cut short.
+export const maxDuration = 60;
+
 // Cap on the slow O(N) phone-scan fallback. Twilio's webhook timeout is
 // 15 seconds; we reserve 3s for the rest of the handler. On deadline we
 // log at error level and return null, letting the existing no-profile
 // path (lines ~634-661) reply 200 with the manual-confirm TwiML.
 const PHONE_SCAN_DEADLINE_MS = 12_000;
+// In deferred (post-reply) work the Twilio 15s budget no longer applies, so a
+// slow-but-successful Boulevard phone scan must not be cut at 12s and dropped to
+// manual. Bounded only so a runaway scan cannot outlive the function.
+const DEFERRED_SCAN_DEADLINE_MS = Number(process.env.SMS_DEFERRED_SCAN_DEADLINE_MS || 45_000);
 
-async function lookupProfileWithDeadline(from, scanFn) {
+async function lookupProfileWithDeadline(from, scanFn, deadlineMs = PHONE_SCAN_DEADLINE_MS) {
   // O(1) Redis lookup first — avoids the 15-50s Boulevard phone-scan that
   // historically caused Twilio ERR:11200 on cold-cache inbound replies.
   try {
@@ -64,11 +74,11 @@ async function lookupProfileWithDeadline(from, scanFn) {
     console.warn('[sms-webhook] phone-index lookup error:', err?.message || err);
   }
   // Fallback: race the slow O(N) scan against a 12s deadline.
-  console.log('[sms-webhook] phone-index miss, attempting fallback scan with 12s deadline');
+  console.log(`[sms-webhook] phone-index miss, attempting fallback scan with ${Math.round(deadlineMs / 1000)}s deadline`);
   const t0 = Date.now();
   let timeoutHandle = null;
   const deadline = new Promise(resolve => {
-    timeoutHandle = setTimeout(() => resolve('__deadline__'), PHONE_SCAN_DEADLINE_MS);
+    timeoutHandle = setTimeout(() => resolve('__deadline__'), deadlineMs);
   });
   const scanPromise = Promise.resolve()
     .then(() => scanFn('', from))
@@ -225,15 +235,20 @@ function shouldQueueUpgradeFollowupIncident(upgradeResult) {
 }
 
 function queueSupportIncident(incident) {
-  logSupportIncident(incident).catch(err => {
-    console.error('SMS support incident logging failed:', err);
-  });
-  // Also email a human: a sheet row alone left three YES members unworked. Deduped
-  // per member+appointment inside notify. Fire-and-forget like the sheet log so it
-  // can never delay or break the member-facing reply.
-  notifyUpgradeIncidentOnce(incident).catch(err => {
-    console.error('SMS upgrade incident email failed:', err);
-  });
+  // Returns a settled-when-done promise so deferred callers can AWAIT it:
+  // after() only keeps the serverless function alive for the promise the
+  // deferred task returns, so an un-awaited incident write/email could be
+  // killed mid-flight on Vercel (a sheet row alone once left three YES members
+  // unworked). Errors are swallowed per-channel so awaiting never rejects and
+  // the member-facing reply (already sent) is never affected.
+  return Promise.allSettled([
+    logSupportIncident(incident).catch(err => {
+      console.error('SMS support incident logging failed:', err);
+    }),
+    notifyUpgradeIncidentOnce(incident).catch(err => {
+      console.error('SMS upgrade incident email failed:', err);
+    }),
+  ]);
 }
 
 // Records the outbound upgrade-reply we are about to return as TwiML. Awaited
@@ -441,7 +456,7 @@ async function runDeferredIntentWork({
     const disabledReason = (hasPendingOffer && String(pendingOffer?.offerKind || '').toLowerCase() === 'addon')
       ? 'manual_addon_confirmation'
       : 'upgrade_mutation_disabled';
-    queueSupportIncident(buildUpgradeSupportIncident({
+    await queueSupportIncident(buildUpgradeSupportIncident({
       sessionId,
       from,
       incomingText: intentText,
@@ -460,7 +475,8 @@ async function runDeferredIntentWork({
   // Resolve the member (Boulevard). Background, so no Twilio deadline pressure.
   let profile = activeSession?.memberProfile || null;
   if (!profile) {
-    profile = await lookupProfileWithDeadline(from, lookupMember);
+    // Deferred: no Twilio deadline pressure, so allow the slow scan to finish.
+    profile = await lookupProfileWithDeadline(from, lookupMember, DEFERRED_SCAN_DEADLINE_MS);
     if (activeSession && profile) {
       activeSession.memberId = profile.clientId || null;
       activeSession.memberProfile = profile;
@@ -468,7 +484,7 @@ async function runDeferredIntentWork({
     }
   }
   if (!profile) {
-    queueSupportIncident(buildUpgradeSupportIncident({
+    await queueSupportIncident(buildUpgradeSupportIncident({
       sessionId,
       from,
       incomingText: intentText,
@@ -491,7 +507,7 @@ async function runDeferredIntentWork({
   } else {
     const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
     if (!opportunity?.eligible || !isSmsDurationOfferAllowed(opportunity)) {
-      queueSupportIncident(buildUpgradeSupportIncident({
+      await queueSupportIncident(buildUpgradeSupportIncident({
         sessionId,
         from,
         incomingText: intentText,
@@ -512,7 +528,7 @@ async function runDeferredIntentWork({
   }
 
   if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
-    queueSupportIncident(buildUpgradeSupportIncident({
+    await queueSupportIncident(buildUpgradeSupportIncident({
       sessionId,
       from,
       incomingText: intentText,
