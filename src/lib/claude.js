@@ -174,6 +174,34 @@ function getAnthropicClient() {
   return cachedClient;
 }
 
+// The chat model. Read from ANTHROPIC_MODEL so a model change is a config edit,
+// never a code edit, and never a dated snapshot id that Anthropic retires with a
+// 404. Default is the current supported Sonnet; bump the default only to another
+// current id.
+const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+
+function getAnthropicModel() {
+  return String(process.env.ANTHROPIC_MODEL || '').trim() || DEFAULT_ANTHROPIC_MODEL;
+}
+
+// Health probe: validate the configured model with a minimal (1-token) call so a
+// bad ANTHROPIC_MODEL (e.g. a deprecated dated id that now 404s) surfaces as an
+// explicit health error instead of a runtime 500 on the next chat message.
+async function verifyAnthropicModel() {
+  const model = getAnthropicModel();
+  try {
+    const client = getAnthropicClient();
+    await client.messages.create({
+      model,
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'ping' }],
+    });
+    return { ok: true, model };
+  } catch (err) {
+    return { ok: false, model, error: err?.message || String(err) };
+  }
+}
+
 /**
  * Send a message to Claude and get a response.
  */
@@ -181,7 +209,7 @@ async function sendMessage(systemPrompt, messages) {
   const client = getAnthropicClient();
 
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: getAnthropicModel(),
     max_tokens: 1024,
     system: systemPrompt,
     messages: messages.map(m => ({
@@ -282,6 +310,8 @@ export {
   maskMissedCallPhone,
   formatMissedCallTime,
   sendMessage,
+  getAnthropicModel,
+  verifyAnthropicModel,
   parseMemberLookup,
   stripMemberLookup,
   parseSessionSummary,
