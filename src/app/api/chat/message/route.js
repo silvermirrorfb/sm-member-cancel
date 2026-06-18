@@ -988,7 +988,7 @@ export async function POST(request) {
             // case). resolveUpgradePrice only models 30->50, so other targets
             // (e.g. web 50->90) keep their walk-in pricing. 30->50 fails closed
             // when a member's price cannot be resolved.
-            const is3050 = opportunity?.eligible && Number(opportunity.targetDurationMinutes) === 50;
+            const is3050 = opportunity?.eligible && Number(opportunity.currentDurationMinutes) === 30 && Number(opportunity.targetDurationMinutes) === 50;
             const upgradePrice = is3050 ? resolveUpgradePrice(session.memberProfile) : null;
             if (opportunity?.eligible && (channel !== 'sms' || isSmsDurationOfferAllowed(opportunity)) && (!is3050 || upgradePrice)) {
                   if (session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
@@ -1204,7 +1204,7 @@ export async function POST(request) {
       // Proactive upgrade suggestion on logistics questions (e.g., directions) for identified members.
       if (channel !== 'sms' && smsUpgradeLive && !summary && session.memberProfile && !session.pendingUpgradeOffer && isLogisticsContext(sanitizedMessage)) {
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
-            const is3050 = opportunity?.eligible && Number(opportunity.targetDurationMinutes) === 50;
+            const is3050 = opportunity?.eligible && Number(opportunity.currentDurationMinutes) === 30 && Number(opportunity.targetDurationMinutes) === 50;
             const upgradePrice = is3050 ? resolveUpgradePrice(session.memberProfile) : null;
             if (opportunity?.eligible && (!is3050 || upgradePrice) && session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
                   const offeredDelta = upgradePrice ? upgradePrice.deltaDollars : (Number(opportunity.pricing?.walkinDelta) || null);
