@@ -233,15 +233,19 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 ---
 
 ### outbound-sms #13
-**Status:** OPEN (RCA complete 2026-06-15: `~/sm-rca-apply-path-2026-06-15.md`; rebuild plan written `docs/superpowers/plans/2026-06-15-sms-duration-upgrade-apply-rebuild.md` but NOT built). Owner opted in 2026-06-18 to build it; two decisions (service-swap vs set-duration; repricing/notifyClient) pending.
+**Status:** BUILT 2026-06-18 by PR `fix/sms-duration-upgrade-apply-booking-flow`, **gated default-OFF** behind `BOULEVARD_ENABLE_BOOKING_UPGRADE`. NOT yet active in production. Activation is owner-gated on the non-destructive real-appointment dry-run (see below). RCA: `~/sm-rca-apply-path-2026-06-15.md`; plan: `docs/superpowers/plans/2026-06-15-sms-duration-upgrade-apply-rebuild.md`.
 **Severity:** trust-erosion (the system tells members an upgrade is handled when the booking is never changed)
 **Discovered:** documented 2026-06-15 (failure mode noted as far back as 2026-03-11)
 
 **Symptom:** A YES to a duration upgrade never actually lengthens the booking in Boulevard. 100% of YES since 2026-06-04 fell to the "our team will confirm" manual fallback; the booking stays at 30 minutes.
 
-**Root cause:** `tryApplyAppointmentUpgradeMutation` sends `updateAppointment(input:{id, serviceId})`, but Boulevard's `UpdateAppointmentInput` has no `serviceId` field (and `appointmentUpdate` does not exist). Both candidates fail GraphQL validation; `silentErrors: true` swallows the rejection; the call returns `upgrade_mutation_failed` and the webhook replies with the manual-confirm copy. Changing a booked service requires Boulevard's booking-edit flow (`bookingCreateFromAppointment` -> add/remove service -> `bookingComplete`), the same in-place mechanism the add-on path uses.
+**Root cause:** `tryApplyAppointmentUpgradeMutation` sends `updateAppointment(input:{id, serviceId})`, but Boulevard's `UpdateAppointmentInput` has no `serviceId` field (and `appointmentUpdate` does not exist). Both candidates fail GraphQL validation; `silentErrors: true` swallows the rejection; the call returns `upgrade_mutation_failed` and the webhook replies with the manual-confirm copy. Changing a booked service requires Boulevard's booking-edit flow.
 
-**Fix shape:** Build the booking-flow apply per the plan; stop swallowing the apply error into the support incident. Separate scoped PR.
+**Build (this PR):** New `applyDurationUpgradeViaBooking` (`src/lib/boulevard.js`) does the non-destructive swap: `bookingCreateFromAppointment` (draft over the existing appointment) -> `bookingAddService` (50-min) BEFORE `bookingRemoveService` (30-min, so the booking is never empty) -> `bookingServiceSetPrice` to the quoted total (owner decision 2026-06-18: always honor the quoted price; cents) -> `bookingComplete(notifyClient:false)` back to the SAME appointment id -> existing read-back `verifyAppointmentServiceApplied`. Every step targets the draft `bookingId`; the live appointment changes only at commit; any step error or blocking warning aborts BEFORE commit (draft abandoned). The new path captures Boulevard error/warnings into the reverify result (no silent swallow). Wired into `reverifyAndApplyUpgradeForProfile`'s duration branch behind `BOULEVARD_ENABLE_BOOKING_UPGRADE`; when OFF (prod today) the legacy path runs unchanged (manual fallback). Tests: `__tests__/boulevard-duration-upgrade-booking-flow.test.js` (in-place add-before-remove order, quoted-price-in-cents, abort-before-commit on blocking warning, no cancelAppointment / no fresh bookingCreate). Full suite 876 pass.
+
+**ACTIVATION (owner-gated, do NOT skip):** A booking was destroyed before by a cancel-rebook fallback (outbound-sms #11), so the live flip requires a real-appointment dry-run with Boulevard access (Travis/Matt) proving `bookingComplete` returns the SAME appointment id (edits in place, does not mint a new appointment). Steps: (1) run the swap against one real test appointment, confirm appointment id unchanged + service now 50-min + price = quoted; (2) if confirmed, `vercel env add BOULEVARD_ENABLE_BOOKING_UPGRADE production` = `true` and redeploy; (3) canary the next live YES. If the dry-run shows a NEW appointment id, STOP and do not enable.
+
+**Follow-up:** enrich the webhook support-incident `user_message` with the captured apply error/warnings (currently the reverify result carries them; surfacing them in the incident email is a small additive observability change).
 
 ---
 
