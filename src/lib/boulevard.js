@@ -3841,5 +3841,6 @@ export {
   CURRENT_RATES,
   PERKS,
   LOYALTY_TIERS,
+  isInactiveMembershipStatus,
   __resetBoulevardCachesForTests,
 };

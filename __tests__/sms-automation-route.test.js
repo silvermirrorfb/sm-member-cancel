@@ -24,15 +24,19 @@ const mockGetOutboundQueueSnapshot = vi.fn();
 const mockCheckKlaviyoSmsOptIn = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 
-vi.mock('../src/lib/boulevard.js', () => ({
-  lookupMember: (...args) => mockLookupMember(...args),
-  getClientById: (...args) => mockGetClientById(...args),
-  evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
-  formatProfileForPrompt: (...args) => mockFormatProfileForPrompt(...args),
-  resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
-  getBoulevardAuthContext: (...args) => mockGetBoulevardAuthContext(...args),
-  scanAppointments: (...args) => mockScanAppointments(...args),
-}));
+vi.mock('../src/lib/boulevard.js', async (importActual) => {
+  const actual = await importActual();
+  return {
+    lookupMember: (...args) => mockLookupMember(...args),
+    getClientById: (...args) => mockGetClientById(...args),
+    evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
+    formatProfileForPrompt: (...args) => mockFormatProfileForPrompt(...args),
+    resolveBoulevardLocationInput: (...args) => mockResolveBoulevardLocationInput(...args),
+    getBoulevardAuthContext: (...args) => mockGetBoulevardAuthContext(...args),
+    scanAppointments: (...args) => mockScanAppointments(...args),
+    isInactiveMembershipStatus: actual.isInactiveMembershipStatus,
+  };
+});
 
 vi.mock('../src/lib/sessions.js', () => ({
   createSession: (...args) => mockCreateSession(...args),
@@ -194,6 +198,9 @@ describe('sms automation route', () => {
         clientId: 'client-1',
         phone: '+19175551234',
         tier: '30',
+        hasMembership: true,
+        accountStatus: 'ACTIVE',
+        monthlyRate: 99,
         firstName: 'Debbie',
         name: 'Debbie Von Ahrens',
       }); // phone hit
@@ -252,6 +259,9 @@ describe('sms automation route', () => {
       clientId: 'client-1',
       phone: '+19175551234',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Debbie',
       name: 'Debbie Von Ahrens',
       email: 'debbie@example.com',
@@ -359,6 +369,9 @@ describe('sms automation route', () => {
       clientId: 'client-1',
       phone: '+19175551234',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Debbie',
       name: 'Debbie Von Ahrens',
     });
@@ -392,6 +405,7 @@ describe('sms automation route', () => {
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.summary.total).toBe(1);
+    expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].source).toBe('queued');
     expect(body.results[0].queueId).toBe('q-2');
   });
@@ -462,6 +476,9 @@ describe('sms automation route', () => {
       clientId: 'client-1',
       phone: '+19175551234',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Debbie',
       name: 'Debbie Von Ahrens',
       email: 'debbie@example.com',
@@ -563,6 +580,9 @@ describe('sms automation route', () => {
       clientId: 'client-1',
       phone: '+19175551234',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Debbie',
       name: 'Debbie Von Ahrens',
       email: 'debbie@example.com',
@@ -945,6 +965,9 @@ describe('sms automation route', () => {
       clientId: 'client-dur',
       phone: '+19175550002',
       tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
       firstName: 'Casey',
       name: 'Casey Guest',
       email: 'casey@example.com',
@@ -953,7 +976,7 @@ describe('sms automation route', () => {
       eligible: true,
       appointmentId: 'appt-dur',
       targetDurationMinutes: 50,
-      pricing: { memberTotal: 99, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
       isMember: true,
       currentDurationMinutes: 30,
       startOn: '2026-03-09T18:00:00Z',
@@ -983,12 +1006,9 @@ describe('sms automation route', () => {
     const res = await POST(req);
     const body = await res.json();
     expect(res.status).toBe(200);
-    // Duration upgrade should NOT be skipped by the addon gate.
-    // It may go to dry_run (the happy path) or to another non-gate skip reason.
-    if (body.results[0].status === 'skipped') {
-      expect(body.results[0].reason).not.toMatch(/addon/i);
-    }
-    expect(body.results[0].offerKind).not.toBe('addon');
+    // Duration upgrade must NOT be gated by the addon path: it proceeds as a duration offer.
+    expect(body.results[0].status).toBe('dry_run');
+    expect(body.results[0].offerKind).toBe('duration');
   });
 
   it('with enableAddonFallback=true in body but env=false: addon stays blocked (kill switch cannot be bypassed by a request flag)', async () => {
@@ -1019,5 +1039,153 @@ describe('sms automation route', () => {
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].offerKind).toBe('addon');
+  });
+
+  it('quotes the member tier-aware delta in the offer and persists it', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1', phone: '+19175551234', tier: '30',
+      hasMembership: true, accountStatus: 'ACTIVE', monthlyRate: 99,
+      firstName: 'Debbie', name: 'Debbie Von Ahrens', email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-1', targetDurationMinutes: 50, currentDurationMinutes: 30,
+      isMember: true, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    mockSendTwilioSms.mockResolvedValue({ sid: 'SM123' });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: false, liveApproval: true, now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York', sendStartHour: 9, sendEndHour: 17,
+        candidates: [{ firstName: 'Debbie', lastName: 'Von Ahrens', email: 'debbie@example.com', phone: '+1 (917) 555-1234' }],
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.results[0].status).toBe('sent');
+    expect(mockSendTwilioSms.mock.calls[0][0].body).toContain('for $40 more');
+    const persisted = mockSaveSession.mock.calls.at(-1)[0].pendingUpgradeOffer;
+    expect(persisted.deltaDollars).toBe(40);
+    expect(persisted.totalDollars).toBe(139);
+    expect(persisted.isMember).toBe(true);
+  });
+
+  it('quotes the flat non-member delta in the offer', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-2', phone: '+19175551235', tier: null, hasMembership: false, accountStatus: null,
+      firstName: 'Sam', name: 'Sam Doe', email: 'sam@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-2', targetDurationMinutes: 50, currentDurationMinutes: 30,
+      isMember: false, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    mockSendTwilioSms.mockResolvedValue({ sid: 'SM124' });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: false, liveApproval: true, now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York', sendStartHour: 9, sendEndHour: 17,
+        candidates: [{ firstName: 'Sam', lastName: 'Doe', email: 'sam@example.com', phone: '+1 (917) 555-1235' }],
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(body.results[0].status).toBe('sent');
+    expect(mockSendTwilioSms.mock.calls[0][0].body).toContain('for $50 more');
+    expect(mockSaveSession.mock.calls.at(-1)[0].pendingUpgradeOffer.deltaDollars).toBe(50);
+  });
+
+  it('skips the duration offer when a 30-min member rate is unresolvable', async () => {
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-3', phone: '+19175551236', tier: '30',
+      hasMembership: true, accountStatus: 'ACTIVE', monthlyRate: null,
+      firstName: 'Pat', name: 'Pat Roe', email: 'pat@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-3', targetDurationMinutes: 50, currentDurationMinutes: 30,
+      isMember: true, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      startOn: '2026-03-09T18:00:00Z',
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: false, liveApproval: true, now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York', sendStartHour: 9, sendEndHour: 17,
+        candidates: [{ firstName: 'Pat', lastName: 'Roe', email: 'pat@example.com', phone: '+1 (917) 555-1236' }],
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(body.results[0].status).toBe('skipped');
+    expect(body.results[0].reason).toBe('duration_price_unresolved');
+    expect(mockSendTwilioSms).not.toHaveBeenCalled();
+  });
+
+  it('reminder reuses the originally-quoted price instead of recomputing', async () => {
+    // Profile now has monthlyRate: 79, so live resolver would produce deltaDollars: 60.
+    // The original offer was quoted at deltaDollars: 40 (monthlyRate was 99 at send time).
+    // On a reminder, the route must reuse 40, not recompute 60.
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1', phone: '+19175551234', tier: '30',
+      hasMembership: true, accountStatus: 'ACTIVE', monthlyRate: 79,
+      firstName: 'Debbie', name: 'Debbie Von Ahrens', email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-1', targetDurationMinutes: 50, currentDurationMinutes: 30,
+      isMember: true, pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      startOn: '2026-03-09T18:00:00Z',
+    });
+    // offerState has initialSentAt so hasPriorOffer is true and reminder window triggers.
+    mockGetUpgradeOfferState.mockReturnValue({
+      initialSentAt: '2026-03-09T12:00:00Z',
+      reminderSentAt: null,
+    });
+    // Session carries the originally-quoted prices from the initial send.
+    mockCreateSession.mockReturnValue({
+      id: 'sess-1',
+      status: 'active',
+      pendingUpgradeOffer: {
+        appointmentId: 'appt-1',
+        createdAt: '2026-03-09T12:00:00Z',
+        expiresAt: '2026-03-09T12:15:00Z',
+        deltaDollars: 40,
+        totalDollars: 139,
+        isMember: true,
+      },
+    });
+    mockSendTwilioSms.mockResolvedValue({ sid: 'SM-reminder-1' });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: false, liveApproval: true,
+        now: '2026-03-09T17:00:00Z',
+        sendTimezone: 'America/New_York', sendStartHour: 9, sendEndHour: 17,
+        candidates: [{ firstName: 'Debbie', lastName: 'Von Ahrens', email: 'debbie@example.com', phone: '+1 (917) 555-1234' }],
+      }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+
+    expect(body.results[0].status).toBe('sent');
+    expect(body.results[0].offerType).toBe('reminder');
+    // deltaDollars must be 40 (original), NOT 60 (what live resolver would return for monthlyRate 79).
+    const persisted = mockSaveSession.mock.calls.at(-1)[0].pendingUpgradeOffer;
+    expect(persisted.deltaDollars).toBe(40);
+    expect(persisted.totalDollars).toBe(139);
+    expect(persisted.isMember).toBe(true);
   });
 });
