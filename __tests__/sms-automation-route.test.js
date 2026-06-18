@@ -57,9 +57,12 @@ vi.mock('../src/lib/sms-sessions.js', () => ({
   markUpgradeOfferEvent: (...args) => mockMarkUpgradeOfferEvent(...args),
 }));
 
-vi.mock('../src/lib/twilio.js', () => ({
+vi.mock('../src/lib/twilio.js', async (importOriginal) => ({
+  // Keep the REAL trimSmsBodyShort so tests exercise the actual send-time
+  // truncation. The previous pass-through mock hid a bug where the 150-char
+  // trimmer silently dropped the offer's final sentence (the YES/NO ask).
+  ...(await importOriginal()),
   sendTwilioSms: (...args) => mockSendTwilioSms(...args),
-  trimSmsBodyShort: (value) => value,
 }));
 
 vi.mock('../src/lib/sms-outbound-queue.js', () => ({
@@ -77,6 +80,7 @@ vi.mock('../src/lib/notify.js', () => ({
 }));
 
 import { POST } from '../src/app/api/sms/automation/pre-appointment/route.js';
+import { trimSmsBodyShort } from '../src/lib/twilio.js';
 
 describe('sms automation route', () => {
   beforeEach(() => {
@@ -240,9 +244,60 @@ describe('sms automation route', () => {
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('dry_run');
     expect(body.results[0].matchedContact).toContain('917');
-    expect(body.results[0].message).toContain("there's room to extend your facial today to 50 minutes");
-    expect(body.results[0].message).toContain('Reply YES to upgrade or NO to keep your current booking.');
+    expect(body.results[0].message).toContain("we can extend today's facial to 50 minutes");
+    expect(body.results[0].message).toContain('Want to add it? Reply YES or NO.');
     expect(mockLookupMember).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the YES/NO ask intact through the real send-time SMS trimmer', async () => {
+    // Regression guard. The 150-char short-SMS trimmer silently dropped the
+    // offer's final sentence (the ask) whenever a first name pushed the
+    // message past 150 chars, so named guests received a bare statement with
+    // no way to respond. The built offer must survive trimSmsBodyShort with
+    // its ask intact.
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      phone: '+19175551234',
+      tier: '30',
+      hasMembership: true,
+      accountStatus: 'ACTIVE',
+      monthlyRate: 99,
+      firstName: 'Debbie',
+      name: 'Debbie Von Ahrens',
+      email: 'debbie@example.com',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      targetDurationMinutes: 50,
+      pricing: { memberTotal: 139, memberDelta: 40, walkinTotal: 169, walkinDelta: 50 },
+      isMember: true,
+      currentDurationMinutes: 30,
+      startOn: '2026-03-09T18:00:00Z',
+    });
+
+    const req = new Request('http://localhost/api/sms/automation/pre-appointment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-automation-token': 'token' },
+      body: JSON.stringify({
+        dryRun: true,
+        now: '2026-03-09T15:00:00Z',
+        sendTimezone: 'America/New_York',
+        sendStartHour: 9,
+        sendEndHour: 17,
+        candidates: [
+          { firstName: 'Debbie', lastName: 'Von Ahrens', email: 'debbie@example.com', phone: '+1 (917) 555-1234' },
+        ],
+      }),
+    });
+
+    const res = await POST(req);
+    const body = await res.json();
+
+    const message = body.results[0].message;
+    expect(message).toMatch(/reply yes/i);
+    // The real send-time trimmer must not strip the ask.
+    expect(trimSmsBodyShort(message)).toMatch(/reply yes/i);
   });
 
   it('skips 50-to-90 duration upgrades in SMS automation', async () => {
@@ -1013,7 +1068,7 @@ describe('sms automation route', () => {
 
     expect(res.status).toBe(200);
     expect(body.results[0].status).toBe('sent');
-    expect(mockSendTwilioSms.mock.calls[0][0].body).toContain('for just $40 more');
+    expect(mockSendTwilioSms.mock.calls[0][0].body).toContain('for $40 more');
     const persisted = mockSaveSession.mock.calls.at(-1)[0].pendingUpgradeOffer;
     expect(persisted.deltaDollars).toBe(40);
     expect(persisted.totalDollars).toBe(139);
@@ -1045,7 +1100,7 @@ describe('sms automation route', () => {
     const body = await res.json();
 
     expect(body.results[0].status).toBe('sent');
-    expect(mockSendTwilioSms.mock.calls[0][0].body).toContain('for just $50 more');
+    expect(mockSendTwilioSms.mock.calls[0][0].body).toContain('for $50 more');
     expect(mockSaveSession.mock.calls.at(-1)[0].pendingUpgradeOffer.deltaDollars).toBe(50);
   });
 
