@@ -2498,6 +2498,150 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   };
 }
 
+// --- Duration-upgrade gap bounding by location close + provider shift end ---
+// Boulevard exposes Location.hours (per-day open + start/finish wall-clock,
+// Sunday-indexed array) plus the location tz, and a shifts(...) root query
+// returning the provider's clockOut for a date. We use these to bound the gap
+// after a booking when there is no next same-provider appointment, so a
+// provider's last booking of the day is not falsely skipped as gap_unprovable
+// when the salon is open long enough afterward for the added minutes to fit.
+
+function bareBoulevardId(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  const idx = s.lastIndexOf(':');
+  return idx >= 0 ? s.slice(idx + 1) : s;
+}
+
+// Convert a wall-clock time (year, month, day, hour, minute) in `timeZone` to a
+// UTC epoch ms. Offset-correction: format a UTC guess back into the tz to learn
+// the tz offset at that instant, then subtract it. DST-correct (evening close
+// times are never in the ambiguous spring-forward transition hour).
+function zonedWallClockToUtcMs(year, month, day, hour, minute, timeZone) {
+  if (!timeZone) return NaN;
+  const guess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  if (!Number.isFinite(guess)) return NaN;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(new Date(guess)).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  let hh = Number(parts.hour);
+  if (hh === 24) hh = 0; // some ICU builds render midnight as 24
+  const asTzMs = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), hh, Number(parts.minute), Number(parts.second));
+  if (!Number.isFinite(asTzMs)) return NaN;
+  return guess - (asTzMs - guess);
+}
+
+// Calendar date of `dateMs` in `timeZone`, so an 8:30 PM ET booking that is past
+// midnight UTC still resolves to its local day for the hours-array index.
+function getZonedYmd(dateMs, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(dateMs)).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day) };
+}
+
+// Pure: minutes from the appointment end to the location close and to the
+// provider shift end (in the location tz), plus the earliest of the two.
+// Bounds that do not resolve are null. Hours array is Sunday-indexed (0 = Sun).
+function computeCloseShiftGapMinutes({ endOn, locationTz, hours, shiftClockOut }) {
+  const out = { availableGapMinutes: null, locationCloseMinutes: null, shiftEndMinutes: null, gapBoundedBy: null };
+  const endMs = Date.parse(endOn);
+  if (!Number.isFinite(endMs) || !locationTz) return out;
+  const { year, month, day } = getZonedYmd(endMs, locationTz);
+  if (!isFiniteNumber(year)) return out;
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay(); // 0 = Sunday
+
+  if (Array.isArray(hours) && hours.length >= 7) {
+    const dayHours = hours[weekday];
+    if (dayHours && dayHours.open === true && dayHours.finish && isFiniteNumber(Number(dayHours.finish.hour))) {
+      const closeMs = zonedWallClockToUtcMs(year, month, day, Number(dayHours.finish.hour), Number(dayHours.finish.minute) || 0, locationTz);
+      if (Number.isFinite(closeMs)) out.locationCloseMinutes = Math.floor((closeMs - endMs) / 60000);
+    }
+  }
+  if (shiftClockOut) {
+    const segs = String(shiftClockOut).split(':');
+    const h = Number(segs[0]);
+    const mi = Number(segs[1]);
+    if (Number.isFinite(h)) {
+      const shiftMs = zonedWallClockToUtcMs(year, month, day, h, Number.isFinite(mi) ? mi : 0, locationTz);
+      if (Number.isFinite(shiftMs)) out.shiftEndMinutes = Math.floor((shiftMs - endMs) / 60000);
+    }
+  }
+  const resolved = [out.locationCloseMinutes, out.shiftEndMinutes].filter(v => Number.isFinite(v));
+  if (resolved.length) {
+    out.availableGapMinutes = Math.min(...resolved);
+    out.gapBoundedBy = (Number.isFinite(out.shiftEndMinutes)
+      && out.shiftEndMinutes === out.availableGapMinutes
+      && (!Number.isFinite(out.locationCloseMinutes) || out.shiftEndMinutes <= out.locationCloseMinutes))
+      ? 'shift_end' : 'location_close';
+  }
+  return out;
+}
+
+async function fetchLocationHoursContext(auth, locationId) {
+  const id = String(locationId || '').trim();
+  if (!auth || !id) return null;
+  try {
+    const query = `
+      query FetchLocationHours($id: ID!) {
+        location(id: $id) {
+          tz
+          hours { open start { hour minute } finish { hour minute } }
+        }
+      }
+    `;
+    const data = await fetchBoulevardGraphQL(auth.apiUrl, auth.headers, query, { id }, { silentErrors: true, returnErrors: true });
+    if (!data || data.__error) return null;
+    const loc = data?.data?.location;
+    if (!loc || !loc.tz) return null;
+    return { tz: String(loc.tz), hours: Array.isArray(loc.hours) ? loc.hours : null };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchProviderShiftClockOut(auth, locationId, providerId, localDateStr) {
+  const loc = String(locationId || '').trim();
+  const prov = String(providerId || '').trim();
+  if (!auth || !loc || !prov || !localDateStr) return null;
+  try {
+    const query = `
+      query FetchStaffShifts($start: Date!, $end: Date!, $loc: ID!, $ids: [ID!]) {
+        shifts(startIso8601: $start, endIso8601: $end, locationId: $loc, staffIds: $ids) {
+          shifts { staffId clockOut available }
+        }
+      }
+    `;
+    const data = await fetchBoulevardGraphQL(auth.apiUrl, auth.headers, query, { start: localDateStr, end: localDateStr, loc, ids: [prov] }, { silentErrors: true, returnErrors: true });
+    if (!data || data.__error) return null;
+    const rows = data?.data?.shifts?.shifts;
+    if (!Array.isArray(rows)) return null;
+    const wantBare = bareBoulevardId(prov); // shifts() returns BARE staffId; normalize both sides before matching
+    const match = rows.find(r => r && r.available !== false && r.clockOut && bareBoulevardId(r.staffId) === wantBare);
+    return match ? String(match.clockOut) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveCloseShiftBoundedGap(auth, result) {
+  const endOn = result?.endOn;
+  const locationId = result?.locationId;
+  const providerId = result?.providerId;
+  const empty = { availableGapMinutes: null, locationCloseMinutes: null, shiftEndMinutes: null, gapBoundedBy: null };
+  if (!auth || !endOn || !locationId) return empty;
+  const locCtx = await fetchLocationHoursContext(auth, locationId);
+  if (!locCtx || !locCtx.tz) return empty;
+  const endMs = Date.parse(endOn);
+  if (!Number.isFinite(endMs)) return empty;
+  const { year, month, day } = getZonedYmd(endMs, locCtx.tz);
+  const localDateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  let shiftClockOut = null;
+  if (providerId) shiftClockOut = await fetchProviderShiftClockOut(auth, locationId, providerId, localDateStr);
+  return computeCloseShiftGapMinutes({ endOn, locationTz: locCtx.tz, hours: locCtx.hours, shiftClockOut });
+}
+
 async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   const auth = getBoulevardAuthContext();
   if (!auth) return { eligible: false, reason: 'boulevard_not_configured' };
@@ -2586,6 +2730,33 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
       if (result && typeof result === 'object') {
         result.providerContextRecovered = true;
       }
+    }
+  }
+  // Last-of-day recovery: when no next same-provider commitment bounds the gap
+  // (gap_unprovable), bound it by the EARLIEST of the location close and the
+  // provider shift end. Only runs in the gap_unprovable case; when a next
+  // commitment exists it is already the tightest bound (the close and shift end
+  // are at or after it), so this adds no fetches on the common path. Fail-safe:
+  // any hours/shift fetch failure leaves the bound unresolved and the result
+  // stays gap_unprovable, so a data-fetch failure can never turn an unfittable
+  // upgrade eligible.
+  if (result?.reason === 'gap_unprovable' && result.endOn && isFiniteNumber(result.requiredExtraMinutes)) {
+    try {
+      const bounded = await resolveCloseShiftBoundedGap(auth, result);
+      if (bounded) {
+        result.locationCloseMinutes = Number.isFinite(bounded.locationCloseMinutes) ? bounded.locationCloseMinutes : null;
+        result.shiftEndMinutes = Number.isFinite(bounded.shiftEndMinutes) ? bounded.shiftEndMinutes : null;
+        if (bounded.availableGapMinutes != null) {
+          result.availableGapMinutes = bounded.availableGapMinutes;
+          result.gapBoundedBy = bounded.gapBoundedBy;
+          result.gapUnlimited = false;
+          const fits = bounded.availableGapMinutes >= result.requiredExtraMinutes;
+          result.eligible = fits;
+          result.reason = fits ? 'eligible' : 'insufficient_gap';
+        }
+      }
+    } catch (err) {
+      // Conservative: leave gap_unprovable untouched on any failure.
     }
   }
   if (fallbackScanUsed) {
@@ -4139,6 +4310,7 @@ export {
   buildAppointmentWindowQuery,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
+  computeCloseShiftGapMinutes,
   probeCancelRebookCapabilities,
   resolveNameScanFallbackCandidate,
   reverifyAndApplyUpgradeForProfile,
