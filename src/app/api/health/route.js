@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getAnthropicModel, verifyAnthropicModel } from '../../../lib/claude';
-import { probeRedis } from '../../../lib/health-probes';
+import { probeRedis, probeBoulevard, probeTwilio, probeKlaviyo, probeSheets } from '../../../lib/health-probes';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,14 +35,25 @@ export async function GET(request) {
   }
   const isDeep = deep === '1' || deep === 'true';
   let anthropicModelCheck = null;
-  if (isDeep && checks.anthropic) {
-    anthropicModelCheck = await verifyAnthropicModel();
-  }
-
-  // Deep probes (live dependency round-trips). Each returns { ok, configured, error? }.
+  // Deep probes (live dependency round-trips). Each returns { ok, configured,
+  // error? } and never throws. Run them concurrently so deep latency is the
+  // slowest single probe, not the sum.
   const probes = {};
   if (isDeep) {
-    probes.redis = await probeRedis();
+    const [anthropicResult, redis, boulevard, twilio, klaviyo, sheets] = await Promise.all([
+      checks.anthropic ? verifyAnthropicModel() : Promise.resolve(null),
+      probeRedis(),
+      probeBoulevard(),
+      probeTwilio(),
+      probeKlaviyo(),
+      probeSheets(),
+    ]);
+    anthropicModelCheck = anthropicResult;
+    probes.redis = redis;
+    probes.boulevard = boulevard;
+    probes.twilio = twilio;
+    probes.klaviyo = klaviyo;
+    probes.sheets = sheets;
   }
 
   const missing = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);

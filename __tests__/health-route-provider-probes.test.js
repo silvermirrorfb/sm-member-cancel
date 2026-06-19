@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// PR-2 (hardening 2026-06-19): /api/health?deep=1 must probe Redis with a real
-// set/get/del round-trip. Redis runs the sessions, rate limits, the daily
-// registry, and the legal STOP list, but the health endpoint never touched it.
-// A Redis outage must surface as 503 + ok:false for redis, not a silent green.
+// PR-3 (hardening 2026-06-19): /api/health?deep=1 must live-probe Boulevard,
+// Twilio, Klaviyo, and Sheets with a cheap authenticated read, not just confirm
+// the env vars are present (env-presence is how the dead Anthropic model hid).
+// Any provider whose credential does not actually work degrades to 503.
 
 const mockGetAnthropicModel = vi.fn();
 const mockVerifyAnthropicModel = vi.fn();
@@ -39,7 +39,7 @@ function allEnv() {
   };
 }
 
-describe('health route redis deep probe', () => {
+describe('health route provider deep probes', () => {
   beforeEach(() => {
     process.env = allEnv();
     vi.clearAllMocks();
@@ -54,31 +54,47 @@ describe('health route redis deep probe', () => {
   });
   afterEach(() => { process.env = originalEnv; });
 
-  it('does not probe Redis on the default (non-deep) path', async () => {
+  it('does not run any provider probe on the default (non-deep) path', async () => {
     const res = await GET(new Request('https://x/api/health'));
-    const body = await res.json();
     expect(res.status).toBe(200);
-    expect(mockProbeRedis).not.toHaveBeenCalled();
-    expect(body.probes).toBeUndefined();
+    expect(mockProbeBoulevard).not.toHaveBeenCalled();
+    expect(mockProbeTwilio).not.toHaveBeenCalled();
+    expect(mockProbeKlaviyo).not.toHaveBeenCalled();
+    expect(mockProbeSheets).not.toHaveBeenCalled();
   });
 
-  it('?deep=1 runs a Redis round-trip and stays healthy when it passes', async () => {
+  it('?deep=1 runs all four provider probes and stays healthy when they pass', async () => {
     const res = await GET(new Request('https://x/api/health?deep=1'));
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.ok).toBe(true);
-    expect(mockProbeRedis).toHaveBeenCalledTimes(1);
-    expect(body.probes.redis.ok).toBe(true);
+    expect(mockProbeBoulevard).toHaveBeenCalledTimes(1);
+    expect(mockProbeTwilio).toHaveBeenCalledTimes(1);
+    expect(mockProbeKlaviyo).toHaveBeenCalledTimes(1);
+    expect(mockProbeSheets).toHaveBeenCalledTimes(1);
+    expect(body.probes.boulevard.ok).toBe(true);
+    expect(body.probes.twilio.ok).toBe(true);
+    expect(body.probes.klaviyo.ok).toBe(true);
+    expect(body.probes.sheets.ok).toBe(true);
   });
 
-  it('?deep=1 returns 503 + ok:false for redis when the round-trip fails', async () => {
-    mockProbeRedis.mockResolvedValue({ ok: false, configured: true, error: 'ECONNREFUSED' });
-    const res = await GET(new Request('https://x/api/health?deep=1'));
-    const body = await res.json();
-    expect(res.status).toBe(503);
-    expect(body.ok).toBe(false);
-    expect(body.status).toBe('degraded');
-    expect(body.probes.redis.ok).toBe(false);
-    expect(body.probes.redis.error).toBe('ECONNREFUSED');
-  });
+  const providers = [
+    ['boulevard', () => mockProbeBoulevard],
+    ['twilio', () => mockProbeTwilio],
+    ['klaviyo', () => mockProbeKlaviyo],
+    ['sheets', () => mockProbeSheets],
+  ];
+
+  for (const [name, getMock] of providers) {
+    it(`?deep=1 returns 503 + ok:false for ${name} when its credential fails`, async () => {
+      getMock().mockResolvedValue({ ok: false, configured: true, error: 'HTTP 401' });
+      const res = await GET(new Request('https://x/api/health?deep=1'));
+      const body = await res.json();
+      expect(res.status).toBe(503);
+      expect(body.ok).toBe(false);
+      expect(body.status).toBe('degraded');
+      expect(body.probes[name].ok).toBe(false);
+      expect(body.probes[name].error).toBe('HTTP 401');
+    });
+  }
 });

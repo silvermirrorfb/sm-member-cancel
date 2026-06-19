@@ -7,11 +7,19 @@ vi.mock('../src/lib/claude.js', () => ({
   verifyAnthropicModel: (...a) => mockVerifyAnthropicModel(...a),
 }));
 
-// Deep mode now also probes Redis; keep that green here so these tests stay
-// focused on the model check (Redis probing has its own test file).
+// Deep mode now also runs live dependency probes; keep them green here so these
+// tests stay focused on the model check (the probes have their own test files).
 const mockProbeRedis = vi.fn();
+const mockProbeBoulevard = vi.fn();
+const mockProbeTwilio = vi.fn();
+const mockProbeKlaviyo = vi.fn();
+const mockProbeSheets = vi.fn();
 vi.mock('../src/lib/health-probes.js', () => ({
   probeRedis: (...a) => mockProbeRedis(...a),
+  probeBoulevard: (...a) => mockProbeBoulevard(...a),
+  probeTwilio: (...a) => mockProbeTwilio(...a),
+  probeKlaviyo: (...a) => mockProbeKlaviyo(...a),
+  probeSheets: (...a) => mockProbeSheets(...a),
 }));
 
 import { GET } from '../src/app/api/health/route.js';
@@ -32,7 +40,12 @@ describe('health route anthropic model check', () => {
     process.env = allEnv();
     vi.clearAllMocks();
     mockGetAnthropicModel.mockReturnValue('claude-sonnet-4-6');
-    mockProbeRedis.mockResolvedValue({ ok: true, configured: true });
+    const ok = { ok: true, configured: true };
+    mockProbeRedis.mockResolvedValue(ok);
+    mockProbeBoulevard.mockResolvedValue(ok);
+    mockProbeTwilio.mockResolvedValue(ok);
+    mockProbeKlaviyo.mockResolvedValue(ok);
+    mockProbeSheets.mockResolvedValue(ok);
   });
   afterEach(() => { process.env = originalEnv; });
 
