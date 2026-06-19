@@ -22,6 +22,7 @@ import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
 import { buildSmsUpgradePendingReply, isSmsUpgradeLive } from '../../../../lib/sms-upgrade-policy';
 import { getDurationOfferDisplayName } from '../../../../lib/sms-copy';
+import { resolveUpgradePrice } from '../../../../lib/upgrade-pricing';
 
 // Friendly message shown when Claude API is rate-limited
 const RATE_LIMIT_USER_MESSAGE =
@@ -246,17 +247,22 @@ function isSmsDurationOfferAllowed(opportunity) {
 
 function buildUpgradeOfferMessage(opportunity, options = {}) {
     if (!opportunity?.pricing) return null;
+    // Tier-aware delta resolved by the caller (resolveUpgradePrice): member price
+    // for a confirmed 30-min member, the flat walk-in constant otherwise. Fail
+    // closed if the caller could not resolve a positive delta, so we never quote
+    // a guessed price (matches the SMS pre-appointment path).
+    const delta = Number(options.deltaDollars);
+    if (!Number.isFinite(delta) || delta <= 0) return null;
     const channel = String(options.channel || 'web').toLowerCase();
     if (channel === 'sms') {
           if (!isSmsDurationOfferAllowed(opportunity)) return null;
-          const delta = Number(opportunity?.pricing?.walkinDelta || 50);
+          // Same copy as the SMS pre-appointment offer: short enough to survive
+          // the 150-char trimmer with the YES/NO ask intact.
           const firstName = String(options.firstName || '').trim();
           const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
-          return `${greeting} good news - there's room to extend your facial today to 50 minutes for just $${delta} more. Reply YES to upgrade or NO to keep your current booking.`;
+          return `${greeting} good news: we can extend today's facial to 50 minutes for $${delta} more. Want to add it? Reply YES or NO.`;
     }
     const proactive = options.proactive === true;
-    const pricing = opportunity.pricing;
-    const delta = Number(pricing.walkinDelta || 50);
     const serviceName = getDurationOfferDisplayName(opportunity?.targetDurationMinutes);
     const timeText = formatTimeForGuest(opportunity.startOn);
     const opener = proactive
@@ -978,12 +984,22 @@ export async function POST(request) {
       // Explicit upgrade request: run deterministic eligibility check before LLM response.
       if (session.memberProfile && mentionsUpgradeInterest(sanitizedMessage)) {
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
-            if (opportunity?.eligible && (channel !== 'sms' || isSmsDurationOfferAllowed(opportunity))) {
+            // Tier-aware pricing applies to the 30->50 offer (the SMS-path parity
+            // case). resolveUpgradePrice only models 30->50, so other targets
+            // (e.g. web 50->90) keep their walk-in pricing. 30->50 fails closed
+            // when a member's price cannot be resolved.
+            const is3050 = opportunity?.eligible && Number(opportunity.currentDurationMinutes) === 30 && Number(opportunity.targetDurationMinutes) === 50;
+            const upgradePrice = is3050 ? resolveUpgradePrice(session.memberProfile) : null;
+            if (opportunity?.eligible && (channel !== 'sms' || isSmsDurationOfferAllowed(opportunity)) && (!is3050 || upgradePrice)) {
                   if (session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
+                        const offeredDelta = upgradePrice ? upgradePrice.deltaDollars : (Number(opportunity.pricing?.walkinDelta) || null);
+                        const offeredTotal = upgradePrice ? upgradePrice.totalDollars : (Number(opportunity.pricing?.walkinTotal) || null);
+                        const offeredIsMember = upgradePrice ? upgradePrice.isMember === true : (opportunity.isMember === true);
                         const offerMessage = buildUpgradeOfferMessage(opportunity, {
                               proactive: false,
                               channel,
                               firstName: getProfileFirstName(session.memberProfile),
+                              deltaDollars: offeredDelta,
                         });
                         if (offerMessage) {
                               session.pendingUpgradeOffer = {
@@ -991,7 +1007,9 @@ export async function POST(request) {
                                     offerKind: 'duration',
                                     currentDurationMinutes: opportunity.currentDurationMinutes || null,
                                     targetDurationMinutes: opportunity.targetDurationMinutes,
-                                    isMember: opportunity.isMember === true,
+                                    isMember: offeredIsMember,
+                                    deltaDollars: offeredDelta,
+                                    totalDollars: offeredTotal,
                                     pricing: opportunity.pricing || null,
                                     createdAt: new Date().toISOString(),
                                     expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),
@@ -1186,11 +1204,17 @@ export async function POST(request) {
       // Proactive upgrade suggestion on logistics questions (e.g., directions) for identified members.
       if (channel !== 'sms' && smsUpgradeLive && !summary && session.memberProfile && !session.pendingUpgradeOffer && isLogisticsContext(sanitizedMessage)) {
             const opportunity = await evaluateUpgradeOpportunityForProfile(session.memberProfile);
-            if (opportunity?.eligible && session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
+            const is3050 = opportunity?.eligible && Number(opportunity.currentDurationMinutes) === 30 && Number(opportunity.targetDurationMinutes) === 50;
+            const upgradePrice = is3050 ? resolveUpgradePrice(session.memberProfile) : null;
+            if (opportunity?.eligible && (!is3050 || upgradePrice) && session.lastUpgradeOfferAppointmentId !== opportunity.appointmentId) {
+                  const offeredDelta = upgradePrice ? upgradePrice.deltaDollars : (Number(opportunity.pricing?.walkinDelta) || null);
+                  const offeredTotal = upgradePrice ? upgradePrice.totalDollars : (Number(opportunity.pricing?.walkinTotal) || null);
+                  const offeredIsMember = upgradePrice ? upgradePrice.isMember === true : (opportunity.isMember === true);
                   const proactiveOffer = buildUpgradeOfferMessage(opportunity, {
                         proactive: true,
                         channel,
                         firstName: getProfileFirstName(session.memberProfile),
+                        deltaDollars: offeredDelta,
                   });
                   if (proactiveOffer) {
                         session.pendingUpgradeOffer = {
@@ -1198,7 +1222,9 @@ export async function POST(request) {
                               offerKind: 'duration',
                               currentDurationMinutes: opportunity.currentDurationMinutes || null,
                               targetDurationMinutes: opportunity.targetDurationMinutes,
-                              isMember: opportunity.isMember === true,
+                              isMember: offeredIsMember,
+                              deltaDollars: offeredDelta,
+                              totalDollars: offeredTotal,
                               pricing: opportunity.pricing || null,
                               createdAt: new Date().toISOString(),
                               expiresAt: new Date(Date.now() + OFFER_WINDOW_MINUTES * 60 * 1000).toISOString(),

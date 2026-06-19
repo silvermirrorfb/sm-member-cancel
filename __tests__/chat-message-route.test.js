@@ -12,6 +12,7 @@ const mockGetSystemPrompt = vi.fn();
 const mockSendMessage = vi.fn();
 const mockLogChatMessages = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
+const mockResolveUpgradePrice = vi.fn();
 const originalEnv = process.env;
 
 vi.mock('../src/lib/sessions.js', () => ({
@@ -45,6 +46,10 @@ vi.mock('../src/lib/boulevard.js', () => ({
   verifyMemberIdentity: vi.fn(),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
   reverifyAndApplyUpgradeForProfile: vi.fn(),
+}));
+
+vi.mock('../src/lib/upgrade-pricing.js', () => ({
+  resolveUpgradePrice: (...args) => mockResolveUpgradePrice(...args),
 }));
 
 vi.mock('../src/lib/notify.js', () => ({
@@ -108,6 +113,7 @@ describe('chat message route rate-limit headers', () => {
     mockLogChatMessages.mockResolvedValue({ logged: true, count: 3 });
     mockGetSession.mockReturnValue(null);
     mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({ eligible: false, reason: 'none' });
+    mockResolveUpgradePrice.mockReturnValue({ deltaDollars: 50, totalDollars: 169, isMember: false });
   });
 
   afterEach(() => {
@@ -403,5 +409,90 @@ describe('chat message route rate-limit headers', () => {
     expect(body.pendingUpgradeOffer).toBeUndefined();
     expect(session.pendingUpgradeOffer).toBeNull();
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  function upgradeSession(id) {
+    return {
+      id,
+      createdAt: '2026-03-18T00:00:00.000Z',
+      status: 'active',
+      messages: [],
+      memberProfile: { clientId: 'client-1', phone: '+12134401333', tier: '30', accountStatus: 'ACTIVE', firstName: 'Matt' },
+      mode: 'membership',
+      chatTranscriptStarted: false,
+      lastProcessedUserFingerprint: null,
+      lastProcessedUserAt: null,
+      lastAssistantVisibleMessage: null,
+      lastAssistantAt: null,
+      pendingUpgradeOffer: null,
+    };
+  }
+
+  function upgradeRequest(id) {
+    return new Request('http://localhost/api/chat/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: id, message: 'Can I upgrade to 50 minutes?', channel: 'sms' }),
+    });
+  }
+
+  it('quotes the member tier-aware delta and the SMS offer copy for an eligible chat upgrade', async () => {
+    const session = upgradeSession('sess-up-member');
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sid, role, content) => { session.messages.push({ role, content }); return session; });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-1', currentDurationMinutes: 30, targetDurationMinutes: 50,
+      isMember: true, pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockResolveUpgradePrice.mockReturnValue({ deltaDollars: 40, totalDollars: 139, isMember: true });
+
+    const res = await POST(upgradeRequest('sess-up-member'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    // Identical to the SMS pre-appointment offer copy, with the member delta.
+    expect(body.message).toBe("Hi Matt, good news: we can extend today's facial to 50 minutes for $40 more. Want to add it? Reply YES or NO.");
+    expect(body.pendingUpgradeOffer).toBe(true);
+    expect(session.pendingUpgradeOffer.deltaDollars).toBe(40);
+    expect(session.pendingUpgradeOffer.totalDollars).toBe(139);
+    expect(session.pendingUpgradeOffer.isMember).toBe(true);
+  });
+
+  it('quotes the flat non-member delta for an eligible chat upgrade', async () => {
+    const session = upgradeSession('sess-up-nonmember');
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sid, role, content) => { session.messages.push({ role, content }); return session; });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-2', currentDurationMinutes: 30, targetDurationMinutes: 50,
+      isMember: false, pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockResolveUpgradePrice.mockReturnValue({ deltaDollars: 50, totalDollars: 169, isMember: false });
+
+    const res = await POST(upgradeRequest('sess-up-nonmember'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.message).toBe("Hi Matt, good news: we can extend today's facial to 50 minutes for $50 more. Want to add it? Reply YES or NO.");
+    expect(session.pendingUpgradeOffer.deltaDollars).toBe(50);
+    expect(session.pendingUpgradeOffer.isMember).toBe(false);
+  });
+
+  it('does not make a chat upgrade offer when the price cannot be resolved (fail closed)', async () => {
+    const session = upgradeSession('sess-up-unresolved');
+    mockGetSession.mockReturnValue(session);
+    mockAddMessage.mockImplementation((sid, role, content) => { session.messages.push({ role, content }); return session; });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true, appointmentId: 'appt-3', currentDurationMinutes: 30, targetDurationMinutes: 50,
+      isMember: true, pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockResolveUpgradePrice.mockReturnValue(null); // e.g. active member with no resolvable rate
+    mockSendMessage.mockResolvedValue('Happy to help with that.');
+
+    const res = await POST(upgradeRequest('sess-up-unresolved'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.pendingUpgradeOffer).toBeUndefined();
+    expect(session.pendingUpgradeOffer).toBeNull();
   });
 });
