@@ -2423,9 +2423,10 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     return { eligible: false, reason: 'already_at_or_above_target_duration' };
   }
 
-  // V1 SMS spec: 30->50 is eligible when there are at least 15 free minutes
-  // after the current appointment block ends.
-  const requiredExtraMinutes = 15;
+  // 30->50 requires the REAL added service minutes (target minus current), not a
+  // flat 15. A 45-minute room (30 booked + 15 free) does NOT fit a 50-minute
+  // service, which needs 20 more minutes. Computed, never hardcoded.
+  const requiredExtraMinutes = Math.max(0, targetDurationMinutes - currentDurationMinutes);
   const prepBufferMinutes = 0;
   const pricing = computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember);
   if (!pricing) return { eligible: false, reason: 'pricing_unavailable' };
@@ -2463,10 +2464,17 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   const availableGapMinutes = hasFiniteGap
     ? Math.floor((nextStartMs - currentEndMs) / 60000)
     : Number.POSITIVE_INFINITY;
+  // Never offer an extension we cannot prove fits. With no next commitment to
+  // bound against, and no location-hours/shift data wired into eligibility yet,
+  // the remaining room is unprovable, so skip rather than assume infinite room.
+  // (Boulevard does expose Location.hours and a Shift type; bounding the gap by
+  // location close / provider shift end to recover last-of-day offers is a
+  // documented follow-up, not this fix.)
+  const fits = hasFiniteGap && availableGapMinutes >= requiredExtraMinutes;
 
   return {
-    eligible: availableGapMinutes >= requiredExtraMinutes,
-    reason: availableGapMinutes >= requiredExtraMinutes ? 'eligible' : 'insufficient_gap',
+    eligible: fits,
+    reason: fits ? 'eligible' : (hasFiniteGap ? 'insufficient_gap' : 'gap_unprovable'),
     appointmentId: current.id,
     clientId: current.clientId,
     providerId: current.providerId || null,

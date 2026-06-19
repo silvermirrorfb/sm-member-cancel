@@ -200,7 +200,13 @@ describe('evaluateUpgradeEligibilityFromAppointments — cancelled boolean is ho
   });
 
   it('keeps a live (cancelled false) upcoming 30-minute row as eligible', () => {
-    const result = evaluateUpgradeEligibilityFromAppointments([row({ cancelled: false })], profile, { now });
+    // A bounding next commitment (25 min after the block ends) makes the 30->50
+    // gap provably sufficient, so this isolates the cancelled filter (the live
+    // row is not dropped) rather than the gap math.
+    const result = evaluateUpgradeEligibilityFromAppointments([
+      row({ cancelled: false }),
+      row({ id: 'urn:blvd:Appointment:next', clientId: 'other', startOn: '2026-05-04T10:55:00-04:00', endOn: '2026-05-04T11:25:00-04:00' }),
+    ], profile, { now });
     expect(result.eligible).toBe(true);
   });
 });

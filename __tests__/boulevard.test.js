@@ -498,7 +498,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.eligible).toBe(true);
     expect(result.currentDurationMinutes).toBe(30);
     expect(result.targetDurationMinutes).toBe(50);
-    expect(result.requiredExtraMinutes).toBe(15);
+    expect(result.requiredExtraMinutes).toBe(20);
     expect(result.availableGapMinutes).toBe(40);
     expect(result.pricing.memberDelta).toBe(40);
   });
@@ -531,7 +531,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.eligible).toBe(true);
     expect(result.currentDurationMinutes).toBe(30);
     expect(result.targetDurationMinutes).toBe(50);
-    expect(result.requiredExtraMinutes).toBe(15);
+    expect(result.requiredExtraMinutes).toBe(20);
   });
 
   it('infers 30-minute service for guests when raw appointment length is 30 + transition', () => {
@@ -726,7 +726,7 @@ describe('upgrade eligibility engine', () => {
 
     expect(result.eligible).toBe(true);
     expect(result.availableGapMinutes).toBe(35);
-    expect(result.requiredExtraMinutes).toBe(15);
+    expect(result.requiredExtraMinutes).toBe(20);
   });
 
   it('treats less than 15 minutes after appointment end as ineligible for 30->50', () => {
@@ -1209,6 +1209,18 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                       providerId: 'prov-1',
                       startOn: '2026-03-08T10:00:00.000Z',
                       endOn: '2026-03-08T10:30:00.000Z',
+                      status: 'BOOKED',
+                      canceledAt: null,
+                    },
+                  },
+                  {
+                    // Bounding next commitment so the 30->50 gap (needs 20) is provable.
+                    node: {
+                      id: 'appt-next',
+                      clientId: 'other',
+                      providerId: 'prov-1',
+                      startOn: '2026-03-08T10:55:00.000Z',
+                      endOn: '2026-03-08T11:25:00.000Z',
                       status: 'BOOKED',
                       canceledAt: null,
                     },
@@ -2479,6 +2491,19 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
               locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
               startAt: '2026-03-08T10:00:00.000Z',
               endAt: '2026-03-08T10:30:00.000Z',
+              state: 'BOOKED',
+            },
+          },
+          {
+            // Bounding next commitment for the same provider, 25 min after the
+            // 30-min block ends, so the 30->50 gap (needs 20) is provably enough.
+            node: {
+              id: 'appt-next',
+              clientId: 'other',
+              providerId: 'prov-1',
+              locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
+              startAt: '2026-03-08T10:55:00.000Z',
+              endAt: '2026-03-08T11:25:00.000Z',
               state: 'BOOKED',
             },
           },
