@@ -27,6 +27,7 @@ import {
   getClientById,
   lookupMember,
   reverifyAndApplyUpgradeForProfile,
+  summarizeBoulevardApplyError,
 } from '../../../../../lib/boulevard';
 import { lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
 import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
@@ -284,6 +285,11 @@ function toIncidentSummary({ from, incomingText, pendingOffer, opportunity, upgr
   const currentDuration = Number(pendingOffer?.currentDurationMinutes || opportunity?.currentDurationMinutes || 0) || null;
   const targetDuration = Number(pendingOffer?.targetDurationMinutes || opportunity?.targetDurationMinutes || 0) || null;
   const reason = String(upgradeResult?.reason || '').trim() || 'manual_confirmation_required';
+  // PR-1 (hardening 2026-06-19): carry the actual Boulevard rejection text into
+  // the incident so the team sees WHY the apply failed, not just a reason code.
+  const boulevardError = upgradeResult?.error
+    ? summarizeBoulevardApplyError(upgradeResult.error)
+    : null;
   const parts = [
     `Inbound SMS YES from ${String(from || '').trim() || 'unknown'}.`,
     `reason=${reason}`,
@@ -291,6 +297,7 @@ function toIncidentSummary({ from, incomingText, pendingOffer, opportunity, upgr
     appointmentId ? `appointmentId=${appointmentId}` : null,
     addOnName ? `addOn=${addOnName}` : null,
     currentDuration && targetDuration ? `duration=${currentDuration}->${targetDuration}` : null,
+    boulevardError ? `boulevardError=${boulevardError}` : null,
     incomingText ? `message="${incomingText}"` : null,
   ].filter(Boolean);
   return parts.join(' | ');
