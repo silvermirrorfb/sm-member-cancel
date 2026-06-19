@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
   computeCloseShiftGapMinutes,
+  zonedWallClockToUtcMs,
   evaluateUpgradeOpportunityForProfile,
   __resetBoulevardCachesForTests,
 } from '../src/lib/boulevard.js';
@@ -77,6 +78,26 @@ describe('computeCloseShiftGapMinutes (pure tz-aware gap bounding)', () => {
   it('no hours and no shift -> nothing resolves (caller treats as gap_unprovable)', () => {
     const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: null, shiftClockOut: null });
     expect(g.availableGapMinutes).toBeNull();
+  });
+});
+
+describe('zonedWallClockToUtcMs DST correctness', () => {
+  it('DST-neutral evening: 9:00 PM ET resolves to the correct UTC instant', () => {
+    expect(zonedWallClockToUtcMs(2026, 6, 19, 21, 0, 'America/New_York')).toBe(Date.parse('2026-06-20T01:00:00Z'));
+  });
+
+  it('spring-forward day: 3:30 AM resolves to 07:30Z (not 08:30Z), two-pass offset fix', () => {
+    // 2026-03-08 is US spring-forward; 03:30 exists as EDT (-04:00) -> 07:30 UTC.
+    // A naive one-pass offset correction would return 08:30Z (an hour late).
+    expect(zonedWallClockToUtcMs(2026, 3, 8, 3, 30, 'America/New_York')).toBe(Date.parse('2026-03-08T07:30:00Z'));
+  });
+
+  it('evening on/after the spring-forward day: 8:30 PM end to 9:00 PM close is still exactly 30 minutes', () => {
+    // Monday after spring-forward, stable EDT; guards against an off-by-hour close bound.
+    const g = computeCloseShiftGapMinutes({ endOn: '2026-03-09T20:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: '21:00:00' });
+    expect(g.locationCloseMinutes).toBe(30);
+    expect(g.shiftEndMinutes).toBe(30);
+    expect(g.availableGapMinutes).toBe(30);
   });
 });
 

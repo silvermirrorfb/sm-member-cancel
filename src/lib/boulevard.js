@@ -2513,23 +2513,36 @@ function bareBoulevardId(value) {
   return idx >= 0 ? s.slice(idx + 1) : s;
 }
 
-// Convert a wall-clock time (year, month, day, hour, minute) in `timeZone` to a
-// UTC epoch ms. Offset-correction: format a UTC guess back into the tz to learn
-// the tz offset at that instant, then subtract it. DST-correct (evening close
-// times are never in the ambiguous spring-forward transition hour).
-function zonedWallClockToUtcMs(year, month, day, hour, minute, timeZone) {
-  if (!timeZone) return NaN;
-  const guess = Date.UTC(year, month - 1, day, hour, minute, 0);
-  if (!Number.isFinite(guess)) return NaN;
+// The tz offset (ms) that `timeZone` is at the instant `ms`, via round-tripping
+// the formatted wall-clock back through Date.UTC.
+function tzOffsetMsAt(ms, timeZone) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).formatToParts(new Date(guess)).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  }).formatToParts(new Date(ms)).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
   let hh = Number(parts.hour);
   if (hh === 24) hh = 0; // some ICU builds render midnight as 24
   const asTzMs = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), hh, Number(parts.minute), Number(parts.second));
   if (!Number.isFinite(asTzMs)) return NaN;
-  return guess - (asTzMs - guess);
+  return asTzMs - ms;
+}
+
+// Convert a wall-clock time (year, month, day, hour, minute) in `timeZone` to a
+// UTC epoch ms. Two-pass offset correction: take the offset at the UTC guess,
+// then re-evaluate the offset at the corrected instant. The second pass fixes
+// wall times that land in a DST spring-forward hour, where the first-pass offset
+// (read off the pre-jump UTC guess) would otherwise be an hour stale. Evening
+// close/shift times never fall in that hour, but the two-pass form is correct
+// for all inputs.
+function zonedWallClockToUtcMs(year, month, day, hour, minute, timeZone) {
+  if (!timeZone) return NaN;
+  const guess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  if (!Number.isFinite(guess)) return NaN;
+  const off1 = tzOffsetMsAt(guess, timeZone);
+  if (!Number.isFinite(off1)) return NaN;
+  const off2 = tzOffsetMsAt(guess - off1, timeZone);
+  if (!Number.isFinite(off2)) return NaN;
+  return guess - off2;
 }
 
 // Calendar date of `dateMs` in `timeZone`, so an 8:30 PM ET booking that is past
@@ -4311,6 +4324,7 @@ export {
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
   computeCloseShiftGapMinutes,
+  zonedWallClockToUtcMs,
   probeCancelRebookCapabilities,
   resolveNameScanFallbackCandidate,
   reverifyAndApplyUpgradeForProfile,
