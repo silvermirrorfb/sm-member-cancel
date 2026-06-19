@@ -92,3 +92,40 @@ export async function getDailyCandidateCount(dateStr) {
     return 0;
   }
 }
+
+const UPGRADE_APPLY_FAILED_KEY_PREFIX = 'sms-upgrade-apply-failed:';
+
+// Bump the counter for Boulevard upgrade-apply rejections "today" (metrics
+// timezone). The apply path was previously silent on a Boulevard rejection; this
+// makes a run of rejections countable in Redis (read it back with
+// getUpgradeApplyFailureCount) instead of disappearing. No-op (returns false)
+// when Redis is not configured. Never throws: surfacing a failure must not
+// itself become a failure.
+export async function incrementUpgradeApplyFailureCount(when = new Date()) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const key = `${UPGRADE_APPLY_FAILED_KEY_PREFIX}${localDateStr(when)}`;
+  try {
+    const n = await redis.incr(key);
+    if (n === 1) await redis.expire(key, SENT_TTL_SECONDS);
+    return true;
+  } catch (err) {
+    console.warn('[sms-metrics] upgrade-apply-failure incr failed:', err?.message || err);
+    return false;
+  }
+}
+
+// Returns the recorded upgrade-apply rejection count for a given YYYY-MM-DD, or 0
+// if unknown / not configured.
+export async function getUpgradeApplyFailureCount(dateStr) {
+  const redis = getRedis();
+  if (!redis) return 0;
+  try {
+    const v = await redis.get(`${UPGRADE_APPLY_FAILED_KEY_PREFIX}${dateStr}`);
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  } catch (err) {
+    console.warn('[sms-metrics] upgrade-apply-failure get failed:', err?.message || err);
+    return 0;
+  }
+}

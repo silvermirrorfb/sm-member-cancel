@@ -55,11 +55,17 @@ vi.mock('../src/app/api/chat/message/route.js', () => ({
   POST: (...args) => mockPostChatMessage(...args),
 }));
 
-vi.mock('../src/lib/boulevard.js', () => ({
-  lookupMember: (...args) => mockLookupMember(...args),
-  evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
-  reverifyAndApplyUpgradeForProfile: (...args) => mockReverifyAndApplyUpgradeForProfile(...args),
-}));
+vi.mock('../src/lib/boulevard.js', async () => {
+  // Keep the real error formatter so the incident-text assertion exercises the
+  // production summarizer, while the network-touching apply fns stay mocked.
+  const actual = await vi.importActual('../src/lib/boulevard.js');
+  return {
+    lookupMember: (...args) => mockLookupMember(...args),
+    evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
+    reverifyAndApplyUpgradeForProfile: (...args) => mockReverifyAndApplyUpgradeForProfile(...args),
+    summarizeBoulevardApplyError: actual.summarizeBoulevardApplyError,
+  };
+});
 
 vi.mock('../src/lib/notify.js', () => ({
   logSupportIncident: (...args) => mockLogSupportIncident(...args),
@@ -979,6 +985,64 @@ describe('twilio webhook route', () => {
       phone: '+12134401333',
       location: 'Penn Quarter',
     });
+  });
+
+  it('writes the Boulevard rejection text into the support incident (PR-1 de-silence)', async () => {
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        currentDurationMinutes: 30,
+        targetDurationMinutes: 50,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({
+      clientId: 'client-1',
+      fullName: 'Matt Maroone',
+      email: 'mattmaroone@gmail.com',
+      phone: '+12134401333',
+      location: 'Penn Quarter',
+      tier: '30',
+      accountStatus: 'ACTIVE',
+    });
+    mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+      eligible: true,
+      appointmentId: 'appt-1',
+      currentDurationMinutes: 30,
+      targetDurationMinutes: 50,
+      pricing: { walkinDelta: 50, walkinTotal: 169 },
+    });
+    mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({
+      success: false,
+      reason: 'duration_booking_create_failed',
+      error: { stage: 'graphql', errors: [{ message: 'Service is not bookable' }] },
+    });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    await res.text();
+    await flushDeferred();
+
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    const incident = mockLogSupportIncident.mock.calls[0][0];
+    expect(incident.reason).toBe('duration_booking_create_failed');
+    // The actual Boulevard text rides into the incident so the team sees WHY.
+    expect(incident.user_message).toContain('Service is not bookable');
+    expect(incident.user_message).toContain('boulevardError=');
   });
 
   it('returns approved manual-finalization copy when reverify says slot is no longer available', async () => {

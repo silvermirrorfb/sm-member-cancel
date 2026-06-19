@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { incrementUpgradeApplyFailureCount } from './sms-metrics.js';
 
 // Boulevard Enterprise API Client
 // SETUP: Set env vars: BOULEVARD_API_URL, BOULEVARD_API_KEY, BOULEVARD_API_SECRET, BOULEVARD_BUSINESS_ID
@@ -2617,21 +2618,30 @@ async function tryApplyAppointmentUpgradeMutation(apiUrl, headers, appointmentId
     },
   ];
 
+  // De-silenced (PR-1, hardening 2026-06-19): returnErrors so a Boulevard
+  // rejection of the mutation is captured and surfaced instead of swallowed.
+  // fetchBoulevardGraphQL also logs the GraphQL error at error level now that
+  // silentErrors is gone. Mutation candidates and success detection are unchanged.
+  let lastError = null;
   for (const candidate of mutationCandidates) {
     const data = await fetchBoulevardGraphQL(
       apiUrl,
       headers,
       candidate.query,
       { appointmentId, serviceId },
-      { silentErrors: true },
+      { returnErrors: true },
     );
+    if (data?.__error) {
+      lastError = data.__error;
+      continue;
+    }
     if (!data) continue;
     const node = data?.data?.[candidate.root];
     const updatedId = node?.appointment?.id || node?.id || null;
     if (updatedId) return { applied: true, mutationRoot: candidate.root, updatedId: String(updatedId) };
   }
 
-  return { applied: false, reason: 'upgrade_mutation_failed' };
+  return { applied: false, reason: 'upgrade_mutation_failed', error: lastError };
 }
 
 // Read-back guard: the upgrade mutation only echoes back appointment { id },
@@ -2905,13 +2915,66 @@ function hasBlockingBookingWarnings(warnings = []) {
   return warnings.some(warning => blockingCodes.has(String(warning?.code || '').trim().toUpperCase()));
 }
 
+// Formats a Boulevard __error object (the shape returned by fetchBoulevardGraphQL
+// with returnErrors) into a compact one-line string. Used to surface an apply
+// rejection with its actual Boulevard text instead of a bare reason code. The
+// text is Boulevard's own validation/operation message plus an HTTP body preview
+// (already truncated to 500 chars); it lands only in the error log and the
+// internal support incident, which is already scoped to this one member.
+function summarizeBoulevardApplyError(error) {
+  if (!error) return 'unknown_error';
+  const stage = String(error.stage || 'error');
+  if (Array.isArray(error.errors) && error.errors.length) {
+    const msgs = error.errors
+      .map(e => String(e?.message || e?.code || '').trim())
+      .filter(Boolean)
+      .join('; ');
+    return `${stage}: ${msgs || 'graphql_error'}`;
+  }
+  if (error.status || error.bodyPreview) {
+    return `${stage} ${error.status || ''}: ${String(error.bodyPreview || '').trim()}`.trim();
+  }
+  if (error.message) return `${stage}: ${String(error.message).trim()}`;
+  if (error.diagnostics) {
+    let detail = error.diagnostics;
+    try { detail = typeof detail === 'string' ? detail : JSON.stringify(detail); } catch { detail = String(detail); }
+    return `${stage}: ${detail}`;
+  }
+  return stage;
+}
+
+// Surfaces a Boulevard apply rejection loudly: an error-level log carrying the
+// Boulevard text and a daily failure counter. Only fires when Boulevard actually
+// gave feedback (an error or a blocking warning), so pre-flight gating failures
+// that never reached Boulevard are not counted as rejections. Never throws.
+async function recordUpgradeApplyRejection(pathLabel, appointmentId, error, warnings) {
+  const blockingWarnings = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+  if (!error && blockingWarnings.length === 0) return;
+  let detail;
+  if (error) {
+    detail = summarizeBoulevardApplyError(error);
+  } else {
+    try { detail = `warning: ${JSON.stringify(blockingWarnings)}`; } catch { detail = 'warning'; }
+  }
+  console.error(`[upgrade-apply] Boulevard rejected ${pathLabel} apply for appointment ${appointmentId || 'unknown'}: ${detail}`);
+  try {
+    await incrementUpgradeApplyFailureCount();
+  } catch (err) {
+    console.warn('[upgrade-apply] failure counter increment failed:', err?.message || err);
+  }
+}
+
 async function runMutationRoot(apiUrl, headers, query, variables, root) {
+  // De-silenced (PR-1, hardening 2026-06-19): drop silentErrors so a Boulevard
+  // rejection of a booking-edit mutation is logged at error level by
+  // fetchBoulevardGraphQL. returnErrors is kept so the error object still flows
+  // back to the caller. Return shape is unchanged.
   const data = await fetchBoulevardGraphQL(
     apiUrl,
     headers,
     query,
     variables,
-    { silentErrors: true, returnErrors: true },
+    { returnErrors: true },
   );
   if (data?.__error) return { ok: false, error: data.__error, payload: null };
   const payload = data?.data?.[root] || null;
@@ -3517,6 +3580,7 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
       { quotedTotalDollars: Number(pendingOffer?.totalDollars) || null },
     );
     if (!bookingApplied.applied) {
+      await recordUpgradeApplyRejection('booking', fresh.appointmentId, bookingApplied.error, bookingApplied.warnings);
       return {
         success: false,
         reason: bookingApplied.reason || 'upgrade_booking_failed',
@@ -3556,11 +3620,13 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
 
   const applied = await tryApplyAppointmentUpgradeMutation(auth.apiUrl, auth.headers, fresh.appointmentId, serviceId);
   if (!applied.applied) {
+    await recordUpgradeApplyRejection('legacy', fresh.appointmentId, applied.error, null);
     return {
       success: false,
       reason: applied.reason || 'upgrade_mutation_failed',
       reverified: true,
       opportunity: fresh,
+      error: applied.error || null,
     };
   }
 
@@ -4076,6 +4142,7 @@ export {
   probeCancelRebookCapabilities,
   resolveNameScanFallbackCandidate,
   reverifyAndApplyUpgradeForProfile,
+  summarizeBoulevardApplyError,
   verifyMemberIdentity,
   levenshtein,
   buildProfile,
