@@ -447,15 +447,15 @@ async function runDeferredIntentWork({
   }
 
   // Resolve the member (Boulevard). Background, so no Twilio deadline pressure.
+  // Do NOT persist the resolved profile back to the session here: this deferred
+  // task holds a session object captured at request time, and a concurrent
+  // inbound can write newer state (counters, handoff, pending offer) before this
+  // background scan resolves. Saving the captured object would clobber it
+  // (Codex P2). The resolved profile is used in-run below for the apply; caching
+  // it on the session is a non-essential optimization not worth the stale write.
   let profile = activeSession?.memberProfile || null;
   if (!profile) {
-    // Deferred: no Twilio deadline pressure, so allow the slow scan to finish.
     profile = await lookupProfileWithDeadline(from, lookupMember, DEFERRED_SCAN_DEADLINE_MS);
-    if (activeSession && profile) {
-      activeSession.memberId = profile.clientId || null;
-      activeSession.memberProfile = profile;
-      await saveSession(activeSession);
-    }
   }
   if (!profile) {
     await queueSupportIncident(buildUpgradeSupportIncident({
