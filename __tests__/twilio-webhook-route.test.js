@@ -70,6 +70,13 @@ vi.mock('../src/lib/notify.js', () => ({
 
 import { POST } from '../src/app/api/sms/twilio/webhook/route.js';
 
+// PR-B: the YES/NO reply returns deterministic TwiML immediately and runs the
+// Boulevard apply, incident, Sheets logging, and pending-offer clear in
+// deferWork() (next/server after(), or a detached promise outside a request
+// scope). Flush that detached work before asserting its side effects. A short
+// macrotask drains the deferred promise chain (mocks resolve synchronously).
+const flushDeferred = () => new Promise(resolve => setTimeout(resolve, 10));
+
 describe('twilio webhook route', () => {
   beforeEach(() => {
     process.env = {
@@ -130,6 +137,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('continue in our web chat');
@@ -164,6 +172,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('upgrade-by-text feature is still pending');
@@ -210,6 +219,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('Handled in chat');
@@ -248,9 +258,13 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain("You're all set. See you soon.");
+    // PR-B: the immediate reply is the deterministic manual-confirm; an apply
+    // success is conveyed by a follow-up SMS once the booking-edit apply is on.
+    expect(text).toContain('team will confirm');
+    expect(text).not.toContain("You're all set");
     expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalled();
     expect(mockLogSupportIncident).not.toHaveBeenCalled();
@@ -289,9 +303,13 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain("You're all set. See you soon.");
+    // PR-B: the immediate reply is the deterministic manual-confirm; an apply
+    // success is conveyed by a follow-up SMS once the booking-edit apply is on.
+    expect(text).toContain('team will confirm');
+    expect(text).not.toContain("You're all set");
     expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
     expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
       issue_type: 'sms_upgrade_manual_followup',
@@ -351,6 +369,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('Our team will confirm before your appointment.');
@@ -393,9 +412,13 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain("You're all set. See you soon.");
+    // PR-B: the immediate reply is the deterministic manual-confirm; an apply
+    // success is conveyed by a follow-up SMS once the booking-edit apply is on.
+    expect(text).toContain('team will confirm');
+    expect(text).not.toContain("You're all set");
     const outboundCalls = mockLogSmsChatMessages.mock.calls
       .flatMap(call => call[0])
       .filter(row => row && row.direction === 'outbound');
@@ -404,7 +427,7 @@ describe('twilio webhook route', () => {
       direction: 'outbound',
       outcome: 'upgrade_confirmed',
     });
-    expect(outboundCalls[0].content).toContain("You're all set");
+    expect(outboundCalls[0].content).toContain('team will confirm');
   });
 
   it('does not claim success and queues follow-up when the upgrade cannot be verified', async () => {
@@ -446,6 +469,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).not.toContain("You're all set");
@@ -500,6 +524,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('Our team will confirm before your appointment.');
@@ -537,9 +562,13 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain("You're all set. See you soon.");
+    // PR-B: the immediate reply is the deterministic manual-confirm; an apply
+    // success is conveyed by a follow-up SMS once the booking-edit apply is on.
+    expect(text).toContain('team will confirm');
+    expect(text).not.toContain("You're all set");
     const outboundCalls = mockLogSmsChatMessages.mock.calls
       .flatMap(call => call[0])
       .filter(row => row && row.direction === 'outbound');
@@ -577,6 +606,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('our team will confirm');
@@ -614,12 +644,20 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('Handled in chat');
-    expect(mockPostChatMessage).toHaveBeenCalledTimes(1);
+    // PR-B: YES never routes to the chat route. A 90-minute-only opportunity is
+    // out of SMS policy, so the immediate reply is the deterministic manual
+    // confirm and a support incident is queued in the deferred work.
+    expect(text).toContain('team will confirm');
+    expect(mockPostChatMessage).not.toHaveBeenCalled();
     expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
-    expect(mockLogSupportIncident).not.toHaveBeenCalled();
+    expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+      issue_type: 'sms_upgrade_manual_followup',
+      reason: 'duration_offer_not_allowed',
+    });
   });
 
   it('returns human-finalization copy when upgrade mutation is disabled', async () => {
@@ -651,6 +689,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('confirm it before your appointment');
@@ -691,6 +730,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('an Antioxidant Peel is $95 (members get 20% off).');
@@ -747,9 +787,13 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain("You're all set. See you soon.");
+    // PR-B: the immediate reply is the deterministic manual-confirm; an apply
+    // success is conveyed by a follow-up SMS once the booking-edit apply is on.
+    expect(text).toContain('team will confirm');
+    expect(text).not.toContain("You're all set");
     expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalledWith(
       session.memberProfile,
       expect.objectContaining({
@@ -796,6 +840,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('an Antioxidant Peel is $50');
@@ -837,6 +882,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('The add-on is $95');
@@ -857,6 +903,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('Thanks for replying YES. We received your request');
@@ -916,6 +963,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('Our team will confirm before your appointment.');
@@ -980,6 +1028,7 @@ describe('twilio webhook route', () => {
 
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('Our team will confirm before your appointment.');
@@ -1018,6 +1067,7 @@ describe('twilio webhook route', () => {
     });
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(res.status).toBe(200);
     expect(text).toContain('for $40 more');
@@ -1049,6 +1099,7 @@ describe('twilio webhook route', () => {
     });
     const res = await POST(req);
     const text = await res.text();
+    await flushDeferred();
 
     expect(text).toContain('for $50 more');
   });
@@ -1082,5 +1133,84 @@ describe('twilio webhook route', () => {
         expect(text).toContain(`for $${c.deltaDollars} more`);
       });
     }
+  });
+
+  it('returns the YES reply without awaiting the Boulevard apply (never-resolving reverify)', async () => {
+    const session = {
+      id: 'sess-1', status: 'active', smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration', appointmentId: 'appt-1', currentDurationMinutes: 30, targetDurationMinutes: 50,
+        deltaDollars: 50, totalDollars: 169, pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({ clientId: 'client-1', phone: '+12134401333', tier: '30', accountStatus: 'ACTIVE' });
+    // The Boulevard apply never settles. If the reply path awaited it, POST would hang.
+    mockReverifyAndApplyUpgradeForProfile.mockReturnValue(new Promise(() => {}));
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST', headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-instant-yes',
+    });
+    const res = await POST(req);
+    const text = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('team will confirm');
+  });
+
+  it('a thrown deferred task does not affect the already-sent YES reply', async () => {
+    const session = {
+      id: 'sess-1', status: 'active', smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration', appointmentId: 'appt-1', currentDurationMinutes: 30, targetDurationMinutes: 50,
+        deltaDollars: 50, totalDollars: 169, pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockLookupMember.mockResolvedValue({ clientId: 'client-1', phone: '+12134401333', tier: '30', accountStatus: 'ACTIVE' });
+    mockReverifyAndApplyUpgradeForProfile.mockRejectedValue(new Error('boulevard exploded'));
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST', headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-throw-bg',
+    });
+    const res = await POST(req);
+    const text = await res.text();
+    await flushDeferred();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('team will confirm');
+  });
+
+  it('returns the NO decline immediately without calling Boulevard', async () => {
+    const session = {
+      id: 'sess-1', status: 'active', smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'duration', appointmentId: 'appt-1', currentDurationMinutes: 30, targetDurationMinutes: 50,
+        deltaDollars: 50, totalDollars: 169, pricing: { walkinDelta: 50, walkinTotal: 169 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+    mockParseTwilioFormBody.mockReturnValue({ From: '+12134401333', Body: 'No', MessageSid: 'SM-no-1' });
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST', headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=No&MessageSid=SM-no-1',
+    });
+    const res = await POST(req);
+    const text = await res.text();
+    await flushDeferred();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('keep your appointment as-is');
+    expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    expect(session.pendingUpgradeOffer).toBeNull();
   });
 });

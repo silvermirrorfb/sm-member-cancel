@@ -102,6 +102,11 @@ function activeSessionNoProfile() {
   };
 }
 
+// PR-B: the member lookup (phone-index getClientById / lookupMember fallback)
+// now runs in the webhook's deferred work, not on the reply path. Flush it
+// before asserting which lookup fired.
+const flushDeferred = () => new Promise(resolve => setTimeout(resolve, 10));
+
 describe('twilio webhook phone-index lookup fallback', () => {
   beforeEach(() => {
     process.env = {
@@ -144,6 +149,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
     // path is a genuine hit and must short-circuit without a scan.
     mockGetClientById.mockResolvedValue({ clientId: 'urn:blvd:Client:abc', firstName: 'Test', lastName: 'Member', phone: '+12025551234' });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:abc');
     expect(mockLookupMember).not.toHaveBeenCalled();
@@ -153,6 +159,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
     mockLookupClientIdByPhoneFromIndex.mockResolvedValue(null);
     mockLookupMember.mockResolvedValue({ clientId: 'urn:blvd:Client:fast', firstName: 'Fast', lastName: 'Path' });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
     expect(mockGetClientById).not.toHaveBeenCalled();
@@ -163,6 +170,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
     mockGetClientById.mockResolvedValue(null);
     mockLookupMember.mockResolvedValue({ clientId: 'urn:blvd:Client:resolved' });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:stale');
     expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
@@ -185,6 +193,7 @@ describe('twilio webhook phone-index lookup fallback', () => {
       phone: '+12025551234',
     });
     const res = await POST(makeFormRequest());
+    await flushDeferred();
     expect(res.status).toBe(200);
     expect(mockGetClientById).toHaveBeenCalledWith('urn:blvd:Client:wrongnum');
     // A stale index must NOT short-circuit; the webhook must verify the phone
@@ -192,22 +201,20 @@ describe('twilio webhook phone-index lookup fallback', () => {
     expect(mockLookupMember).toHaveBeenCalledWith('', '+12025551234');
   });
 
-  it('registry miss + scan exceeds 12s deadline: returns 200 with manual-confirm TwiML in <13s', async () => {
+  it('returns the manual-confirm reply instantly without waiting for the slow scan', async () => {
+    // PR-B: the member lookup (and its scan) run in deferred work, not on the
+    // reply path. Even if the scan never resolves, the reply returns at once.
+    // Fake timers keep the deferred 45s scan deadline from leaking a real timer.
     vi.useFakeTimers();
     mockLookupClientIdByPhoneFromIndex.mockResolvedValue(null);
-    mockLookupMember.mockReturnValue(new Promise(() => {})); // never resolves
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockLookupMember.mockReturnValue(new Promise(() => {})); // scan never resolves
 
-    const postPromise = POST(makeFormRequest());
-    // Advance past the 12s scan deadline (PHONE_SCAN_DEADLINE_MS).
-    await vi.advanceTimersByTimeAsync(12_500);
-    const res = await postPromise;
+    // No timer advancement: if the reply awaited the scan, this would hang.
+    const res = await POST(makeFormRequest());
 
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).toContain('our team will confirm'); // YES_NO_PENDING_MANUAL_REPLY substring
-    const errMessages = consoleErrorSpy.mock.calls.flat().join(' ');
-    expect(errMessages).toContain('phone-scan timeout');
-    consoleErrorSpy.mockRestore();
+    vi.useRealTimers();
   });
 });

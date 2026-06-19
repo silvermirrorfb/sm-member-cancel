@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import {
   createSession,
   getAllActiveSessions,
@@ -32,13 +32,23 @@ import { lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../..
 import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
+// The reply returns in milliseconds, but deferWork() (after()) keeps the
+// function alive for the background apply, which may run a slow Boulevard scan
+// plus the booking-edit apply. Give it headroom well beyond the deferred scan
+// deadline so successful background applies are never cut short.
+export const maxDuration = 60;
+
 // Cap on the slow O(N) phone-scan fallback. Twilio's webhook timeout is
 // 15 seconds; we reserve 3s for the rest of the handler. On deadline we
 // log at error level and return null, letting the existing no-profile
 // path (lines ~634-661) reply 200 with the manual-confirm TwiML.
 const PHONE_SCAN_DEADLINE_MS = 12_000;
+// In deferred (post-reply) work the Twilio 15s budget no longer applies, so a
+// slow-but-successful Boulevard phone scan must not be cut at 12s and dropped to
+// manual. Bounded only so a runaway scan cannot outlive the function.
+const DEFERRED_SCAN_DEADLINE_MS = Number(process.env.SMS_DEFERRED_SCAN_DEADLINE_MS || 45_000);
 
-async function lookupProfileWithDeadline(from, scanFn) {
+async function lookupProfileWithDeadline(from, scanFn, deadlineMs = PHONE_SCAN_DEADLINE_MS) {
   // O(1) Redis lookup first — avoids the 15-50s Boulevard phone-scan that
   // historically caused Twilio ERR:11200 on cold-cache inbound replies.
   try {
@@ -64,11 +74,11 @@ async function lookupProfileWithDeadline(from, scanFn) {
     console.warn('[sms-webhook] phone-index lookup error:', err?.message || err);
   }
   // Fallback: race the slow O(N) scan against a 12s deadline.
-  console.log('[sms-webhook] phone-index miss, attempting fallback scan with 12s deadline');
+  console.log(`[sms-webhook] phone-index miss, attempting fallback scan with ${Math.round(deadlineMs / 1000)}s deadline`);
   const t0 = Date.now();
   let timeoutHandle = null;
   const deadline = new Promise(resolve => {
-    timeoutHandle = setTimeout(() => resolve('__deadline__'), PHONE_SCAN_DEADLINE_MS);
+    timeoutHandle = setTimeout(() => resolve('__deadline__'), deadlineMs);
   });
   const scanPromise = Promise.resolve()
     .then(() => scanFn('', from))
@@ -104,6 +114,26 @@ const ALLOWED_ADDON_NAME_SET = new Set([
 
 function buildSmsWebHandoffReply() {
   return `Let's continue in our web chat here: ${SMS_WEB_APP_URL}`;
+}
+
+// Run slow post-reply work without blocking the member-facing reply. Twilio
+// discards a webhook reply that takes longer than ~15s, so the YES/NO path must
+// return TwiML immediately and push Sheets logging, Boulevard apply, incident
+// email, and session writes here. The work STARTS now (concurrent with sending
+// the reply) and after() keeps the serverless function alive on Vercel until it
+// settles. Outside a request scope (unit tests, non-Vercel) after() throws, so
+// the detached promise is the fallback; a thrown task is swallowed so it can
+// never affect the reply that already went out.
+function deferWork(fn) {
+  const run = Promise.resolve()
+    .then(fn)
+    .catch(err => console.error('[sms-webhook] deferred work failed:', err?.message || err));
+  try {
+    after(() => run);
+  } catch {
+    // No request scope available (tests / non-Vercel runtime): the detached
+    // `run` above still executes; nothing else to do.
+  }
 }
 
 function isAffirmative(text) {
@@ -205,15 +235,20 @@ function shouldQueueUpgradeFollowupIncident(upgradeResult) {
 }
 
 function queueSupportIncident(incident) {
-  logSupportIncident(incident).catch(err => {
-    console.error('SMS support incident logging failed:', err);
-  });
-  // Also email a human: a sheet row alone left three YES members unworked. Deduped
-  // per member+appointment inside notify. Fire-and-forget like the sheet log so it
-  // can never delay or break the member-facing reply.
-  notifyUpgradeIncidentOnce(incident).catch(err => {
-    console.error('SMS upgrade incident email failed:', err);
-  });
+  // Returns a settled-when-done promise so deferred callers can AWAIT it:
+  // after() only keeps the serverless function alive for the promise the
+  // deferred task returns, so an un-awaited incident write/email could be
+  // killed mid-flight on Vercel (a sheet row alone once left three YES members
+  // unworked). Errors are swallowed per-channel so awaiting never rejects and
+  // the member-facing reply (already sent) is never affected.
+  return Promise.allSettled([
+    logSupportIncident(incident).catch(err => {
+      console.error('SMS support incident logging failed:', err);
+    }),
+    notifyUpgradeIncidentOnce(incident).catch(err => {
+      console.error('SMS upgrade incident email failed:', err);
+    }),
+  ]);
 }
 
 // Records the outbound upgrade-reply we are about to return as TwiML. Awaited
@@ -371,6 +406,120 @@ async function runChatMessageForSms(sessionId, body, from) {
   const payload = await response.json().catch(() => null);
   if (!response.ok) return null;
   return payload?.message || null;
+}
+
+// Slow YES post-reply work. Runs in deferWork() AFTER the reply has been sent and
+// AFTER the pending offer has already been cleared + persisted synchronously on
+// the reply path (idempotency: a rapid second YES must not see the same offer and
+// enqueue a second apply for the same appointment). Resolves the member, attempts
+// the Boulevard apply, queues a support incident on failure, caches the resolved
+// profile, and logs the outbound row. Never blocks the reply; never calls chat.
+// Only invoked for affirmative (YES) replies.
+async function runDeferredIntentWork({
+  sessionId,
+  from,
+  activeSession,
+  pendingOffer,
+  hasPendingOffer,
+  intentText,
+  smsUpgradeLive,
+  sentReplyText,
+}) {
+  // YES while SMS upgrades are on hold: nothing to apply.
+  if (hasPendingOffer && !smsUpgradeLive) {
+    return;
+  }
+
+  // YES while the apply mutation is disabled: queue the manual-follow-up incident.
+  if (!isUpgradeMutationEnabled()) {
+    const disabledReason = (hasPendingOffer && String(pendingOffer?.offerKind || '').toLowerCase() === 'addon')
+      ? 'manual_addon_confirmation'
+      : 'upgrade_mutation_disabled';
+    await queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile: activeSession?.memberProfile || null,
+      pendingOffer,
+      upgradeResult: { success: false, reason: disabledReason },
+    }));
+    return;
+  }
+
+  // Resolve the member (Boulevard). Background, so no Twilio deadline pressure.
+  // Do NOT persist the resolved profile back to the session here: this deferred
+  // task holds a session object captured at request time, and a concurrent
+  // inbound can write newer state (counters, handoff, pending offer) before this
+  // background scan resolves. Saving the captured object would clobber it
+  // (Codex P2). The resolved profile is used in-run below for the apply; caching
+  // it on the session is a non-essential optimization not worth the stale write.
+  let profile = activeSession?.memberProfile || null;
+  if (!profile) {
+    profile = await lookupProfileWithDeadline(from, lookupMember, DEFERRED_SCAN_DEADLINE_MS);
+  }
+  if (!profile) {
+    await queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile: null,
+      pendingOffer,
+      upgradeResult: {
+        success: false,
+        reason: hasPendingOffer ? 'pending_offer_context_unrecoverable' : 'member_lookup_failed_after_yes',
+      },
+    }));
+    return;
+  }
+
+  // Apply against the exact pending offer when we have one; otherwise re-derive.
+  let upgradeResult;
+  let offerForLog;
+  if (hasPendingOffer) {
+    upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, pendingOffer);
+    offerForLog = pendingOffer;
+  } else {
+    const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
+    if (!opportunity?.eligible || !isSmsDurationOfferAllowed(opportunity)) {
+      await queueSupportIncident(buildUpgradeSupportIncident({
+        sessionId,
+        from,
+        incomingText: intentText,
+        profile,
+        opportunity,
+        upgradeResult: {
+          success: false,
+          reason: opportunity?.eligible ? 'duration_offer_not_allowed' : (opportunity?.reason || 'no_opportunity_after_yes'),
+        },
+      }));
+      return;
+    }
+    upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, {
+      appointmentId: opportunity.appointmentId || null,
+      targetDurationMinutes: opportunity.targetDurationMinutes || null,
+    });
+    offerForLog = opportunity;
+  }
+
+  if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
+    await queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile,
+      pendingOffer,
+      opportunity: upgradeResult?.opportunity || null,
+      upgradeResult,
+    }));
+  }
+  await logUpgradeReplyOutbound({
+    sessionId,
+    from,
+    activeSession,
+    offer: offerForLog,
+    upgradeResult,
+    content: sentReplyText,
+  });
 }
 
 export async function POST(request) {
@@ -601,7 +750,8 @@ export async function POST(request) {
 
     const sessionId = await resolveSessionIdForPhone(from);
     const activeSession = await getSession(sessionId);
-    await logSmsChatMessages([{
+    // Inbound logging is Sheets I/O; never block the reply on it.
+    deferWork(() => logSmsChatMessages([{
       sessionId,
       timestamp: new Date().toISOString(),
       direction: 'inbound',
@@ -611,7 +761,7 @@ export async function POST(request) {
       content: body,
       offerType: activeSession?.pendingUpgradeOffer?.offerKind || null,
       outcome: (isAffirmative(body) || isNegative(body)) ? 'intent_response' : 'message_received',
-    }]);
+    }]));
     if (activeSession) {
       const currentCount = Number(activeSession.smsInboundCount || 0);
       activeSession.smsInboundCount = currentCount + 1;
@@ -629,237 +779,66 @@ export async function POST(request) {
 
     const intentText = String(body || '').trim();
     if (isAffirmative(intentText) || isNegative(intentText)) {
+      const affirmative = isAffirmative(intentText);
       const pendingOffer = activeSession?.pendingUpgradeOffer || null;
       const pendingOfferBlocked =
         pendingOffer?.offerKind === 'duration' &&
         !isSmsDurationOfferAllowed(pendingOffer);
       const hasPendingOffer = pendingOffer && !pendingOfferBlocked && !isPendingOfferExpired(pendingOffer);
-      if (activeSession?.pendingUpgradeOffer && !hasPendingOffer) {
+
+      // Deterministic, instant reply. It NEVER awaits Sheets or Boulevard and
+      // never calls the chat route, so Twilio always gets TwiML well inside its
+      // ~15s window (the silent-YES cause). Copy matches what production sends
+      // today: NO declines; a live pending-offer YES echoes the persisted
+      // (tier-aware) price as a manual-confirm; any other YES uses the approved
+      // generic confirmation. When the booking-edit apply (outbound-sms #13) is
+      // enabled, a result-specific follow-up SMS is the next enhancement; the
+      // immediate reply stays instant and deterministic.
+      let replyText;
+      if (!affirmative) {
+        replyText = 'No problem - we will keep your appointment as-is.';
+      } else if (hasPendingOffer && !smsUpgradeLive) {
+        replyText = buildSmsUpgradePendingReply();
+      } else if (hasPendingOffer) {
+        replyText = buildPendingOfferFinalizeReply(pendingOffer);
+      } else {
+        replyText = YES_NO_PENDING_MANUAL_REPLY;
+      }
+      const intentTwiml = buildTwimlMessage(replyText);
+      if (messageSid) storeReplyForMessageSid(messageSid, intentTwiml);
+
+      // Clear + persist the pending offer SYNCHRONOUSLY before replying. This is a
+      // fast Redis session write (not Sheets/Boulevard), and it must happen on the
+      // reply path so a rapid second YES/NO cannot read the same offer and enqueue
+      // a duplicate apply for the same appointment. The captured offer below still
+      // drives the deferred apply.
+      if (activeSession?.pendingUpgradeOffer) {
+        activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId
+          || activeSession.lastUpgradeOfferAppointmentId || null;
         activeSession.pendingUpgradeOffer = null;
         await saveSession(activeSession);
       }
 
-      if (hasPendingOffer && isNegative(intentText)) {
-        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-        activeSession.pendingUpgradeOffer = null;
-        await saveSession(activeSession);
-        const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
-        if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
-        return new NextResponse(declineTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      const pendingOfferKind = String(pendingOffer?.offerKind || 'duration').toLowerCase();
-      const canFinalizeWithoutMutation = hasPendingOffer && !isUpgradeMutationEnabled();
-      if (isAffirmative(intentText) && hasPendingOffer && !smsUpgradeLive) {
-        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-        activeSession.pendingUpgradeOffer = null;
-        await saveSession(activeSession);
-        const pendingTwiml = buildTwimlMessage(buildSmsUpgradePendingReply());
-        if (messageSid) storeReplyForMessageSid(messageSid, pendingTwiml);
-        return new NextResponse(pendingTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-      if (isAffirmative(intentText) && canFinalizeWithoutMutation) {
-        const incident = buildUpgradeSupportIncident({
-          sessionId,
-          from,
-          incomingText: intentText,
-          profile: activeSession?.memberProfile || null,
-          pendingOffer,
-          upgradeResult: {
-            success: false,
-            reason: pendingOfferKind === 'addon' ? 'manual_addon_confirmation' : 'upgrade_mutation_disabled',
-          },
-        });
-        queueSupportIncident(incident);
-        activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-        activeSession.pendingUpgradeOffer = null;
-        await saveSession(activeSession);
-        const teamFinalizeTwiml = buildTwimlMessage(buildPendingOfferFinalizeReply(pendingOffer));
-        if (messageSid) storeReplyForMessageSid(messageSid, teamFinalizeTwiml);
-        return new NextResponse(teamFinalizeTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      if (isAffirmative(intentText) && !isUpgradeMutationEnabled()) {
-        const incident = buildUpgradeSupportIncident({
-          sessionId,
-          from,
-          incomingText: intentText,
-          profile: activeSession?.memberProfile || null,
-          upgradeResult: { success: false, reason: 'upgrade_mutation_disabled' },
-        });
-        queueSupportIncident(incident);
-        const fallbackTwiml = buildTwimlMessage(
-          'Thanks for replying YES. We received your request and our team will confirm it before your appointment.',
-        );
-        if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
-        return new NextResponse(fallbackTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      let profile = activeSession?.memberProfile || null;
-      if (!profile) {
-        profile = await lookupProfileWithDeadline(from, lookupMember);
-        if (activeSession && profile) {
-          activeSession.memberId = profile.clientId || null;
-          activeSession.memberProfile = profile;
-          await saveSession(activeSession);
-        }
-      }
-
-      if (!profile && isNegative(intentText)) {
-        const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
-        if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
-        return new NextResponse(declineTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      if (!profile && isAffirmative(intentText)) {
-        const incident = buildUpgradeSupportIncident({
-          sessionId,
-          from,
-          incomingText: intentText,
-          profile: activeSession?.memberProfile || null,
-          pendingOffer,
-          upgradeResult: {
-            success: false,
-            reason: hasPendingOffer ? 'pending_offer_context_unrecoverable' : 'member_lookup_failed_after_yes',
-          },
-        });
-        queueSupportIncident(incident);
-        const fallbackTwiml = buildTwimlMessage(YES_NO_PENDING_MANUAL_REPLY);
-        if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
-        return new NextResponse(fallbackTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
-      }
-
-      if (profile) {
-        if (isNegative(intentText)) {
-          const declineTwiml = buildTwimlMessage('No problem - we will keep your appointment as-is.');
-          if (messageSid) storeReplyForMessageSid(messageSid, declineTwiml);
-          return new NextResponse(declineTwiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-
-        // Deterministic YES handling: if we have a live pending offer, reverify against
-        // that exact appointment/target instead of doing a fresh generic opportunity pick.
-        if (isAffirmative(intentText) && hasPendingOffer) {
-          const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, pendingOffer);
-          if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
-            const incident = buildUpgradeSupportIncident({
-              sessionId,
-              from,
-              incomingText: intentText,
-              profile,
-              pendingOffer,
-              opportunity: upgradeResult?.opportunity || null,
-              upgradeResult,
-            });
-            queueSupportIncident(incident);
-          }
-          if (activeSession) {
-            activeSession.lastUpgradeOfferAppointmentId = pendingOffer.appointmentId || null;
-            activeSession.pendingUpgradeOffer = null;
-            await saveSession(activeSession);
-          }
-          const upgradeText = buildUpgradeApplyReply(upgradeResult, upgradeResult?.opportunity || null, pendingOffer);
-          const upgradeTwiml = buildTwimlMessage(upgradeText);
-          if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
-          await logUpgradeReplyOutbound({
-            sessionId,
-            from,
-            activeSession,
-            offer: pendingOffer,
-            upgradeResult,
-            content: upgradeText,
-          });
-          return new NextResponse(upgradeTwiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-
-        const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
-        if (opportunity?.eligible && !isSmsDurationOfferAllowed(opportunity)) {
-          const reply = await runChatMessageForSms(sessionId, body, from);
-          const twiml = buildTwimlMessage(reply || GENERIC_FAILURE_REPLY);
-          if (messageSid) storeReplyForMessageSid(messageSid, twiml);
-          return new NextResponse(twiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-        if (!opportunity?.eligible) {
-          // If YES arrives without recoverable pending context, fail safe to approved manual confirmation copy.
-          const incident = buildUpgradeSupportIncident({
-            sessionId,
-            from,
-            incomingText: intentText,
-            profile,
-            opportunity,
-            upgradeResult: { success: false, reason: opportunity?.reason || 'no_opportunity_after_yes' },
-          });
-          queueSupportIncident(incident);
-          const fallbackTwiml = buildTwimlMessage(YES_NO_PENDING_MANUAL_REPLY);
-          if (messageSid) storeReplyForMessageSid(messageSid, fallbackTwiml);
-          return new NextResponse(fallbackTwiml, {
-            status: 200,
-            headers: buildTwimlHeaders(rateLimit),
-          });
-        }
-
-        const upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, {
-          appointmentId: opportunity.appointmentId || null,
-          targetDurationMinutes: opportunity.targetDurationMinutes || null,
-        });
-        if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
-          const incident = buildUpgradeSupportIncident({
-            sessionId,
-            from,
-            incomingText: intentText,
-            profile,
-            opportunity,
-            upgradeResult,
-          });
-          queueSupportIncident(incident);
-        }
-        if (activeSession) {
-          activeSession.lastUpgradeOfferAppointmentId = pendingOffer?.appointmentId || opportunity?.appointmentId || null;
-          activeSession.pendingUpgradeOffer = null;
-          await saveSession(activeSession);
-        }
-        const upgradeText = buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer);
-        const upgradeTwiml = buildTwimlMessage(upgradeText);
-        if (messageSid) storeReplyForMessageSid(messageSid, upgradeTwiml);
-        await logUpgradeReplyOutbound({
+      // Slow work (member lookup, Boulevard apply, incident, outbound log) runs
+      // off the reply path. Only a YES has apply work; a NO is fully handled by
+      // the synchronous clear above.
+      if (affirmative) {
+        deferWork(() => runDeferredIntentWork({
           sessionId,
           from,
           activeSession,
-          offer: pendingOffer || opportunity,
-          upgradeResult,
-          content: upgradeText,
-        });
-        return new NextResponse(upgradeTwiml, {
-          status: 200,
-          headers: buildTwimlHeaders(rateLimit),
-        });
+          pendingOffer,
+          hasPendingOffer,
+          intentText,
+          smsUpgradeLive,
+          sentReplyText: replyText,
+        }));
       }
+
+      return new NextResponse(intentTwiml, {
+        status: 200,
+        headers: buildTwimlHeaders(rateLimit),
+      });
     }
 
     const reply = await runChatMessageForSms(sessionId, body, from);
