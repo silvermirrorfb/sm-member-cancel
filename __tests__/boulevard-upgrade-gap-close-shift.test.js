@@ -48,16 +48,16 @@ describe('computeCloseShiftGapMinutes (pure tz-aware gap bounding)', () => {
     expect(la.locationCloseMinutes).not.toBe(ny.locationCloseMinutes);
   });
 
-  it('Saturday hours (09:00-19:00): 6:30 PM end -> 30 minutes to close', () => {
+  it('Saturday hours (09:00-19:00): 6:30 PM end -> 30 minutes to close (close bound only, no shift -> fail closed)', () => {
     const g = computeCloseShiftGapMinutes({ endOn: '2026-06-20T18:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: null });
-    expect(g.locationCloseMinutes).toBe(30);
-    expect(g.availableGapMinutes).toBe(30);
+    expect(g.locationCloseMinutes).toBe(30);   // Saturday finish 19:00 mapped correctly
+    expect(g.availableGapMinutes).toBeNull();  // shift unresolved -> no proven gap
   });
 
-  it('Sunday hours (10:00-18:00): 5:40 PM end -> 20 minutes to close', () => {
+  it('Sunday hours (10:00-18:00): 5:40 PM end -> 20 minutes to close (close bound only, no shift -> fail closed)', () => {
     const g = computeCloseShiftGapMinutes({ endOn: '2026-06-21T17:40:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: null });
-    expect(g.locationCloseMinutes).toBe(20);
-    expect(g.availableGapMinutes).toBe(20);
+    expect(g.locationCloseMinutes).toBe(20);   // Sunday finish 18:00 mapped correctly
+    expect(g.availableGapMinutes).toBeNull();  // shift unresolved -> no proven gap
   });
 
   it('closed day (open:false) yields no close bound', () => {
@@ -78,6 +78,70 @@ describe('computeCloseShiftGapMinutes (pure tz-aware gap bounding)', () => {
   it('no hours and no shift -> nothing resolves (caller treats as gap_unprovable)', () => {
     const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: null, shiftClockOut: null });
     expect(g.availableGapMinutes).toBeNull();
+  });
+
+  it('FAIL CLOSED: close resolves but shift is null -> availableGapMinutes null (both bounds required)', () => {
+    const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: null });
+    expect(g.locationCloseMinutes).toBe(30);
+    expect(g.shiftEndMinutes).toBeNull();
+    expect(g.availableGapMinutes).toBeNull();
+  });
+
+  it('FAIL CLOSED: shift resolves but hours missing -> availableGapMinutes null (both bounds required)', () => {
+    const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: null, shiftClockOut: '21:00:00' });
+    expect(g.shiftEndMinutes).toBe(30);
+    expect(g.locationCloseMinutes).toBeNull();
+    expect(g.availableGapMinutes).toBeNull();
+  });
+
+  it('rejects an out-of-range close hour (99) instead of rolling it into a fake-positive gap', () => {
+    const badHours = HOURS_UWS.map((d, i) => (i === 5 ? { ...d, finish: { hour: 99, minute: 0 } } : d));
+    const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: badHours, shiftClockOut: '21:00:00' });
+    expect(g.locationCloseMinutes).toBeNull();
+    expect(g.availableGapMinutes).toBeNull();
+  });
+
+  it('rejects coerced/malformed close hour or minute values (no fake close bound)', () => {
+    // Number() would coerce these to valid-looking ints (2e1->20, 0x15->21, 21.0->21,
+    // 5e1->50); strictInt must reject them so a malformed close cannot resolve a bound.
+    for (const finish of [{ hour: '2e1', minute: 0 }, { hour: '0x15', minute: 0 }, { hour: '21.0', minute: 0 }, { hour: 21, minute: '5e1' }, { hour: 21, minute: '' }, { hour: 21 }]) {
+      const badHours = HOURS_UWS.map((d, i) => (i === 5 ? { ...d, finish } : d));
+      const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: badHours, shiftClockOut: '21:00:00' });
+      expect(g.locationCloseMinutes).toBeNull();
+      expect(g.availableGapMinutes).toBeNull();
+    }
+  });
+
+  it('rejects an out-of-range shift clockOut (99:99) instead of a fake-positive gap', () => {
+    const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: '99:99:00' });
+    expect(g.shiftEndMinutes).toBeNull();
+    expect(g.availableGapMinutes).toBeNull();
+  });
+
+  it('rejects 24:30 as a close bound (hour 24 is only valid at :00)', () => {
+    const h2430 = HOURS_UWS.map((d, i) => (i === 5 ? { ...d, finish: { hour: 24, minute: 30 } } : d));
+    const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: h2430, shiftClockOut: '21:00:00' });
+    expect(g.locationCloseMinutes).toBeNull();
+    expect(g.availableGapMinutes).toBeNull();
+  });
+
+  it('rejects a clockOut with a valid HH:MM prefix but garbage tail (no fake shift bound)', () => {
+    for (const bad of ['21:00:BAD', '21:00:00Z', '21:00 PM', '21:00:0a', '24:00:30', '21:00:00:00', '99:99']) {
+      const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: bad });
+      expect(g.shiftEndMinutes).toBeNull();
+      expect(g.availableGapMinutes).toBeNull();
+    }
+    // sanity: the well-formed forms still resolve to 30 minutes
+    expect(computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: '21:00:00' }).shiftEndMinutes).toBe(30);
+    expect(computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: '21:00' }).shiftEndMinutes).toBe(30);
+  });
+
+  it('rejects a non-string clockOut (array/number/object) without coercion', () => {
+    for (const bad of [['21:00:00'], 2100, { h: 21 }, true]) {
+      const g = computeCloseShiftGapMinutes({ endOn: '2026-06-19T20:30:00-04:00', locationTz: 'America/New_York', hours: HOURS_UWS, shiftClockOut: bad });
+      expect(g.shiftEndMinutes).toBeNull();
+      expect(g.availableGapMinutes).toBeNull();
+    }
   });
 });
 
@@ -167,17 +231,40 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     expect(result.requiredExtraMinutes).toBe(20);
   });
 
-  it('BARE staffId from shifts still binds (no urn prefix) and makes it eligible via shift even with no close', async () => {
-    const closedFri = HOURS_UWS.map((d, i) => (i === 5 ? { ...d, open: false } : d));
+  it('PREFIXED urn staffId in the shifts response still binds (open day, both bounds) -> eligible', async () => {
+    // Real shifts() responses carry a BARE staffId (covered by HEADLINE). This asserts
+    // the match ALSO normalizes a PREFIXED urn:blvd:Staff: id, so the bareBoulevardId
+    // normalization is load-bearing rather than a tautology. Open day so the close
+    // bound also resolves; both bounds present -> eligible. Mutation guard: dropping
+    // bareBoulevardId() on the response side leaves the shift unmatched -> fail closed.
     global.fetch = makeFetchMock({
       appts: [SAMANTHA_APPT],
-      location: { tz: 'America/New_York', hours: closedFri },
-      shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }], // bare id; provider is urn:blvd:Staff:prov-1
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'urn:blvd:Staff:prov-1', clockOut: '21:00:00', available: true }],
     });
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
     expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
     expect(result.shiftEndMinutes).toBe(30);
-    expect(result.gapBoundedBy).toBe('shift_end');
+    expect(result.locationCloseMinutes).toBe(30);
+  });
+
+  it('sends the Staff URN to the shifts() staffIds filter even when the appointment providerId is bare', async () => {
+    // Live Boulevard requires the URN in staffIds (a bare uuid errors). The provider
+    // id must be coerced to urn:blvd:Staff:<id> before the filter. Mutation guard:
+    // dropping toBoulevardStaffUrn sends the bare id and this assertion fails.
+    const bareProvAppt = { ...SAMANTHA_APPT, providerId: 'prov-1' }; // bare provider id
+    const fetchMock = makeFetchMock({
+      appts: [bareProvAppt],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }], // response is bare
+    });
+    global.fetch = fetchMock;
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    const shiftCall = fetchMock.mock.calls.find(([, init]) => JSON.parse(init.body).query.includes('FetchStaffShifts'));
+    expect(shiftCall).toBeTruthy();
+    expect(JSON.parse(shiftCall[1].body).variables.ids).toEqual(['urn:blvd:Staff:prov-1']);
+    expect(result.eligible).toBe(true); // URN filter + bare-to-bare response match still binds
   });
 
   it('does NOT fit when the salon closes too soon after the booking', async () => {
@@ -194,6 +281,44 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
     expect(result.eligible).toBe(false);
     expect(result.reason).toBe('gap_unprovable');
+  });
+
+  it('FAIL-CLOSED: close resolves but the shift has no matching row -> stays gap_unprovable (no offer on close alone)', async () => {
+    // Open day, so the location close bound DOES resolve (30 min to 9 PM). The only
+    // shift row is for a different staff member, so the provider shift end is
+    // unresolved. Closing time alone is not proof the esthetician is present, so the
+    // upgrade must NOT be offered. (Pre-fix this returned eligible bounded by close.)
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'someone-else', clockOut: '21:00:00', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.eligible).toBe(false);
+    expect(result.locationCloseMinutes).toBe(30); // close DID resolve
+    expect(result.shiftEndMinutes).toBeNull();    // shift did NOT resolve
+  });
+
+  it('FAIL-CLOSED: close resolves but the shift fetch returns nothing -> gap_unprovable', async () => {
+    global.fetch = makeFetchMock({ appts: [SAMANTHA_APPT], location: UWS_LOCATION, shiftsEmpty: true });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.eligible).toBe(false);
+    expect(result.locationCloseMinutes).toBe(30);
+    expect(result.shiftEndMinutes).toBeNull();
+  });
+
+  it('FAIL-CLOSED: a non-string clockOut in the shift response -> gap_unprovable (no coercion)', async () => {
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: ['21:00:00'], available: true }], // array, not a string
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.eligible).toBe(false);
+    expect(result.shiftEndMinutes).toBeNull();
   });
 
   it('UNCHANGED: a later same-provider appointment still bounds the gap, no hours/shift fetch needed', async () => {
