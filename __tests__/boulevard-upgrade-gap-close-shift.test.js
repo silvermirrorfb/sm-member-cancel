@@ -300,6 +300,25 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     expect(result.shiftEndMinutes).toBeNull();    // shift did NOT resolve
   });
 
+  it('FAIL-CLOSED: a PREFIXED-urn shift row for a DIFFERENT provider does not match -> stays gap_unprovable', async () => {
+    // Booking provider is urn:blvd:Staff:prov-1. The only shift row is a PREFIXED
+    // urn for a DIFFERENT staff member, so after URN normalization the booking
+    // provider's own shift is still unresolved. The close bound resolves (open
+    // day), but close alone must never make the upgrade eligible. This is the
+    // exact fail-open hole a6834be closed: flipping eligible on the close bound
+    // when the provider shift is unknown.
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'urn:blvd:Staff:prov-OTHER', clockOut: '21:00:00', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.eligible).toBe(false);
+    expect(result.locationCloseMinutes).toBe(30); // close DID resolve
+    expect(result.shiftEndMinutes).toBeNull();    // prefixed-urn shift for another provider did NOT
+  });
+
   it('FAIL-CLOSED: close resolves but the shift fetch returns nothing -> gap_unprovable', async () => {
     global.fetch = makeFetchMock({ appts: [SAMANTHA_APPT], location: UWS_LOCATION, shiftsEmpty: true });
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
