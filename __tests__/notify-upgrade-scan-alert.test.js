@@ -60,6 +60,27 @@ describe('classifyUpgradeScanRun', () => {
     expect(r.shouldAlert).toBe(true);
     expect(r.conditions).toContain('addon');
   });
+
+  it('big scan with zero sends fires regardless of error count (the 2026-06-19 outage blind spot)', () => {
+    // The outage: ~1300 candidates, 0 sent, 0 errors (every candidate legitimately
+    // skipped as gap_unprovable). The old classifier only looked at errors, so it
+    // stayed silent through a total send failure. A big scan that sends nothing
+    // must page even with zero errors.
+    const r = classifyUpgradeScanRun({ total: 1300, sent: 0, skipped: 1300, errors: 0, addonSends: 0 });
+    expect(r.shouldAlert).toBe(true);
+    expect(r.conditions).toContain('big_scan_zero_send');
+  });
+
+  it('big scan with at least one send does NOT fire the zero-send condition', () => {
+    const r = classifyUpgradeScanRun({ total: 200, sent: 1, skipped: 199, errors: 0, addonSends: 0 });
+    expect(r.conditions).not.toContain('big_scan_zero_send');
+  });
+
+  it('a small zero-send scan does NOT fire (a quiet handful of candidates is not an outage signal)', () => {
+    // Threshold is strictly greater than 50: a genuinely light day must not page.
+    expect(classifyUpgradeScanRun({ total: 50, sent: 0, skipped: 50, errors: 0, addonSends: 0 }).conditions).not.toContain('big_scan_zero_send');
+    expect(classifyUpgradeScanRun({ total: 10, sent: 0, skipped: 10, errors: 0, addonSends: 0 }).conditions).not.toContain('big_scan_zero_send');
+  });
 });
 
 describe('buildUpgradeScanAlert', () => {
@@ -85,6 +106,21 @@ describe('buildUpgradeScanAlert', () => {
 
   it('no em dashes anywhere', () => {
     const { text, subject } = buildUpgradeScanAlert(base, ['errors']);
+    expect(text + subject).not.toContain('—');
+  });
+
+  it('leads with a plain verdict for the big-scan-zero-send condition', () => {
+    const { text, subject } = buildUpgradeScanAlert(
+      { total: 1300, sent: 0, skipped: 1300, errors: 0, addonSends: 0,
+        errorsByReason: {}, skippedByReason: { gap_unprovable: 1300 }, httpStatusCodes: {} },
+      ['big_scan_zero_send'],
+    );
+    const firstLine = text.split('\n')[0];
+    expect(firstLine).toMatch(/^Needs attention:/);
+    expect(firstLine).toMatch(/1300/);        // names the scan size in plain English
+    expect(firstLine).toMatch(/sent 0|0 upgrade texts/i);
+    expect(firstLine).not.toMatch(/[{}]/);    // no raw JSON in the verdict line
+    expect(subject).toMatch(/Needs attention/i);
     expect(text + subject).not.toContain('—');
   });
 });
