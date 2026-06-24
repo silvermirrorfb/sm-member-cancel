@@ -2498,6 +2498,223 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
   };
 }
 
+// --- Duration-upgrade gap bounding by location close + provider shift end ---
+// Boulevard exposes Location.hours (per-day open + start/finish wall-clock,
+// Sunday-indexed array) plus the location tz, and a shifts(...) root query
+// returning the provider's clockOut for a date. We use these to bound the gap
+// after a booking when there is no next same-provider appointment, so a
+// provider's last booking of the day is not falsely skipped as gap_unprovable
+// when the salon is open long enough afterward for the added minutes to fit.
+
+function bareBoulevardId(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  const idx = s.lastIndexOf(':');
+  return idx >= 0 ? s.slice(idx + 1) : s;
+}
+
+// Boulevard's shifts() staffIds filter requires the full Staff URN (a bare uuid
+// errors with "Could not decode global ID value ..."). Verified read-only against
+// production 2026-06-19. Coerce a bare uuid to the Staff URN; leave an existing
+// Staff URN as-is; leave any other urn untouched (it will not match a staff shift,
+// which fails closed). The shifts() RESPONSE staffId is bare, so matching is done
+// separately via bareBoulevardId on both sides.
+function toBoulevardStaffUrn(value) {
+  const s = String(value || '').trim();
+  if (!s) return '';
+  if (s.startsWith('urn:blvd:Staff:')) return s;
+  if (s.includes(':')) return s;
+  return `urn:blvd:Staff:${s}`;
+}
+
+// The tz offset (ms) that `timeZone` is at the instant `ms`, via round-tripping
+// the formatted wall-clock back through Date.UTC.
+function tzOffsetMsAt(ms, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(new Date(ms)).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  let hh = Number(parts.hour);
+  if (hh === 24) hh = 0; // some ICU builds render midnight as 24
+  const asTzMs = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), hh, Number(parts.minute), Number(parts.second));
+  if (!Number.isFinite(asTzMs)) return NaN;
+  return asTzMs - ms;
+}
+
+// Convert a wall-clock time (year, month, day, hour, minute) in `timeZone` to a
+// UTC epoch ms. Two-pass offset correction: take the offset at the UTC guess,
+// then re-evaluate the offset at the corrected instant. The second pass fixes
+// wall times that land in a DST spring-forward hour, where the first-pass offset
+// (read off the pre-jump UTC guess) would otherwise be an hour stale. Evening
+// close/shift times never fall in that hour, but the two-pass form is correct
+// for all inputs.
+function zonedWallClockToUtcMs(year, month, day, hour, minute, timeZone) {
+  if (!timeZone) return NaN;
+  const guess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  if (!Number.isFinite(guess)) return NaN;
+  const off1 = tzOffsetMsAt(guess, timeZone);
+  if (!Number.isFinite(off1)) return NaN;
+  const off2 = tzOffsetMsAt(guess - off1, timeZone);
+  if (!Number.isFinite(off2)) return NaN;
+  return guess - off2;
+}
+
+// Calendar date of `dateMs` in `timeZone`, so an 8:30 PM ET booking that is past
+// midnight UTC still resolves to its local day for the hours-array index.
+function getZonedYmd(dateMs, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(dateMs)).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day) };
+}
+
+// Reject wall-clock values Boulevard should never send (hour 0-24, minute 0-59)
+// so a malformed value like 99:99 cannot roll over through Date.UTC into a huge
+// fake-positive gap and over-offer.
+// Strict integer parse: accept a real integer or an all-digits string only. Rejects
+// JS Number() coercions of malformed input ("2e1" -> 20, "0x15" -> 21, "21.0" -> 21).
+function strictInt(value) {
+  if (typeof value === 'number') return Number.isInteger(value) ? value : NaN;
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) return Number(value);
+  return NaN;
+}
+
+function isValidWallClock(hour, minute) {
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return false;
+  if (minute < 0 || minute > 59) return false;
+  if (hour < 0 || hour > 24) return false;
+  if (hour === 24 && minute !== 0) return false; // 24:00 is midnight; 24:30 is not a real time
+  return true;
+}
+
+// Strictly parse a 24h wall-clock string ("HH:MM" or "HH:MM:SS") to { h, mi }, or
+// null if anything is malformed. Rejects garbage tails ("21:00:BAD", "21:00:00Z"),
+// out-of-range parts ("99:99"), and hour 24 with any non-zero minute/second
+// ("24:00:30") so no bad value can resolve to a fake shift bound. Seconds are
+// validated then dropped (the gap is computed at minute granularity).
+function parseWallClockTime(value) {
+  if (typeof value !== 'string') return null; // no coercion of arrays/objects/numbers
+  const m = value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  const sec = m[3] === undefined ? 0 : Number(m[3]);
+  if (!isValidWallClock(h, mi) || sec < 0 || sec > 59) return null;
+  if (h === 24 && sec !== 0) return null; // only 24:00:00 is the valid midnight form
+  return { h, mi };
+}
+
+// Pure: minutes from the appointment end to the location close and to the provider
+// shift end (in the location tz). Hours array is Sunday-indexed (0 = Sun). The
+// individual bounds are reported for observability, but availableGapMinutes (the
+// PROVEN gap the caller offers on) is set ONLY when BOTH bounds resolve. A resolved
+// close with an unresolved shift is NOT enough: closing time alone is not proof an
+// esthetician is present to perform the longer service, so it FAILS CLOSED (null).
+function computeCloseShiftGapMinutes({ endOn, locationTz, hours, shiftClockOut }) {
+  const out = { availableGapMinutes: null, locationCloseMinutes: null, shiftEndMinutes: null, gapBoundedBy: null };
+  const endMs = Date.parse(endOn);
+  if (!Number.isFinite(endMs) || !locationTz) return out;
+  const { year, month, day } = getZonedYmd(endMs, locationTz);
+  if (!isFiniteNumber(year)) return out;
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay(); // 0 = Sunday
+
+  if (Array.isArray(hours) && hours.length >= 7) {
+    const dayHours = hours[weekday];
+    if (dayHours && dayHours.open === true && dayHours.finish) {
+      // Both hour and minute must be well-formed integers; no defaulting, so a
+      // missing/empty/garbage minute fails closed rather than resolving a bound.
+      const ch = strictInt(dayHours.finish.hour);
+      const cm = strictInt(dayHours.finish.minute);
+      if (isValidWallClock(ch, cm)) {
+        const closeMs = zonedWallClockToUtcMs(year, month, day, ch, cm, locationTz);
+        if (Number.isFinite(closeMs)) out.locationCloseMinutes = Math.floor((closeMs - endMs) / 60000);
+      }
+    }
+  }
+  const shiftTime = shiftClockOut ? parseWallClockTime(shiftClockOut) : null;
+  if (shiftTime) {
+    const shiftMs = zonedWallClockToUtcMs(year, month, day, shiftTime.h, shiftTime.mi, locationTz);
+    if (Number.isFinite(shiftMs)) out.shiftEndMinutes = Math.floor((shiftMs - endMs) / 60000);
+  }
+  // FAIL CLOSED: the gap is proven only when BOTH the close and the shift bound
+  // resolve. One bound alone never produces an offerable gap.
+  if (Number.isFinite(out.locationCloseMinutes) && Number.isFinite(out.shiftEndMinutes)) {
+    out.availableGapMinutes = Math.min(out.locationCloseMinutes, out.shiftEndMinutes);
+    out.gapBoundedBy = out.shiftEndMinutes <= out.locationCloseMinutes ? 'shift_end' : 'location_close';
+  }
+  return out;
+}
+
+async function fetchLocationHoursContext(auth, locationId) {
+  const id = String(locationId || '').trim();
+  if (!auth || !id) return null;
+  try {
+    const query = `
+      query FetchLocationHours($id: ID!) {
+        location(id: $id) {
+          tz
+          hours { open start { hour minute } finish { hour minute } }
+        }
+      }
+    `;
+    const data = await fetchBoulevardGraphQL(auth.apiUrl, auth.headers, query, { id }, { silentErrors: true, returnErrors: true });
+    if (!data || data.__error) return null;
+    const loc = data?.data?.location;
+    if (!loc || !loc.tz) return null;
+    return { tz: String(loc.tz), hours: Array.isArray(loc.hours) ? loc.hours : null };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchProviderShiftClockOut(auth, locationId, providerId, localDateStr) {
+  const loc = String(locationId || '').trim();
+  const prov = String(providerId || '').trim();
+  if (!auth || !loc || !prov || !localDateStr) return null;
+  try {
+    const query = `
+      query FetchStaffShifts($start: Date!, $end: Date!, $loc: ID!, $ids: [ID!]) {
+        shifts(startIso8601: $start, endIso8601: $end, locationId: $loc, staffIds: $ids) {
+          shifts { staffId clockOut available }
+        }
+      }
+    `;
+    // Filter takes the Staff URN; response staffId is bare (verified live, see toBoulevardStaffUrn).
+    const data = await fetchBoulevardGraphQL(auth.apiUrl, auth.headers, query, { start: localDateStr, end: localDateStr, loc, ids: [toBoulevardStaffUrn(prov)] }, { silentErrors: true, returnErrors: true });
+    if (!data || data.__error) return null;
+    const rows = data?.data?.shifts?.shifts;
+    if (!Array.isArray(rows)) return null;
+    const wantBare = bareBoulevardId(prov); // response staffId is BARE; match bare-to-bare
+    const matches = rows.filter(r => r && r.available !== false && typeof r.clockOut === 'string' && bareBoulevardId(r.staffId) === wantBare);
+    // Fail closed on a split shift: more than one matching block means we cannot
+    // prove which one covers the appointment without clockIn, and binding the wrong
+    // (later) block would overstate the gap and produce a false offer. Require
+    // exactly one block; otherwise no shift bound resolves and the upgrade stays
+    // gap_unprovable. (Finding 4 / codex P1.)
+    if (matches.length !== 1) return null;
+    return matches[0].clockOut; // require a real string clockOut; no coercion
+  } catch {
+    return null;
+  }
+}
+
+async function resolveCloseShiftBoundedGap(auth, result) {
+  const endOn = result?.endOn;
+  const locationId = result?.locationId;
+  const providerId = result?.providerId;
+  const empty = { availableGapMinutes: null, locationCloseMinutes: null, shiftEndMinutes: null, gapBoundedBy: null };
+  if (!auth || !endOn || !locationId) return empty;
+  const locCtx = await fetchLocationHoursContext(auth, locationId);
+  if (!locCtx || !locCtx.tz) return empty;
+  const endMs = Date.parse(endOn);
+  if (!Number.isFinite(endMs)) return empty;
+  const { year, month, day } = getZonedYmd(endMs, locCtx.tz);
+  const localDateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  let shiftClockOut = null;
+  if (providerId) shiftClockOut = await fetchProviderShiftClockOut(auth, locationId, providerId, localDateStr);
+  return computeCloseShiftGapMinutes({ endOn, locationTz: locCtx.tz, hours: locCtx.hours, shiftClockOut });
+}
+
 async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   const auth = getBoulevardAuthContext();
   if (!auth) return { eligible: false, reason: 'boulevard_not_configured' };
@@ -2586,6 +2803,34 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
       if (result && typeof result === 'object') {
         result.providerContextRecovered = true;
       }
+    }
+  }
+  // Last-of-day recovery: when no next same-provider commitment bounds the gap
+  // (gap_unprovable), try to bound it by BOTH the location close AND the provider
+  // shift end. Only runs in the gap_unprovable case; when a next commitment exists
+  // it is already the tightest bound, so this adds no fetches on the common path.
+  // FAIL CLOSED: computeCloseShiftGapMinutes returns availableGapMinutes only when
+  // BOTH bounds resolve, so any hours OR shift fetch failure (timeout, GraphQL
+  // error, empty rows, no matching staff row) leaves it null and the result stays
+  // gap_unprovable. Closing time alone never makes an upgrade eligible: it is not
+  // proof the provider is present to perform the longer service.
+  if (result?.reason === 'gap_unprovable' && result.endOn && isFiniteNumber(result.requiredExtraMinutes)) {
+    try {
+      const bounded = await resolveCloseShiftBoundedGap(auth, result);
+      if (bounded) {
+        result.locationCloseMinutes = Number.isFinite(bounded.locationCloseMinutes) ? bounded.locationCloseMinutes : null;
+        result.shiftEndMinutes = Number.isFinite(bounded.shiftEndMinutes) ? bounded.shiftEndMinutes : null;
+        if (bounded.availableGapMinutes != null) {
+          result.availableGapMinutes = bounded.availableGapMinutes;
+          result.gapBoundedBy = bounded.gapBoundedBy;
+          result.gapUnlimited = false;
+          const fits = bounded.availableGapMinutes >= result.requiredExtraMinutes;
+          result.eligible = fits;
+          result.reason = fits ? 'eligible' : 'insufficient_gap';
+        }
+      }
+    } catch (err) {
+      // Conservative: leave gap_unprovable untouched on any failure.
     }
   }
   if (fallbackScanUsed) {
@@ -4139,6 +4384,8 @@ export {
   buildAppointmentWindowQuery,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
+  computeCloseShiftGapMinutes,
+  zonedWallClockToUtcMs,
   probeCancelRebookCapabilities,
   resolveNameScanFallbackCandidate,
   reverifyAndApplyUpgradeForProfile,
