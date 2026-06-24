@@ -340,6 +340,26 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     expect(result.shiftEndMinutes).toBeNull();
   });
 
+  it('FAIL-CLOSED: a split shift (more than one matching shift block) stays gap_unprovable', async () => {
+    // The provider has two shift blocks that day. Without clockIn we cannot prove
+    // which block covers the 8:30 PM appointment end, and binding the later block
+    // (listed first here) would overstate the gap and produce a false offer. The
+    // recovery must refuse to guess and fail closed. Pre-fix, rows.find() returned
+    // the first (21:00) block and flipped this eligible.
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT],
+      location: UWS_LOCATION,
+      shifts: [
+        { staffId: 'prov-1', clockOut: '21:00:00', available: true },
+        { staffId: 'prov-1', clockOut: '13:00:00', available: true },
+      ],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.eligible).toBe(false);
+    expect(result.shiftEndMinutes).toBeNull();
+  });
+
   it('UNCHANGED: a later same-provider appointment still bounds the gap, no hours/shift fetch needed', async () => {
     const nextAppt = { id: 'appt-2', clientId: 'other', providerId: 'urn:blvd:Staff:prov-1', startOn: '2026-06-19T20:50:00-04:00', endOn: '2026-06-19T21:20:00-04:00', locationId: 'urn:blvd:Location:loc-1', status: 'BOOKED', canceledAt: null };
     const fetchMock = makeFetchMock({ appts: [SAMANTHA_APPT, nextAppt], location: UWS_LOCATION, shifts: [] });

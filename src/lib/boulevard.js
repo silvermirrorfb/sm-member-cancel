@@ -2685,8 +2685,14 @@ async function fetchProviderShiftClockOut(auth, locationId, providerId, localDat
     const rows = data?.data?.shifts?.shifts;
     if (!Array.isArray(rows)) return null;
     const wantBare = bareBoulevardId(prov); // response staffId is BARE; match bare-to-bare
-    const match = rows.find(r => r && r.available !== false && typeof r.clockOut === 'string' && bareBoulevardId(r.staffId) === wantBare);
-    return match ? match.clockOut : null; // require a real string clockOut; no coercion
+    const matches = rows.filter(r => r && r.available !== false && typeof r.clockOut === 'string' && bareBoulevardId(r.staffId) === wantBare);
+    // Fail closed on a split shift: more than one matching block means we cannot
+    // prove which one covers the appointment without clockIn, and binding the wrong
+    // (later) block would overstate the gap and produce a false offer. Require
+    // exactly one block; otherwise no shift bound resolves and the upgrade stays
+    // gap_unprovable. (Finding 4 / codex P1.)
+    if (matches.length !== 1) return null;
+    return matches[0].clockOut; // require a real string clockOut; no coercion
   } catch {
     return null;
   }

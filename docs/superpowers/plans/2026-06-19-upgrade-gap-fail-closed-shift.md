@@ -21,7 +21,7 @@ When the provider shift end cannot be resolved, the last-of-day upgrade **FAILS 
 
 ## Known low-risk follow-ups (noted, NOT in scope)
 
-- **Finding 4 (split shifts):** `fetchProviderShiftClockOut` uses `rows.find()` without checking the shift `[clockIn, clockOut]` actually spans the appointment end; a split-shift day could bind the wrong clockOut. Worst case under the fail-closed rule is under-offering (safe).
+- **Finding 4 (split shifts): FIXED 2026-06-24.** `fetchProviderShiftClockOut` previously used `rows.find()` and could bind a non-covering later block's clockOut on a split-shift day, overstating the gap. Re-review showed the worst case was an over-offer (false offer), not merely under-offering as first thought. Now it fails closed when more than one matching available shift block exists (we cannot disambiguate which block covers the appointment without clockIn). A precise covering-shift selection via clockIn remains a possible later refinement, but fail-closed-on-ambiguity removes the false-offer path. Closes the codex P1.
 - **Next-appointment id-form (boulevard.js next-appt match):** matches provider by exact id; both ids come from the same scan (URN-Staff), so consistent today, but not normalized like the shift match.
 
 ## Verification
