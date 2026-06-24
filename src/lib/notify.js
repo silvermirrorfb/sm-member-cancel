@@ -502,13 +502,25 @@ function tallyRunSummary(results) {
 
 // Decide whether a single scan run needs a human. Healthy runs stay silent: at
 // most one transient error absorbed (errors <= 1) and no add-on sent. Returns
-// { shouldAlert, conditions } where conditions is a subset of ['errors', 'addon'].
+// { shouldAlert, conditions } where conditions is a subset of
+// ['errors', 'addon', 'big_scan_zero_send'].
+//
+// A big scan that sends nothing is the 2026-06-19 outage signature: an eligibility
+// regression skipped every candidate (gap_unprovable) with zero errors, so the
+// errors-only classifier read a total send failure as a healthy all-skips day.
+// Fire on a large scan with zero sends REGARDLESS of error count. The threshold is
+// strictly greater than 50 so a genuinely light day does not page.
+const BIG_SCAN_MIN_CANDIDATES = 50;
+
 function classifyUpgradeScanRun(summary) {
   const errors = Number(summary?.errors || 0);
   const addonSends = Number(summary?.addonSends || 0);
+  const total = Number(summary?.total || 0);
+  const sent = Number(summary?.sent || 0);
   const conditions = [];
   if (errors >= 2) conditions.push('errors');
   if (addonSends >= 1) conditions.push('addon');
+  if (total > BIG_SCAN_MIN_CANDIDATES && sent === 0) conditions.push('big_scan_zero_send');
   return { shouldAlert: conditions.length > 0, conditions };
 }
 
@@ -521,6 +533,9 @@ function buildUpgradeScanAlert(summary, conditions) {
   }
   if (conditions.includes('addon')) {
     verdict.push(`Needs attention: an add-on offer was actually texted to a member (${addonSends} this run). Add-on texts are supposed to be impossible from this pipeline, so the safeguard may have broken. Please have engineering check immediately.`);
+  }
+  if (conditions.includes('big_scan_zero_send')) {
+    verdict.push(`Needs attention: the upgrade scan looked at ${summary?.total ?? 0} members in a single run but sent 0 upgrade texts. A scan that large with nothing sent almost always means one rule is skipping every member (an eligibility regression), not a genuinely quiet day. Please forward to engineering to check the skip reasons below.`);
   }
   const technical = [
     `total=${summary?.total ?? 0} sent=${summary?.sent ?? 0} skipped=${summary?.skipped ?? 0} errors=${errors} addonSends=${addonSends}`,
