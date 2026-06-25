@@ -118,6 +118,16 @@ So right now, **human completion is still required** for the actual appointment 
 
 ---
 
+## Add-on Application Safety
+
+Add-on SMS offers are separate from duration upgrades. Duration upgrades update the existing appointment service in place. Add-ons must also be non-destructive: the automation may only use Boulevard's appointment edit/append booking flow (`bookingCreateFromAppointment`, `bookingAddServiceAddon`, `bookingComplete`).
+
+The automation must never cancel an existing appointment to add an add-on. If the safe append flow fails because of a Boulevard timeout, validation error, network failure, schema mismatch, or booking warning, the member's original appointment stays unchanged and the system queues manual follow-up. The member gets approved confirmation copy that says the team will confirm before the appointment, never a false "you're all set."
+
+`SMS_ENABLE_ADDON_FALLBACK` is the legacy add-on-offer gate name. It controls whether add-on offers are built, not whether destructive cancel-rebook behavior is allowed. The cancel-rebook path was removed from `boulevard.js`, so it cannot run in any environment.
+
+---
+
 ## Common Skip Reasons (for QA)
 
 - `outside_send_window` / `queued_outside_send_window`
