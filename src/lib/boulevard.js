@@ -3265,17 +3265,40 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
   // window is clear. Fail closed rather than read an incomplete scan as "no others".
   const sawSourceAppointment = scan.appointments.some(appt => bareBoulevardId(appt?.id) === appointmentBareId);
   if (!sawSourceAppointment) return false;
-  for (const appt of scan.appointments) {
-    if (bareBoulevardId(appt?.id) === appointmentBareId) continue; // the line being edited
+
+  // Appointments overlapping the extended window (excluding the source being edited).
+  const overlapping = scan.appointments.filter(appt => {
+    if (bareBoulevardId(appt?.id) === appointmentBareId) return false;
     const otherStart = Date.parse(appt?.startOn);
     const otherEnd = Date.parse(appt?.endOn);
-    if (!Number.isFinite(otherStart) || !Number.isFinite(otherEnd)) continue;
-    const overlaps = otherStart < windowEndMs && otherEnd > startMs;
-    if (!overlaps) continue;
+    if (!Number.isFinite(otherStart) || !Number.isFinite(otherEnd)) return false;
+    return otherStart < windowEndMs && otherEnd > startMs;
+  });
+
+  // Decide same-staff at SERVICE level, not just by the appointment-level provider:
+  // a multi-staff appointment can carry a line on the target staff while its
+  // appointment-level provider resolves to someone else. For each overlapping
+  // appointment, an appointment-level provider that already matches (or is
+  // unresolvable) blocks immediately; otherwise resolve its service-line staff and
+  // block if any line is on the target staff. Any resolution failure fails closed.
+  const needsServiceCheck = [];
+  for (const appt of overlapping) {
     const otherProviderBareId = bareBoulevardId(appt?.providerId);
-    // Same provider, OR an unresolvable provider we cannot rule out: treat as a
-    // collision and block (fail closed).
     if (!otherProviderBareId || otherProviderBareId === providerBareId) return false;
+    needsServiceCheck.push(appt);
+  }
+  if (needsServiceCheck.length > 0) {
+    const contexts = await Promise.all(
+      needsServiceCheck.map(appt =>
+        fetchAppointmentContextById(apiUrl, headers, appt.id).catch(() => null),
+      ),
+    );
+    for (const ctx of contexts) {
+      if (!ctx) return false; // could not resolve service staff -> fail closed
+      const hasTargetStaffLine = (Array.isArray(ctx.appointmentServices) ? ctx.appointmentServices : [])
+        .some(service => bareBoulevardId(service?.staffId) === providerBareId);
+      if (hasTargetStaffLine) return false; // a service line is on the target staff -> collision
+    }
   }
   return true;
 }

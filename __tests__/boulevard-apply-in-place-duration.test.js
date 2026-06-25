@@ -46,6 +46,7 @@ function buildFetch({
   omitSourceFromLocationScan = false, // drop the source appt from the collision scan
   sourceEndOn = '2026-06-04T14:30:00.000Z', // booked block end (raw); may be shorter than bucketed duration
   collisionScanFails = false,
+  extraContexts = {}, // id -> appointmentServices array (service-level staff), or 'FAIL' to simulate a failed context fetch
 } = {}) {
   let completed = false;
   let locationScanCount = 0;
@@ -67,6 +68,16 @@ function buildFetch({
       if (typeName === 'Query') return json({ data: { __type: { fields: [{ name: 'appointments', args: [{ name: 'first', type: { kind: 'SCALAR', name: 'Int', ofType: null } }, { name: 'after', type: { kind: 'SCALAR', name: 'String', ofType: null } }, { name: 'clientId', type: { kind: 'SCALAR', name: 'ID', ofType: null } }, { name: 'locationId', type: { kind: 'NON_NULL', name: null, ofType: { kind: 'SCALAR', name: 'ID' } } }], type: { kind: 'OBJECT', name: 'AppointmentConnection', ofType: null } }] } } });
     }
     if (query.includes('FetchAppointmentContext')) {
+      const reqId = String(body?.variables?.id || '');
+      if (reqId && reqId !== 'appt-1' && Object.prototype.hasOwnProperty.call(extraContexts, reqId)) {
+        const svc = extraContexts[reqId];
+        if (svc === 'FAIL') return json({ data: { appointment: null } });
+        return json({ data: { appointment: {
+          id: reqId, clientId: 'client-x', locationId: LOC,
+          startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', notes: null,
+          appointmentServices: svc,
+        } } });
+      }
       return json({ data: { appointment: {
         id: 'appt-1', clientId: 'client-1', locationId: LOC,
         startAt: '2026-06-04T14:00:00.000Z', endAt: sourceEndOn, notes: 'note',
@@ -236,6 +247,43 @@ describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no c
     global.fetch = buildFetch({
       sourceEndOn: '2026-06-04T14:25:00.000Z',
       locationExtraNodes: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:46:00.000Z', endOn: '2026-06-04T14:55:00.000Z', status: 'BOOKED', canceledAt: null }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('BLOCKS a multi-staff overlapping appointment that carries a service line on the target staff (service-level, not just appointment-level provider)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      durationWarnings: [],
+      locationExtraNodes: [{ id: 'appt-ms', clientId: 'client-2', providerId: 'prov-2', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+      // Appointment-level provider is prov-2, but one service line is on the target prov-1.
+      extraContexts: { 'appt-ms': [{ id: 'aps-ms-1', serviceId: 'svc-a', staffId: 'prov-2' }, { id: 'aps-ms-2', serviceId: 'svc-b', staffId: 'prov-1' }] },
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('does NOT over-block: a genuinely different-staff overlapping appointment (no target service line) still commits', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      locationExtraNodes: [{ id: 'appt-other', clientId: 'client-2', providerId: 'prov-2', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+      extraContexts: { 'appt-other': [{ id: 'aps-o-1', serviceId: 'svc-a', staffId: 'prov-2' }] },
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(result.reason).toBe('applied');
+    expect(calls).toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED when an overlapping appointment’s service staff cannot be resolved', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      durationWarnings: [],
+      locationExtraNodes: [{ id: 'appt-x', clientId: 'client-2', providerId: 'prov-2', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+      extraContexts: { 'appt-x': 'FAIL' },
     });
     const result = await runReverify();
     expect(result.success).toBe(false);
