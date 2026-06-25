@@ -1,4 +1,5 @@
 import { Redis } from '@upstash/redis';
+import { parseGoogleServiceAccount } from './google-credentials.js';
 
 // Live health probes for /api/health?deep=1. These do a real authenticated
 // round-trip against each dependency so a broken credential or a down service
@@ -167,7 +168,7 @@ export async function probeSheets() {
   return runProbe(async (signal) => {
     const { google } = await import('googleapis');
     const auth = new google.auth.GoogleAuth({
-      credentials: JSON.parse(credentials),
+      credentials: parseGoogleServiceAccount(credentials),
       scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
     });
     const sheets = google.sheets({ version: 'v4', auth });
