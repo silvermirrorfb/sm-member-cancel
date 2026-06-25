@@ -42,9 +42,14 @@ function buildFetch({
   createWarnings = [],
   reject = null,
   locationExtraNodes = [],
+  locationExtraNodesSecondCall = null, // nodes for the 2nd location scan (cross-gate rescan)
+  omitSourceFromLocationScan = false, // drop the source appt from the collision scan
+  sourceEndOn = '2026-06-04T14:30:00.000Z', // booked block end (raw); may be shorter than bucketed duration
   collisionScanFails = false,
 } = {}) {
   let completed = false;
+  let locationScanCount = 0;
+  const sourceNode = { ...SOURCE_NODE, endOn: sourceEndOn };
   const rejects = Array.isArray(reject) ? reject : reject ? [reject] : [];
   return vi.fn(async (_url, init) => {
     const body = JSON.parse(init.body);
@@ -64,7 +69,7 @@ function buildFetch({
     if (query.includes('FetchAppointmentContext')) {
       return json({ data: { appointment: {
         id: 'appt-1', clientId: 'client-1', locationId: LOC,
-        startAt: '2026-06-04T14:00:00.000Z', endAt: '2026-06-04T14:30:00.000Z', notes: 'note',
+        startAt: '2026-06-04T14:00:00.000Z', endAt: sourceEndOn, notes: 'note',
         appointmentServices: [{ id: 'aps-1', serviceId: 'svc-30', staffId: 'prov-1' }],
       } } });
     }
@@ -73,8 +78,14 @@ function buildFetch({
       scanClientIds.push(body?.variables?.clientId || null);
       // Client-scoped scan (eligibility) only ever sees the member's own appointments.
       // Location-scoped scan (the collision check) sees the whole location window.
-      if (!clientScoped && collisionScanFails) return json({ errors: [{ message: 'scan failed' }], data: null });
-      const nodes = clientScoped ? [SOURCE_NODE, LATER_NODE] : [SOURCE_NODE, LATER_NODE, ...locationExtraNodes];
+      if (clientScoped) {
+        return json({ data: { appointments: { edges: [sourceNode, LATER_NODE].map(node => ({ node })), pageInfo: { hasNextPage: false, endCursor: null } } } });
+      }
+      locationScanCount += 1;
+      if (collisionScanFails) return json({ errors: [{ message: 'scan failed' }], data: null });
+      const extra = (locationScanCount >= 2 && locationExtraNodesSecondCall) ? locationExtraNodesSecondCall : locationExtraNodes;
+      const base = omitSourceFromLocationScan ? [LATER_NODE] : [sourceNode, LATER_NODE];
+      const nodes = [...base, ...extra];
       return json({ data: { appointments: { edges: nodes.map(node => ({ node })), pageInfo: { hasNextPage: false, endCursor: null } } } });
     }
     if (query.includes('VerifyApptDuration')) {
@@ -178,6 +189,44 @@ describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no c
     // eligibility scan is client-scoped; the collision check scan is location-scoped (clientId null).
     expect(scanClientIds).toContain('client-1');
     expect(scanClientIds).toContain(null);
+  });
+
+  it('does NOT reuse a positive staff-window result across gates: rescans at the complete gate and blocks a collision that appears after setDurations', async () => {
+    process.env = env();
+    // setDurations self-overlap with a clear window (1st location scan), then a
+    // self-overlap warning at complete where the 2nd location scan now finds a
+    // real collision. A stale-positive cache would wrongly report success.
+    global.fetch = buildFetch({
+      completeWarnings: [{ code: 'STAFF_DOUBLE_BOOKED', message: 'Appointment is double booked', staffId: 'prov-1', serviceId: 'svc-30', bookingServiceId: 'bs-base' }],
+      locationExtraNodesSecondCall: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(String(result.reason)).toContain('complete_warning_block');
+    // Two location-scoped scans prove the positive result was not cached across gates.
+    expect(scanClientIds.filter(id => id === null).length).toBe(2);
+  });
+
+  it('FAILS CLOSED when the appointment being edited is absent from its own window scan (untrustworthy scan)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ omitSourceFromLocationScan: true });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('detects a collision inside [start, start+target] even when the booked block is shorter than its bucketed duration (window math)', async () => {
+    process.env = env();
+    // Booked block ends 14:25 (raw 25 min, bucketed to 30). Target 50 => the staff is
+    // occupied through 14:50. A collision at 14:46-14:55 must be caught; a window that
+    // used endOn + (target - bucketedCurrent) = 14:45 would miss it.
+    global.fetch = buildFetch({
+      sourceEndOn: '2026-06-04T14:25:00.000Z',
+      locationExtraNodes: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:46:00.000Z', endOn: '2026-06-04T14:55:00.000Z', status: 'BOOKED', canceledAt: null }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
   });
 
   it('a mutation failure aborts before commit (no bookingComplete)', async () => {

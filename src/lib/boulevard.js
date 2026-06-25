@@ -3247,9 +3247,11 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
   if (!appointmentBareId || !providerBareId || !locationId || !Number.isFinite(startMs) || !Number.isFinite(windowEndMs)) {
     return false; // missing inputs -> cannot prove clear -> fail closed
   }
-  // buildAppointmentWindowQuery filters by START date at day granularity, so scan a
-  // padded day range around the appointment and apply precise time-overlap client-side.
-  const scanWindowStart = new Date(startMs - 24 * 60 * 60 * 1000);
+  // buildAppointmentWindowQuery filters by START date at day granularity. Scan only
+  // the appointment's own day (appointments are short, so any block overlapping the
+  // window starts that same day). A tight window keeps the result well under
+  // pagination limits, so a real collision cannot hide on an unfetched page.
+  const scanWindowStart = new Date(startMs);
   const scanWindowEnd = new Date(windowEndMs + 24 * 60 * 60 * 1000);
   const scan = await scanAppointments(apiUrl, headers, {
     locationId,
@@ -3257,6 +3259,12 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
     windowEnd: scanWindowEnd,
   });
   if (!scan || !Array.isArray(scan.appointments)) return false; // scan failed -> fail closed
+  // Sanity gate: the appointment being edited MUST appear in its own window scan. If
+  // it does not, the scan did not actually cover this window (date-filter mismatch,
+  // pagination truncation, a dropped row), so it cannot be trusted to prove the
+  // window is clear. Fail closed rather than read an incomplete scan as "no others".
+  const sawSourceAppointment = scan.appointments.some(appt => bareBoulevardId(appt?.id) === appointmentBareId);
+  if (!sawSourceAppointment) return false;
   for (const appt of scan.appointments) {
     if (bareBoulevardId(appt?.id) === appointmentBareId) continue; // the line being edited
     const otherStart = Date.parse(appt?.startOn);
@@ -3640,22 +3648,33 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     return { applied: false, reason: 'duration_booking_missing_target_duration', bookingId };
   }
 
-  // Lazily prove the staff window is clear of OTHER real appointments, computed once
-  // and only when a STAFF_DOUBLE_BOOKED warning actually appears. The check reuses
-  // scanAppointments (location-scoped) because the eligibility gap read is
-  // client-scoped and cannot see other clients' bookings on the staff. Fails closed.
-  let staffWindowClear = null;
+  // Prove the staff window is clear of OTHER real appointments, recomputed FRESH on
+  // each gate that sees a STAFF_DOUBLE_BOOKED. A positive (clear) result is never
+  // reused across mutating gates: a collision can be booked, or first surface at
+  // commit, in the gap between gates. Once a collision is proven it sticks (a real
+  // conflict does not vanish). The check reuses scanAppointments (location-scoped)
+  // because the eligibility gap read is client-scoped and cannot see other clients'
+  // bookings on the staff. Runs only when a STAFF_DOUBLE_BOOKED is present, so the
+  // clean path adds no fetch. Fails closed on any doubt.
+  let collisionProven = false;
   async function selfOverlapContext() {
-    if (staffWindowClear === null) {
+    let staffWindowClear;
+    if (collisionProven) {
+      staffWindowClear = false;
+    } else {
       const currentDuration = Math.round(Number(options?.currentDurationMinutes));
       const extensionMinutes = Number.isFinite(currentDuration) && currentDuration > 0
         ? Math.max(0, targetDuration - currentDuration)
         : targetDuration; // unknown current duration -> assume the full target (wider window, safer)
       const startMs = Date.parse(appointmentContext?.startOn);
       const endMs = Date.parse(appointmentContext?.endOn);
-      const windowEndMs = Number.isFinite(endMs)
-        ? endMs + extensionMinutes * 60000
-        : (Number.isFinite(startMs) ? startMs + targetDuration * 60000 : NaN);
+      // The extended block occupies at least [start, start + targetDuration]. Take the
+      // widest of that and (end + extension) so a booked block shorter than its
+      // bucketed duration cannot shrink the checked window and hide a late collision.
+      const candidateEndMs = [];
+      if (Number.isFinite(startMs)) candidateEndMs.push(startMs + targetDuration * 60000);
+      if (Number.isFinite(endMs)) candidateEndMs.push(endMs + extensionMinutes * 60000);
+      const windowEndMs = candidateEndMs.length ? Math.max(...candidateEndMs) : NaN;
       staffWindowClear = await isStaffWindowClearOfOtherAppointments(apiUrl, headers, {
         appointmentId,
         providerId,
@@ -3663,6 +3682,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
         startOn: appointmentContext?.startOn || null,
         windowEndOn: Number.isFinite(windowEndMs) ? new Date(windowEndMs).toISOString() : null,
       });
+      if (!staffWindowClear) collisionProven = true;
     }
     return { baseBookingServiceId, sourceServiceId, providerId, staffWindowClear };
   }
@@ -3726,6 +3746,10 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     );
     if (!priceAttempt.ok) {
       return { applied: false, reason: 'duration_booking_set_price_failed', error: priceAttempt.error || null, bookingId };
+    }
+    const priceWarnings = toBookingWarningList(priceAttempt.payload?.bookingWarnings);
+    if (await warningsBlock(priceWarnings)) {
+      return { applied: false, reason: 'duration_booking_set_price_warning_block', warnings: priceWarnings, bookingId };
     }
   }
 
