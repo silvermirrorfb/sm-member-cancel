@@ -191,20 +191,33 @@ describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no c
     expect(scanClientIds).toContain(null);
   });
 
-  it('does NOT reuse a positive staff-window result across gates: rescans at the complete gate and blocks a collision that appears after setDurations', async () => {
+  it('does NOT reuse a positive staff-window result across gates: rescans before commit and blocks a collision that appears after setDurations', async () => {
     process.env = env();
-    // setDurations self-overlap with a clear window (1st location scan), then a
-    // self-overlap warning at complete where the 2nd location scan now finds a
-    // real collision. A stale-positive cache would wrongly report success.
+    // setDurations self-overlap with a clear window (1st location scan), then the
+    // unconditional pre-commit rescan (2nd location scan) finds a real collision.
+    // A stale-positive cache would skip the rescan and wrongly commit.
     global.fetch = buildFetch({
-      completeWarnings: [{ code: 'STAFF_DOUBLE_BOOKED', message: 'Appointment is double booked', staffId: 'prov-1', serviceId: 'svc-30', bookingServiceId: 'bs-base' }],
       locationExtraNodesSecondCall: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
     });
     const result = await runReverify();
     expect(result.success).toBe(false);
-    expect(String(result.reason)).toContain('complete_warning_block');
+    expect(calls).not.toContain('bookingComplete'); // blocked BEFORE commit
     // Two location-scoped scans prove the positive result was not cached across gates.
     expect(scanClientIds.filter(id => id === null).length).toBe(2);
+  });
+
+  it('blocks a real collision even when Boulevard returns NO staff warning (invariant-triggered, not warning-triggered)', async () => {
+    process.env = env();
+    // Boulevard surfaces no STAFF_DOUBLE_BOOKED at any gate, yet a real same-staff
+    // appointment overlaps the window. The unconditional pre-commit scan must catch
+    // it; the safety proof cannot depend on the provider emitting a warning.
+    global.fetch = buildFetch({
+      durationWarnings: [],
+      locationExtraNodes: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
   });
 
   it('FAILS CLOSED when the appointment being edited is absent from its own window scan (untrustworthy scan)', async () => {

@@ -3753,6 +3753,17 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     }
   }
 
+  // INVARIANT GATE (safety-critical): commit ONLY if the staff window is
+  // affirmatively proven clear of OTHER appointments. This runs unconditionally,
+  // regardless of whether Boulevard surfaced a STAFF_DOUBLE_BOOKED warning, so the
+  // proof is invariant-triggered, not warning-triggered: a real collision is blocked
+  // BEFORE bookingComplete even if the provider returns no warning. selfOverlapContext
+  // recomputes the window fresh here (never a stale positive). Fails closed.
+  const preCommitContext = await selfOverlapContext();
+  if (!preCommitContext.staffWindowClear) {
+    return { applied: false, reason: 'duration_booking_staff_window_not_clear', bookingId };
+  }
+
   // Commit the edit back to the SAME appointment. notifyClient:false: we send our
   // own confirmation SMS and must not double-notify.
   const bookingCompleteQuery = `
