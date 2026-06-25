@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { Redis } from '@upstash/redis';
 import { buildMemberDraft, renderDraftForAlert, renderDraftForHtml } from './member-draft.js';
+import { parseGoogleServiceAccount } from './google-credentials.js';
 
 const DEFAULT_SUPPORT_INCIDENT_SHEET_ID = '15Wame-TJbihEAKEnlL51rhSWRsiVpehz7RO1Gsa9s4c';
 const CHATLOG_SHEET_TITLE = 'Sheet1';
@@ -124,7 +125,7 @@ async function getSheetsClient() {
 
   const { google } = await import('googleapis');
   const auth = new google.auth.GoogleAuth({
-    credentials: JSON.parse(credentials),
+    credentials: parseGoogleServiceAccount(credentials),
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
 
