@@ -36,6 +36,7 @@ const LATER_NODE = { id: 'appt-next', clientId: 'other', providerId: 'prov-1', l
 // location-scoped scan (no clientId), i.e. it reuses scanAppointments.
 let calls;
 let scanClientIds;
+let scanQueries; // window clause (startAt >= ... AND startAt < ...) of each location-scoped scan
 function buildFetch({
   durationWarnings = [{ code: 'STAFF_DOUBLE_BOOKED', message: 'Appointment is double booked', staffId: 'prov-1', serviceId: 'svc-30', bookingServiceId: 'bs-base' }],
   completeWarnings = [],
@@ -65,7 +66,7 @@ function buildFetch({
     }
     if (query.includes('IntrospectTypeDetailed')) {
       if (typeName === 'Appointment') return json({ data: { __type: { fields: [{ name: 'notes', args: [], type: { kind: 'SCALAR', name: 'String', ofType: null } }] } } });
-      if (typeName === 'Query') return json({ data: { __type: { fields: [{ name: 'appointments', args: [{ name: 'first', type: { kind: 'SCALAR', name: 'Int', ofType: null } }, { name: 'after', type: { kind: 'SCALAR', name: 'String', ofType: null } }, { name: 'clientId', type: { kind: 'SCALAR', name: 'ID', ofType: null } }, { name: 'locationId', type: { kind: 'NON_NULL', name: null, ofType: { kind: 'SCALAR', name: 'ID' } } }], type: { kind: 'OBJECT', name: 'AppointmentConnection', ofType: null } }] } } });
+      if (typeName === 'Query') return json({ data: { __type: { fields: [{ name: 'appointments', args: [{ name: 'first', type: { kind: 'SCALAR', name: 'Int', ofType: null } }, { name: 'after', type: { kind: 'SCALAR', name: 'String', ofType: null } }, { name: 'clientId', type: { kind: 'SCALAR', name: 'ID', ofType: null } }, { name: 'locationId', type: { kind: 'NON_NULL', name: null, ofType: { kind: 'SCALAR', name: 'ID' } } }, { name: 'query', type: { kind: 'SCALAR', name: 'QueryString', ofType: null } }], type: { kind: 'OBJECT', name: 'AppointmentConnection', ofType: null } }] } } });
     }
     if (query.includes('FetchAppointmentContext')) {
       const reqId = String(body?.variables?.id || '');
@@ -93,6 +94,7 @@ function buildFetch({
         return json({ data: { appointments: { edges: [sourceNode, LATER_NODE].map(node => ({ node })), pageInfo: { hasNextPage: false, endCursor: null } } } });
       }
       locationScanCount += 1;
+      scanQueries.push(String(body?.variables?.query || ''));
       if (collisionScanFails) return json({ errors: [{ message: 'scan failed' }], data: null });
       const extra = (locationScanCount >= 2 && locationExtraNodesSecondCall) ? locationExtraNodesSecondCall : locationExtraNodes;
       const base = omitSourceFromLocationScan ? [LATER_NODE] : [sourceNode, LATER_NODE];
@@ -128,7 +130,7 @@ async function runReverify() {
 }
 
 describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no cancel)', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('edits the existing line in place and never adds/removes a service line or cancels', async () => {
@@ -288,6 +290,15 @@ describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no c
     const result = await runReverify();
     expect(result.success).toBe(false);
     expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('collision scan requests the day BEFORE the appointment so a midnight-crossing overlap is not excluded by the date filter', async () => {
+    process.env = env();
+    global.fetch = buildFetch();
+    await runReverify();
+    // Source appointment is on 2026-06-04; the collision scan must ask for >= 2026-06-03.
+    expect(scanQueries.length).toBeGreaterThan(0);
+    expect(scanQueries.some(q => q.includes("startAt >= '2026-06-03'"))).toBe(true);
   });
 
   it('a mutation failure aborts before commit (no bookingComplete)', async () => {

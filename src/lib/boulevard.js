@@ -3247,11 +3247,14 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
   if (!appointmentBareId || !providerBareId || !locationId || !Number.isFinite(startMs) || !Number.isFinite(windowEndMs)) {
     return false; // missing inputs -> cannot prove clear -> fail closed
   }
-  // buildAppointmentWindowQuery filters by START date at day granularity. Scan only
-  // the appointment's own day (appointments are short, so any block overlapping the
-  // window starts that same day). A tight window keeps the result well under
-  // pagination limits, so a real collision cannot hide on an unfetched page.
-  const scanWindowStart = new Date(startMs);
+  // buildAppointmentWindowQuery filters by START date at day granularity. Pull the
+  // lower bound back one day so an appointment that STARTS before the source's UTC
+  // midnight but RUNS INTO the window (e.g. an evening ET booking that straddles UTC
+  // midnight) is still returned and time-overlap-filtered below; without this the
+  // date filter (startAt >= source-date) would silently exclude it. The window stays
+  // a few days at one location, far under the scan page cap, and the source-present
+  // sanity gate below independently fails closed on any truncation.
+  const scanWindowStart = new Date(startMs - 24 * 60 * 60 * 1000);
   const scanWindowEnd = new Date(windowEndMs + 24 * 60 * 60 * 1000);
   const scan = await scanAppointments(apiUrl, headers, {
     locationId,
