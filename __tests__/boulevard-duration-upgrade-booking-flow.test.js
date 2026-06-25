@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Booking-flow duration upgrade (outbound-sms #13). The legacy
-// updateAppointment(serviceId) mutation is invalid in Boulevard's schema and
-// silently fails; this exercises the non-destructive booking-edit swap that
-// replaces it: bookingCreateFromAppointment -> bookingAddService (50-min) ->
-// bookingRemoveService (30-min) -> bookingServiceSetPrice -> bookingComplete,
-// gated behind BOULEVARD_ENABLE_BOOKING_UPGRADE.
+// Booking-flow duration upgrade (outbound-sms #13), Fix A in-place edit. The
+// legacy updateAppointment(serviceId) mutation is invalid in Boulevard's schema
+// and silently fails; this exercises the non-destructive booking-edit that
+// replaces it: bookingCreateFromAppointment -> bookingServiceSetDurations (50-min,
+// on the existing editing-linked line) -> bookingServiceSetPrice -> bookingComplete,
+// gated behind BOULEVARD_ENABLE_BOOKING_UPGRADE. No add/remove, no second service
+// line, so a STAFF_DOUBLE_BOOKED self-overlap cannot arise.
 
 const originalEnv = process.env;
 const originalFetch = global.fetch;
@@ -59,6 +60,11 @@ function buildBookingFetch(opts = {}) {
       } } });
     }
 
+    if (query.includes('VerifyApptDuration')) {
+      const d = completed ? 50 : 30;
+      return json({ data: { appointment: { id: 'appt-1', duration: d, appointmentServices: [{ id: 'aps-1', serviceId: completed ? 'svc-50' : 'svc-30', duration: d, totalDuration: d }] } } });
+    }
+
     if (query.includes('ScanAppointments')) {
       return json({ data: { appointments: { edges: [
         { node: { id: 'appt-1', clientId: 'client-1', providerId: 'prov-1', locationId: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa', startOn: '2026-06-04T14:00:00.000Z', endOn: '2026-06-04T14:30:00.000Z', status: 'BOOKED', canceledAt: null } },
@@ -76,6 +82,10 @@ function buildBookingFetch(opts = {}) {
         },
         bookingWarnings: [],
       } } });
+    }
+    if (query.includes('bookingServiceSetDurations')) {
+      order.push('setDurations');
+      return json({ data: { bookingServiceSetDurations: { booking: { id: 'bk-1' }, bookingWarnings: opts.durationWarnings || [] } } });
     }
     if (query.includes('bookingAddService')) {
       order.push('add');
@@ -142,7 +152,7 @@ describe('duration upgrade booking-edit apply flow', () => {
     vi.restoreAllMocks();
   });
 
-  it('swaps the service in place (add 50 before removing 30) then completes and verifies', async () => {
+  it('edits the existing service line in place (setDurations, no add/remove) then completes and verifies', async () => {
     const fetchMock = buildBookingFetch();
     global.fetch = fetchMock;
 
@@ -152,10 +162,11 @@ describe('duration upgrade booking-edit apply flow', () => {
     expect(result.reason).toBe('applied');
     expect(result.updatedAppointmentId).toBe('appt-1');
 
-    const steps = fetchMock.order.filter(s => ['create', 'add', 'remove', 'complete'].includes(s));
-    expect(steps).toEqual(['create', 'add', 'remove', 'complete']);
-    // Add strictly before remove so the booking is never left empty.
-    expect(steps.indexOf('add')).toBeLessThan(steps.indexOf('remove'));
+    const steps = fetchMock.order.filter(s => ['create', 'setDurations', 'add', 'remove', 'complete'].includes(s));
+    expect(steps).toEqual(['create', 'setDurations', 'complete']);
+    // No second service line is ever created and the original line is never removed.
+    expect(fetchMock.order).not.toContain('add');
+    expect(fetchMock.order).not.toContain('remove');
   });
 
   it('honors the quoted price by setting the booking service price in cents', async () => {
@@ -169,14 +180,13 @@ describe('duration upgrade booking-edit apply flow', () => {
     expect(fetchMock.order.indexOf('price:13900')).toBeLessThan(fetchMock.order.indexOf('complete'));
   });
 
-  it('aborts before bookingComplete and before removing the original on a blocking add warning', async () => {
-    const fetchMock = buildBookingFetch({ addWarnings: [{ code: 'STAFF_DOUBLE_BOOKED', message: 'conflict' }] });
+  it('aborts before bookingComplete on a blocking duration-set warning (genuine external double-book)', async () => {
+    const fetchMock = buildBookingFetch({ durationWarnings: [{ code: 'STAFF_DOUBLE_BOOKED', message: 'conflict' }] });
     global.fetch = fetchMock;
 
     const result = await runReverify({ totalDollars: 139 });
 
     expect(result.success).toBe(false);
-    expect(fetchMock.order).not.toContain('remove'); // original 30-min never removed
     expect(fetchMock.order).not.toContain('complete'); // live appointment never committed
   });
 

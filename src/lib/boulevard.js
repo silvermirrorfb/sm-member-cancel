@@ -2904,6 +2904,41 @@ async function verifyAppointmentServiceApplied(apiUrl, headers, appointmentId, e
   );
 }
 
+// Fix A verification: confirm the in-place edit landed by reading the appointment
+// back and checking its (edited) service line now reports the target duration. The
+// service id is intentionally unchanged (no swap), so we verify duration, not id.
+async function verifyAppointmentDurationApplied(apiUrl, headers, appointmentId, expectedDuration, expectedServiceId) {
+  const expected = Math.round(Number(expectedDuration));
+  if (!Number.isFinite(expected) || expected <= 0) return false;
+  const id = String(appointmentId || '').trim();
+  if (!id) return false;
+  const query = `
+    query VerifyApptDuration($id: ID!) {
+      appointment(id: $id) {
+        id
+        appointmentServices { id serviceId duration totalDuration }
+      }
+    }
+  `;
+  const data = await fetchBoulevardGraphQL(apiUrl, headers, query, { id }, { silentErrors: true, returnErrors: true });
+  if (!data || data.__error) return false;
+  const appt = data?.data?.appointment;
+  if (!appt?.id) return false;
+  const services = Array.isArray(appt.appointmentServices) ? appt.appointmentServices : [];
+  const lineMatches = (s) => Number(s?.duration) === expected || Number(s?.totalDuration) === expected;
+  // Prefer the SPECIFIC edited line: an in-place duration edit leaves the service
+  // id unchanged, so match the line by service id and check that line's duration.
+  // Only fall back to any line if the edited line is not identifiable. No
+  // appointment-level aggregate fallback (a different line or the total could
+  // match the target and falsely pass).
+  const wantSvc = String(expectedServiceId || '').trim();
+  if (wantSvc) {
+    const line = services.find(s => String(s?.serviceId || '').trim() === wantSvc);
+    if (line) return lineMatches(line);
+  }
+  return services.some(lineMatches);
+}
+
 async function fetchAppointmentContextById(apiUrl, headers, appointmentId) {
   const id = String(appointmentId || '').trim();
   if (!id) return null;
@@ -3511,66 +3546,47 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     String(service?.editingAppointmentServiceId || '').trim() === sourceAppointmentServiceId,
   ) || bookingServices.find(service => !String(service?.baseBookingServiceId || '').trim()) || null;
   const baseBookingServiceId = String(baseBookingService?.id || '').trim();
-  const staffForSwap = String(baseBookingService?.staffId || providerId || '').trim();
   if (!bookingClientId || !baseBookingServiceId) {
     return { applied: false, reason: 'duration_booking_missing_booking_context', bookingId };
   }
 
-  // ADD the target service first (booking is never left empty).
-  const addServiceQuery = `
-    mutation DurationBookingAddService($input: BookingAddServiceInput!) {
-      bookingAddService(input: $input) {
-        booking { id }
-        bookingService { id serviceId staffId }
-        bookingWarnings { code message staffId serviceId }
-      }
-    }
-  `;
-  const addAttempt = await runMutationRoot(
-    apiUrl,
-    headers,
-    addServiceQuery,
-    { input: { bookingId, bookingClientId, serviceId: targetId, staffId: staffForSwap } },
-    'bookingAddService',
-  );
-  const addWarnings = toBookingWarningList(addAttempt.payload?.bookingWarnings);
-  if (!addAttempt.ok) {
-    return { applied: false, reason: 'duration_booking_add_service_failed', error: addAttempt.error || null, warnings: addWarnings, bookingId };
+  // IN-PLACE duration extension (Fix A): edit the existing editing-linked service
+  // line instead of add-new + remove-old. No second service line is ever created,
+  // so the draft never holds two services on the same staff/time and a
+  // STAFF_DOUBLE_BOOKED self-overlap cannot arise. There is no bookingAddService,
+  // no bookingRemoveService, and no cancelAppointment in this path. The booked
+  // service stays the same line, extended to the target duration.
+  const targetDuration = Math.round(Number(options?.targetDurationMinutes));
+  if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
+    return { applied: false, reason: 'duration_booking_missing_target_duration', bookingId };
   }
-  if (hasBlockingBookingWarnings(addWarnings)) {
-    return { applied: false, reason: 'duration_booking_add_service_warning_block', warnings: addWarnings, bookingId };
-  }
-  const addedBookingServiceId = String(addAttempt.payload?.bookingService?.id || '').trim();
-
-  // REMOVE the original service only after the target is in place.
-  const removeServiceQuery = `
-    mutation DurationBookingRemoveService($input: BookingRemoveServiceInput!) {
-      bookingRemoveService(input: $input) {
+  const setDurationsQuery = `
+    mutation DurationBookingServiceSetDurations($input: BookingServiceSetDurationsInput!) {
+      bookingServiceSetDurations(input: $input) {
         booking { id }
         bookingWarnings { code message staffId serviceId }
       }
     }
   `;
-  const removeAttempt = await runMutationRoot(
+  const durationAttempt = await runMutationRoot(
     apiUrl,
     headers,
-    removeServiceQuery,
-    { input: { bookingId, bookingServiceId: baseBookingServiceId } },
-    'bookingRemoveService',
+    setDurationsQuery,
+    { input: { bookingId, bookingServiceId: baseBookingServiceId, duration: targetDuration } },
+    'bookingServiceSetDurations',
   );
-  const removeWarnings = toBookingWarningList(removeAttempt.payload?.bookingWarnings);
-  if (!removeAttempt.ok) {
-    return { applied: false, reason: 'duration_booking_remove_service_failed', error: removeAttempt.error || null, warnings: removeWarnings, bookingId };
+  const durationWarnings = toBookingWarningList(durationAttempt.payload?.bookingWarnings);
+  if (!durationAttempt.ok) {
+    return { applied: false, reason: 'duration_booking_set_durations_failed', error: durationAttempt.error || null, warnings: durationWarnings, bookingId };
   }
-  if (hasBlockingBookingWarnings(removeWarnings)) {
-    return { applied: false, reason: 'duration_booking_remove_service_warning_block', warnings: removeWarnings, bookingId };
+  if (hasBlockingBookingWarnings(durationWarnings)) {
+    return { applied: false, reason: 'duration_booking_set_durations_warning_block', warnings: durationWarnings, bookingId };
   }
 
-  // Honor the quoted price (owner decision 2026-06-18: always charge what the
-  // offer quoted). Boulevard Money is in cents. Best-effort: only when a positive
-  // quoted total is provided and we resolved the new booking service id.
+  // Honor the quoted price on the SAME (edited) service line (owner decision
+  // 2026-06-18: always charge what the offer quoted). Boulevard Money is in cents.
   const quotedTotal = Number(options?.quotedTotalDollars);
-  if (Number.isFinite(quotedTotal) && quotedTotal > 0 && addedBookingServiceId) {
+  if (Number.isFinite(quotedTotal) && quotedTotal > 0) {
     const setPriceQuery = `
       mutation DurationBookingServiceSetPrice($input: BookingServiceSetPriceInput!) {
         bookingServiceSetPrice(input: $input) {
@@ -3583,7 +3599,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
       apiUrl,
       headers,
       setPriceQuery,
-      { input: { bookingId, bookingServiceId: addedBookingServiceId, price: Math.round(quotedTotal * 100) } },
+      { input: { bookingId, bookingServiceId: baseBookingServiceId, price: Math.round(quotedTotal * 100) } },
       'bookingServiceSetPrice',
     );
     if (!priceAttempt.ok) {
@@ -3626,7 +3642,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
 
   return {
     applied: true,
-    mutationRoot: 'bookingCreateFromAppointment+bookingAddService+bookingRemoveService+bookingComplete',
+    mutationRoot: 'bookingCreateFromAppointment+bookingServiceSetDurations+bookingServiceSetPrice+bookingComplete',
     updatedId: updatedAppointmentId || appointmentId,
     bookingId,
   };
@@ -3822,7 +3838,7 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
       auth.headers,
       swapContext,
       serviceId,
-      { quotedTotalDollars: Number(pendingOffer?.totalDollars) || null },
+      { quotedTotalDollars: Number(pendingOffer?.totalDollars) || null, targetDurationMinutes: Number(fresh.targetDurationMinutes) },
     );
     if (!bookingApplied.applied) {
       await recordUpgradeApplyRejection('booking', fresh.appointmentId, bookingApplied.error, bookingApplied.warnings);
@@ -3835,11 +3851,12 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
         warnings: bookingApplied.warnings || null,
       };
     }
-    const bookingVerified = await verifyAppointmentServiceApplied(
+    const bookingVerified = await verifyAppointmentDurationApplied(
       auth.apiUrl,
       auth.headers,
       fresh.appointmentId,
-      serviceId,
+      Number(fresh.targetDurationMinutes),
+      String(swapContext?.serviceId || '').trim() || null,
     );
     if (!bookingVerified) {
       return {
