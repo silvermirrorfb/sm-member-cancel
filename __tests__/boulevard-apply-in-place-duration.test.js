@@ -61,9 +61,11 @@ function buildFetch({
   sourceEndOn = '2026-06-04T14:30:00.000Z', // booked block end (raw); may be shorter than bucketed duration
   collisionScanFails = false,
   extraContexts = {}, // id -> appointmentServices array (service-level staff), or 'FAIL' to simulate a failed context fetch
-  timeblockNodes = [], // staff timeblocks (breaks/time-off) the location-scoped block scan returns
+  timeblockNodes = [], // staff timeblocks (breaks/time-off) the location-scoped block scan returns (page 1)
   timeblockScanFails = false, // simulate the timeblock query erroring/timing out -> must fail closed
-  timeblockTruncated = false, // simulate a paginated (hasNextPage) block scan -> must fail closed
+  timeblockTruncated = false, // page 1 reports hasNextPage with NO cursor -> cannot advance -> fail closed
+  timeblockNodesPage2 = null, // when set, page 1 hasNextPage->page 2 (cursor 'cur1'); exercises pagination
+  timeblockInfinitePages = false, // every page reports hasNextPage+cursor -> runaway -> page-cap fail closed
 } = {}) {
   let completed = false;
   let locationScanCount = 0;
@@ -120,11 +122,21 @@ function buildFetch({
     if (query.includes('ScanTimeblocks')) {
       // Location-scoped staff-timeblock scan (breaks / time-off). Fails closed on error.
       const tbQuery = String(body?.variables?.query || '');
-      timeblockQueries.push(tbQuery);
+      const after = body?.variables?.after || null;
+      if (!after) timeblockQueries.push(tbQuery); // record the window once (page 1)
       if (timeblockScanFails) return json({ errors: [{ message: 'timeblock scan failed' }], data: null });
       // Apply Boulevard's server-side window filter so a too-narrow fetch window drops blocks.
-      const returned = timeblockNodes.filter(node => passesTimeblockQuery(node, tbQuery));
-      return json({ data: { timeblocks: { edges: returned.map(node => ({ node })), pageInfo: { hasNextPage: timeblockTruncated, endCursor: timeblockTruncated ? 'cursor' : null } } } });
+      const filt = (arr) => (arr || []).filter(node => passesTimeblockQuery(node, tbQuery)).map(node => ({ node }));
+      if (timeblockInfinitePages) {
+        return json({ data: { timeblocks: { edges: filt(timeblockNodes), pageInfo: { hasNextPage: true, endCursor: 'cur-next' } } } });
+      }
+      if (after === 'cur1') {
+        return json({ data: { timeblocks: { edges: filt(timeblockNodesPage2), pageInfo: { hasNextPage: false, endCursor: null } } } });
+      }
+      const hasPage2 = timeblockNodesPage2 !== null;
+      const hasNext = hasPage2 ? true : Boolean(timeblockTruncated);
+      const cursor = hasPage2 ? 'cur1' : null; // truncated-without-page2 -> null cursor -> caller fails closed
+      return json({ data: { timeblocks: { edges: filt(timeblockNodes), pageInfo: { hasNextPage: hasNext, endCursor: cursor } } } });
     }
     if (query.includes('VerifyApptDuration')) {
       const d = completed ? 50 : 30;
@@ -494,14 +506,14 @@ describe('P1-A gauntlet hardening: multi-day fetch window + fail-closed predicat
     expect(calls).not.toContain('bookingComplete');
   });
 
-  it('fetches timeblocks over a wide lookback window (>= ~30 days back), not just the +/-1-day appointment window', async () => {
+  it('fetches timeblocks over a wide lookback window (default 365 days back), not just the +/-1-day appointment window', async () => {
     process.env = env();
     global.fetch = buildFetch();
     await runReverify();
-    // Source appointment is 2026-06-04; the timeblock scan must reach back ~30 days to 2026-05-05
-    // so a long block that started weeks earlier is still fetched. (Default lookback: 30 days.)
+    // Source appointment is 2026-06-04; pagination lets the default lookback reach a full year
+    // back to 2025-06-04, so an extended/indefinite block that started long ago is still fetched.
     expect(timeblockQueries.length).toBeGreaterThan(0);
-    expect(timeblockQueries.some(q => q.includes("startAt >= '2026-05-05'"))).toBe(true);
+    expect(timeblockQueries.some(q => q.includes("startAt >= '2025-06-04'"))).toBe(true);
   });
 
   it('respects BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS to widen the fetch window further', async () => {
@@ -532,9 +544,47 @@ describe('P1-A gauntlet hardening: multi-day fetch window + fail-closed predicat
     expect(calls).not.toContain('bookingComplete');
   });
 
-  it('FAILS CLOSED when hasNextPage is a non-boolean truthy value (truncation hardening)', async () => {
+  it('FAILS CLOSED when hasNextPage is a non-boolean truthy value with no cursor (cannot advance)', async () => {
     process.env = env();
     global.fetch = buildFetch({ timeblockNodes: [], timeblockTruncated: 'yes' });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+});
+
+// Pagination round (2026-06-26 re-gauntlet): the single-page scan failed closed on ANY
+// hasNextPage, so a busy location with >1 page of timeblocks in the lookback wrongly aborted
+// every legit upgrade. Paginate (the pattern used 4x elsewhere in boulevard.js) so a clear-but-
+// large location proceeds, a block on a later page still blocks, and a runaway scan fails closed.
+describe('P1-A pagination: multi-page timeblock scan', () => {
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
+
+  it('PROCEEDS at a busy location: a clear first page with hasNextPage is paged through, not aborted', async () => {
+    process.env = env();
+    // Page 1 clear + hasNextPage -> page 2 also clear. A single-page scan would fail closed here.
+    global.fetch = buildFetch({ timeblockNodes: [], timeblockNodesPage2: [] });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(result.reason).toBe('applied');
+    expect(calls).toContain('bookingComplete');
+  });
+
+  it('BLOCKS a colliding timeblock that lands on page 2 (not just page 1)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [],
+      timeblockNodesPage2: [{ staffId: 'prov-1', startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED on a runaway scan (every page reports hasNextPage) rather than looping or trusting open', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ timeblockNodes: [], timeblockInfinitePages: true });
     const result = await runReverify();
     expect(result.success).toBe(false);
     expect(calls).not.toContain('bookingComplete');

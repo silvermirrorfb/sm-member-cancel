@@ -3239,39 +3239,43 @@ function hasBlockingBookingWarnings(warnings = [], selfOverlapContext = null) {
 async function scanTimeblocks(apiUrl, headers, context = {}) {
   const locationId = String(context?.locationId || '').trim();
   if (!locationId) return { timeblocks: null };
-  // Reuse the appointment window clause builder: Timeblock filters on startAt exactly as
-  // the appointment scan does, so the SAME window bounds (including the caller's ±1-day
-  // midnight pad) drive both reads. No second, uncoordinated window.
+  // The caller drives the window bounds (a wide lookback on the lower side, since timeblocks
+  // can run for months). PAGINATE the full result set: a single page would force a fail-closed
+  // abort whenever a busy location has more than one page of blocks in the lookback, wrongly
+  // killing legit upgrades. Mirrors the cursor pagination scanAppointments/clients/services use.
   const windowQueryString = buildAppointmentWindowQuery(context);
   const query = `
-    query ScanTimeblocks($locationId: ID!, $query: QueryString) {
-      timeblocks(locationId: $locationId, query: $query, first: ${APPOINTMENT_SCAN_PAGE_SIZE}) {
+    query ScanTimeblocks($locationId: ID!, $query: QueryString, $after: String) {
+      timeblocks(locationId: $locationId, query: $query, first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after) {
         edges { node { staffId startAt endAt reason cancelled } }
         pageInfo { hasNextPage endCursor }
       }
     }
   `;
-  // Read-only and idempotent, so transient retry is safe (mirrors scanAppointments).
-  const data = await fetchBoulevardGraphQL(
-    apiUrl,
-    headers,
-    query,
-    { locationId, query: windowQueryString },
-    { silentErrors: true, returnErrors: true, retryTransient: true },
-  );
-  if (!data || data.__error) return { timeblocks: null }; // transport / GraphQL error -> fail closed
-  const payload = data?.data?.timeblocks;
-  if (payload === null || payload === undefined) return { timeblocks: null }; // null list -> fail closed
-  // A truncated read cannot prove the window clear: the overlapping block could be on a
-  // page we did not fetch. Fail closed rather than read a partial block set as "none". Any
-  // truthy hasNextPage (not just boolean true) counts as truncated.
-  if (payload?.pageInfo?.hasNextPage) return { timeblocks: null };
-  let nodes = [];
-  if (Array.isArray(payload?.edges)) nodes = payload.edges.map(edge => edge?.node).filter(Boolean);
-  else if (Array.isArray(payload?.nodes)) nodes = payload.nodes.filter(Boolean);
-  else if (Array.isArray(payload)) nodes = payload.filter(Boolean);
-  else if (payload && typeof payload === 'object') nodes = [payload];
-  return { timeblocks: nodes };
+  const all = [];
+  let after = null;
+  for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
+    // Read-only and idempotent, so transient retry is safe (mirrors scanAppointments).
+    const data = await fetchBoulevardGraphQL(
+      apiUrl,
+      headers,
+      query,
+      { locationId, query: windowQueryString, after },
+      { silentErrors: true, returnErrors: true, retryTransient: true },
+    );
+    if (!data || data.__error) return { timeblocks: null }; // transport / GraphQL error -> fail closed
+    const payload = data?.data?.timeblocks;
+    if (payload === null || payload === undefined) return { timeblocks: null }; // null list -> fail closed
+    if (Array.isArray(payload?.edges)) all.push(...payload.edges.map(edge => edge?.node).filter(Boolean));
+    else if (Array.isArray(payload?.nodes)) all.push(...payload.nodes.filter(Boolean));
+    else if (Array.isArray(payload)) all.push(...payload.filter(Boolean));
+    else if (payload && typeof payload === 'object' && !payload.pageInfo) all.push(payload);
+    const pageInfo = payload?.pageInfo;
+    if (!pageInfo || !pageInfo.hasNextPage) return { timeblocks: all }; // last page -> the full set
+    after = pageInfo.endCursor;
+    if (!after) return { timeblocks: null }; // more pages but no cursor to advance -> fail closed
+  }
+  return { timeblocks: null }; // page cap hit with pages remaining -> cannot prove clear -> fail closed
 }
 
 // Reuses scanAppointments (the same appointment-read primitive the eligibility path
@@ -3356,14 +3360,15 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
   // window for the target staff and FAIL CLOSED: any block-read failure, or a non-cancelled
   // block overlapping [start, windowEnd), means the window is NOT clear and the apply aborts
   // before bookingComplete. Without this, such a block reads as the benign self-overlap.
-  // Timeblocks can run for DAYS (PTO, leave, holds), unlike appointments. The startAt filter
-  // would miss a multi-day block that STARTED before the appointment's day yet overlaps the
-  // window, so the timeblock fetch uses a wide lookback on its lower bound (default 30 days,
-  // BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) instead of the appointment scan's +/-1-day pad. The upper
-  // bound is unchanged: a block starting after the window cannot overlap it. (A still-running
-  // block that started before the lookback horizon is the documented residual the pre-flag-flip
-  // supervised probe must assess.)
-  const timeblockLookbackDays = Math.max(1, Number(process.env.BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) || 30);
+  // Timeblocks can run for MONTHS (PTO, leave, indefinite holds), unlike appointments. The
+  // startAt filter would miss a long block that STARTED before the appointment's day yet
+  // overlaps the window, so the timeblock fetch uses a wide lookback on its lower bound
+  // (default 365 days, BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) instead of the appointment scan's
+  // +/-1-day pad. Safe to set this wide because scanTimeblocks paginates the full result set.
+  // The upper bound is unchanged: a block starting after the window cannot overlap it. (A
+  // still-running block that started before the lookback horizon is the documented residual
+  // the pre-flag-flip supervised probe must assess.)
+  const timeblockLookbackDays = Math.max(1, Number(process.env.BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) || 365);
   const timeblockWindowStart = new Date(startMs - timeblockLookbackDays * 24 * 60 * 60 * 1000);
   const blockScan = await scanTimeblocks(apiUrl, headers, {
     locationId,
