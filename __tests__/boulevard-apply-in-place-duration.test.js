@@ -37,6 +37,19 @@ const LATER_NODE = { id: 'appt-next', clientId: 'other', providerId: 'prov-1', l
 let calls;
 let scanClientIds;
 let scanQueries; // window clause (startAt >= ... AND startAt < ...) of each location-scoped scan
+let timeblockQueries; // window clause of each ScanTimeblocks query (asserts the fetch window)
+
+// Simulate Boulevard's server-side QueryString filter so a fetch-window bug is observable:
+// a node is returned only if it satisfies every (startAt|endAt) (>=|<) 'DATE' clause present
+// in the query (ISO date-prefix lexical compare, matching Boulevard's date-granularity filter).
+function passesTimeblockQuery(node, query) {
+  const clauses = [...String(query || '').matchAll(/(startAt|endAt)\s*(>=|<)\s*'([^']+)'/g)];
+  return clauses.every(([, field, op, date]) => {
+    const v = String(node?.[field] || '').slice(0, 10);
+    if (!v) return false; // missing field cannot satisfy a bound -> excluded (matches a real filter)
+    return op === '>=' ? v >= date : v < date;
+  });
+}
 function buildFetch({
   durationWarnings = [{ code: 'STAFF_DOUBLE_BOOKED', message: 'Appointment is double booked', staffId: 'prov-1', serviceId: 'svc-30', bookingServiceId: 'bs-base' }],
   completeWarnings = [],
@@ -106,8 +119,12 @@ function buildFetch({
     }
     if (query.includes('ScanTimeblocks')) {
       // Location-scoped staff-timeblock scan (breaks / time-off). Fails closed on error.
+      const tbQuery = String(body?.variables?.query || '');
+      timeblockQueries.push(tbQuery);
       if (timeblockScanFails) return json({ errors: [{ message: 'timeblock scan failed' }], data: null });
-      return json({ data: { timeblocks: { edges: timeblockNodes.map(node => ({ node })), pageInfo: { hasNextPage: timeblockTruncated, endCursor: timeblockTruncated ? 'cursor' : null } } } });
+      // Apply Boulevard's server-side window filter so a too-narrow fetch window drops blocks.
+      const returned = timeblockNodes.filter(node => passesTimeblockQuery(node, tbQuery));
+      return json({ data: { timeblocks: { edges: returned.map(node => ({ node })), pageInfo: { hasNextPage: timeblockTruncated, endCursor: timeblockTruncated ? 'cursor' : null } } } });
     }
     if (query.includes('VerifyApptDuration')) {
       const d = completed ? 50 : 30;
@@ -138,7 +155,7 @@ async function runReverify() {
 }
 
 describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no cancel)', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('edits the existing line in place and never adds/removes a service line or cancels', async () => {
@@ -361,7 +378,7 @@ describe('hasBlockingBookingWarnings: discriminating policy + id normalization',
 // and fail closed: a non-cancelled overlapping block on the target staff is a real
 // collision; any block-fetch failure is treated as NOT clear.
 describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real collisions)', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('HEADLINE: aborts before commit when the extended window overlaps a non-cancelled staff timeblock (was wrongly benign)', async () => {
@@ -449,6 +466,75 @@ describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real c
       timeblockNodes: [],
       locationExtraNodes: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
     });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+});
+
+// Gauntlet hardening (2026-06-26 /codex + /review): cross-model [P1] — the timeblock fetch
+// reused the appointment scan's startAt-only, +/-1-day window, so a MULTI-DAY staff block
+// (PTO/leave) that STARTED >1 day before the appointment but overlaps the window was never
+// fetched -> false-empty -> upgrade committed over the break. Plus fail-open [P2]s: a block
+// with unparseable times or a null/all-staff staffId was silently ignored. The mock now
+// applies Boulevard's startAt window filter, so the multi-day case is a true red.
+describe('P1-A gauntlet hardening: multi-day fetch window + fail-closed predicate', () => {
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
+
+  it('HEADLINE: blocks a multi-day staff block that STARTED days before the appointment but overlaps the window', async () => {
+    process.env = env();
+    // PTO 2026-05-30 -> 2026-06-07 overlaps the extended window [14:00, 14:50] on 06-04. A
+    // startAt-only +/-1-day fetch window (lower bound 06-03) would never return it.
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-05-30T00:00:00.000Z', endAt: '2026-06-07T00:00:00.000Z', reason: 'PTO', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('fetches timeblocks over a wide lookback window (>= ~30 days back), not just the +/-1-day appointment window', async () => {
+    process.env = env();
+    global.fetch = buildFetch();
+    await runReverify();
+    // Source appointment is 2026-06-04; the timeblock scan must reach back ~30 days to 2026-05-05
+    // so a long block that started weeks earlier is still fetched. (Default lookback: 30 days.)
+    expect(timeblockQueries.length).toBeGreaterThan(0);
+    expect(timeblockQueries.some(q => q.includes("startAt >= '2026-05-05'"))).toBe(true);
+  });
+
+  it('respects BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS to widen the fetch window further', async () => {
+    process.env = env({ BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS: '60' });
+    global.fetch = buildFetch();
+    await runReverify();
+    // 60 days before 2026-06-04 = 2026-04-05.
+    expect(timeblockQueries.some(q => q.includes("startAt >= '2026-04-05'"))).toBe(true);
+  });
+
+  it('FAILS CLOSED on a target-staff block with an unparseable endAt (cannot rule out overlap)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T14:30:00.000Z', endAt: 'not-a-date', reason: 'Open hold', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED on an overlapping block with a null/empty staffId (possible all-staff/location closure)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: null, startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Location closed', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED when hasNextPage is a non-boolean truthy value (truncation hardening)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ timeblockNodes: [], timeblockTruncated: 'yes' });
     const result = await runReverify();
     expect(result.success).toBe(false);
     expect(calls).not.toContain('bookingComplete');

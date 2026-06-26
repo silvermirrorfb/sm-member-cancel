@@ -3263,8 +3263,9 @@ async function scanTimeblocks(apiUrl, headers, context = {}) {
   const payload = data?.data?.timeblocks;
   if (payload === null || payload === undefined) return { timeblocks: null }; // null list -> fail closed
   // A truncated read cannot prove the window clear: the overlapping block could be on a
-  // page we did not fetch. Fail closed rather than read a partial block set as "none".
-  if (payload?.pageInfo?.hasNextPage === true) return { timeblocks: null };
+  // page we did not fetch. Fail closed rather than read a partial block set as "none". Any
+  // truthy hasNextPage (not just boolean true) counts as truncated.
+  if (payload?.pageInfo?.hasNextPage) return { timeblocks: null };
   let nodes = [];
   if (Array.isArray(payload?.edges)) nodes = payload.edges.map(edge => edge?.node).filter(Boolean);
   else if (Array.isArray(payload?.nodes)) nodes = payload.nodes.filter(Boolean);
@@ -3355,18 +3356,32 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
   // window for the target staff and FAIL CLOSED: any block-read failure, or a non-cancelled
   // block overlapping [start, windowEnd), means the window is NOT clear and the apply aborts
   // before bookingComplete. Without this, such a block reads as the benign self-overlap.
+  // Timeblocks can run for DAYS (PTO, leave, holds), unlike appointments. The startAt filter
+  // would miss a multi-day block that STARTED before the appointment's day yet overlaps the
+  // window, so the timeblock fetch uses a wide lookback on its lower bound (default 30 days,
+  // BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) instead of the appointment scan's +/-1-day pad. The upper
+  // bound is unchanged: a block starting after the window cannot overlap it. (A still-running
+  // block that started before the lookback horizon is the documented residual the pre-flag-flip
+  // supervised probe must assess.)
+  const timeblockLookbackDays = Math.max(1, Number(process.env.BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) || 30);
+  const timeblockWindowStart = new Date(startMs - timeblockLookbackDays * 24 * 60 * 60 * 1000);
   const blockScan = await scanTimeblocks(apiUrl, headers, {
     locationId,
-    windowStart: scanWindowStart,
+    windowStart: timeblockWindowStart,
     windowEnd: scanWindowEnd,
   });
   if (!blockScan || !Array.isArray(blockScan.timeblocks)) return false; // block scan failed -> fail closed
   const blockedByTimeblock = blockScan.timeblocks.some(block => {
     if (block?.cancelled === true) return false; // cancelled blocks do not occupy the staff
-    if (bareBoulevardId(block?.staffId) !== providerBareId) return false; // block on another staff
+    const blockStaff = bareBoulevardId(block?.staffId);
+    // Only the target staff's blocks matter, EXCEPT a null/empty staffId may be an all-staff or
+    // location-wide closure that cannot be attributed away -> treat as target-staff (fail closed).
+    if (blockStaff && blockStaff !== providerBareId) return false;
     const blockStart = Date.parse(block?.startAt);
     const blockEnd = Date.parse(block?.endAt);
-    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return false; // unparseable -> not a provable overlap (mirrors the appt scan)
+    // A target-staff (or unattributable) non-cancelled block whose bounds will not parse cannot
+    // be proven NOT to overlap -> fail closed rather than ignore it.
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return true;
     return blockStart < windowEndMs && blockEnd > startMs; // [startAt, endAt) overlaps the extended window
   });
   if (blockedByTimeblock) return false;
