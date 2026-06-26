@@ -3229,6 +3229,50 @@ function hasBlockingBookingWarnings(warnings = [], selfOverlapContext = null) {
   });
 }
 
+// Reads the target location's staff TIMEBLOCKS (breaks, time-off, holds) over a window.
+// Boulevard surfaces an upgrade that extends an appointment into a staff block as a
+// STAFF_DOUBLE_BOOKED *warning* (not a hard error), so the appointment-only scan cannot
+// see it; this is the read primitive that lets the provider-window-clear check fail
+// closed on a block. Returns { timeblocks: [...] } on success, { timeblocks: null } on
+// ANY transport/GraphQL failure, a null list, OR a truncated (multi-page) read, so the
+// caller treats the window as NOT clear rather than trusting an incomplete block read.
+async function scanTimeblocks(apiUrl, headers, context = {}) {
+  const locationId = String(context?.locationId || '').trim();
+  if (!locationId) return { timeblocks: null };
+  // Reuse the appointment window clause builder: Timeblock filters on startAt exactly as
+  // the appointment scan does, so the SAME window bounds (including the caller's ±1-day
+  // midnight pad) drive both reads. No second, uncoordinated window.
+  const windowQueryString = buildAppointmentWindowQuery(context);
+  const query = `
+    query ScanTimeblocks($locationId: ID!, $query: QueryString) {
+      timeblocks(locationId: $locationId, query: $query, first: ${APPOINTMENT_SCAN_PAGE_SIZE}) {
+        edges { node { staffId startAt endAt reason cancelled } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+  // Read-only and idempotent, so transient retry is safe (mirrors scanAppointments).
+  const data = await fetchBoulevardGraphQL(
+    apiUrl,
+    headers,
+    query,
+    { locationId, query: windowQueryString },
+    { silentErrors: true, returnErrors: true, retryTransient: true },
+  );
+  if (!data || data.__error) return { timeblocks: null }; // transport / GraphQL error -> fail closed
+  const payload = data?.data?.timeblocks;
+  if (payload === null || payload === undefined) return { timeblocks: null }; // null list -> fail closed
+  // A truncated read cannot prove the window clear: the overlapping block could be on a
+  // page we did not fetch. Fail closed rather than read a partial block set as "none".
+  if (payload?.pageInfo?.hasNextPage === true) return { timeblocks: null };
+  let nodes = [];
+  if (Array.isArray(payload?.edges)) nodes = payload.edges.map(edge => edge?.node).filter(Boolean);
+  else if (Array.isArray(payload?.nodes)) nodes = payload.nodes.filter(Boolean);
+  else if (Array.isArray(payload)) nodes = payload.filter(Boolean);
+  else if (payload && typeof payload === 'object') nodes = [payload];
+  return { timeblocks: nodes };
+}
+
 // Reuses scanAppointments (the same appointment-read primitive the eligibility path
 // uses) to prove the edited appointment's extended window holds NO OTHER real
 // appointment on the same provider. This is the safety core of the in-place upgrade:
@@ -3303,6 +3347,30 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
       if (hasTargetStaffLine) return false; // a service line is on the target staff -> collision
     }
   }
+
+  // Staff TIMEBLOCKS (breaks, time-off, holds) are invisible to the appointment scan, but
+  // a duration extension into one is a real collision Boulevard only WARNS (not errors) on
+  // - the probe-confirmed P1-A gap (2026-06-25): a draft on a "no appointments" staff block
+  // raised STAFF_DOUBLE_BOOKED on a window with zero real appointments. Scan the SAME padded
+  // window for the target staff and FAIL CLOSED: any block-read failure, or a non-cancelled
+  // block overlapping [start, windowEnd), means the window is NOT clear and the apply aborts
+  // before bookingComplete. Without this, such a block reads as the benign self-overlap.
+  const blockScan = await scanTimeblocks(apiUrl, headers, {
+    locationId,
+    windowStart: scanWindowStart,
+    windowEnd: scanWindowEnd,
+  });
+  if (!blockScan || !Array.isArray(blockScan.timeblocks)) return false; // block scan failed -> fail closed
+  const blockedByTimeblock = blockScan.timeblocks.some(block => {
+    if (block?.cancelled === true) return false; // cancelled blocks do not occupy the staff
+    if (bareBoulevardId(block?.staffId) !== providerBareId) return false; // block on another staff
+    const blockStart = Date.parse(block?.startAt);
+    const blockEnd = Date.parse(block?.endAt);
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return false; // unparseable -> not a provable overlap (mirrors the appt scan)
+    return blockStart < windowEndMs && blockEnd > startMs; // [startAt, endAt) overlaps the extended window
+  });
+  if (blockedByTimeblock) return false;
+
   return true;
 }
 

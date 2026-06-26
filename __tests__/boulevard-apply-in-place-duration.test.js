@@ -48,6 +48,9 @@ function buildFetch({
   sourceEndOn = '2026-06-04T14:30:00.000Z', // booked block end (raw); may be shorter than bucketed duration
   collisionScanFails = false,
   extraContexts = {}, // id -> appointmentServices array (service-level staff), or 'FAIL' to simulate a failed context fetch
+  timeblockNodes = [], // staff timeblocks (breaks/time-off) the location-scoped block scan returns
+  timeblockScanFails = false, // simulate the timeblock query erroring/timing out -> must fail closed
+  timeblockTruncated = false, // simulate a paginated (hasNextPage) block scan -> must fail closed
 } = {}) {
   let completed = false;
   let locationScanCount = 0;
@@ -100,6 +103,11 @@ function buildFetch({
       const base = omitSourceFromLocationScan ? [LATER_NODE] : [sourceNode, LATER_NODE];
       const nodes = [...base, ...extra];
       return json({ data: { appointments: { edges: nodes.map(node => ({ node })), pageInfo: { hasNextPage: false, endCursor: null } } } });
+    }
+    if (query.includes('ScanTimeblocks')) {
+      // Location-scoped staff-timeblock scan (breaks / time-off). Fails closed on error.
+      if (timeblockScanFails) return json({ errors: [{ message: 'timeblock scan failed' }], data: null });
+      return json({ data: { timeblocks: { edges: timeblockNodes.map(node => ({ node })), pageInfo: { hasNextPage: timeblockTruncated, endCursor: timeblockTruncated ? 'cursor' : null } } } });
     }
     if (query.includes('VerifyApptDuration')) {
       const d = completed ? 50 : 30;
@@ -341,5 +349,108 @@ describe('hasBlockingBookingWarnings: discriminating policy + id normalization',
 
   it('without a self-overlap context (addon path), STAFF_DOUBLE_BOOKED stays blocking (unchanged)', () => {
     expect(hasBlockingBookingWarnings([bareWarning])).toBe(true);
+  });
+});
+
+// P1-A (probe-confirmed live 2026-06-25): the in-place apply gate proved the staff
+// window clear of OTHER APPOINTMENTS but never consulted staff TIMEBLOCKS. A 30->50
+// upgrade extending a real appointment into a staff break/time-off raises
+// STAFF_DOUBLE_BOOKED (warning, NOT a hard error) on a window with zero real
+// appointments, so the appointment-only scan classified it benign self-overlap and
+// committed over the block. The provider-window-clear check must ALSO scan timeblocks
+// and fail closed: a non-cancelled overlapping block on the target staff is a real
+// collision; any block-fetch failure is treated as NOT clear.
+describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real collisions)', () => {
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
+
+  it('HEADLINE: aborts before commit when the extended window overlaps a non-cancelled staff timeblock (was wrongly benign)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      // prov-1 break 14:30-15:00 overlaps the extended window [14:00, 14:50]. Appointment scan is clear.
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+    expect(calls).not.toContain('cancelAppointment');
+  });
+
+  it('PROCEEDS when the window holds no appointment AND no timeblock (block scan does not over-block)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ timeblockNodes: [] });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(result.reason).toBe('applied');
+    expect(calls).toContain('bookingComplete');
+  });
+
+  it('IGNORES a cancelled timeblock (a cancelled break does not occupy the staff)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Break', cancelled: true }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(calls).toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED when the timeblock scan errors (a block-fetch failure must never look benign)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ timeblockScanFails: true });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED when the timeblock scan is truncated (a second page could hold the overlapping block)', async () => {
+    process.env = env();
+    // No block on the returned page, but hasNextPage:true means the window was not fully read.
+    global.fetch = buildFetch({ timeblockNodes: [], timeblockTruncated: true });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('matches a full-urn block staffId against the bare provider id (bare-vs-urn normalization)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'urn:blvd:Staff:prov-1', startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Time off', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('does NOT block a timeblock that abuts the window end but does not overlap it', async () => {
+    process.env = env();
+    // Window ends 14:50; a block starting exactly 14:50 does not overlap [14:00, 14:50).
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T14:50:00.000Z', endAt: '2026-06-04T15:20:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(calls).toContain('bookingComplete');
+  });
+
+  it('does NOT block a timeblock on a DIFFERENT staff (over-block guard)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-2', startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(calls).toContain('bookingComplete');
+  });
+
+  it('still blocks a genuine cross-client appointment collision (prior fix preserved) with timeblocks empty', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [],
+      locationExtraNodes: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
   });
 });
