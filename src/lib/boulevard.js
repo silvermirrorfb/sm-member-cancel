@@ -3243,7 +3243,15 @@ async function scanTimeblocks(apiUrl, headers, context = {}) {
   // can run for months). PAGINATE the full result set: a single page would force a fail-closed
   // abort whenever a busy location has more than one page of blocks in the lookback, wrongly
   // killing legit upgrades. Mirrors the cursor pagination scanAppointments/clients/services use.
-  const windowQueryString = buildAppointmentWindowQuery(context);
+  // Scope to the TARGET staff: a 365-day LOCATION-wide scan overruns the page cap at busy
+  // locations (a live probe saw >2000 blocks at Brickell -> fail closed -> every upgrade aborts).
+  // Boulevard supports a staffId filter (probe-confirmed: one staff is ~646 blocks / 7 pages and
+  // terminates), and SM models no null-staffId / location-wide closure blocks (probe: 0 of 5000
+  // across two locations), so staff scope is both safe and complete. An unscoped call (no staffId)
+  // falls back to the location-wide window.
+  const staffId = String(context?.staffId || '').trim();
+  const windowClause = buildAppointmentWindowQuery(context);
+  const windowQueryString = [staffId ? `staffId = '${staffId}'` : null, windowClause].filter(Boolean).join(' AND ');
   const query = `
     query ScanTimeblocks($locationId: ID!, $query: QueryString, $after: String) {
       timeblocks(locationId: $locationId, query: $query, first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after) {
@@ -3380,6 +3388,10 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
   const timeblockWindowStart = new Date(startMs - timeblockLookbackDays * 24 * 60 * 60 * 1000);
   const blockScan = await scanTimeblocks(apiUrl, headers, {
     locationId,
+    // Scope to the target staff. providerBareId is the bare uuid; Boulevard's Timeblock.staffId
+    // is the canonical urn, so reconstruct it (matches what the live probe filtered on). The gate
+    // already failed closed above if providerBareId was empty, so the filter is always well-formed.
+    staffId: `urn:blvd:Staff:${providerBareId}`,
     windowStart: timeblockWindowStart,
     windowEnd: scanWindowEnd,
   });

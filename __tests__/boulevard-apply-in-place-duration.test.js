@@ -43,8 +43,18 @@ let timeblockQueries; // window clause of each ScanTimeblocks query (asserts the
 // a node is returned only if it satisfies every (startAt|endAt) (>=|<) 'DATE' clause present
 // in the query (ISO date-prefix lexical compare, matching Boulevard's date-granularity filter).
 function passesTimeblockQuery(node, query) {
-  const clauses = [...String(query || '').matchAll(/(startAt|endAt)\s*(>=|<)\s*'([^']+)'/g)];
-  return clauses.every(([, field, op, date]) => {
+  const q = String(query || '');
+  // staffId scoping: a specific non-matching staff is excluded; the target staff (bare-vs-urn
+  // normalized) or a null/empty staffId (conservatively, an all-staff block a real backend might
+  // surface for any staff query) passes through to the in-memory predicate.
+  const staffClause = q.match(/staffId\s*=\s*'([^']+)'/);
+  if (staffClause) {
+    const bareTail = (s) => String(s == null ? '' : s).split(':').pop();
+    const got = bareTail(node?.staffId);
+    if (got && got !== bareTail(staffClause[1])) return false;
+  }
+  const dateClauses = [...q.matchAll(/(startAt|endAt)\s*(>=|<)\s*'([^']+)'/g)];
+  return dateClauses.every(([, field, op, date]) => {
     const v = String(node?.[field] || '').slice(0, 10);
     if (!v) return false; // missing field cannot satisfy a bound -> excluded (matches a real filter)
     return op === '>=' ? v >= date : v < date;
@@ -602,5 +612,44 @@ describe('P1-A pagination: multi-page timeblock scan', () => {
     const result = await runReverify();
     expect(result.success).toBe(false);
     expect(calls).not.toContain('bookingComplete');
+  });
+});
+
+// Staff-scoped query (2026-06-26 live probe): a 365-day LOCATION-scoped scan returned >2000
+// blocks at Brickell and hit the page cap -> fail closed -> aborted every upgrade. The probe
+// confirmed Boulevard supports a staffId filter (646 blocks/7 pages for one staff, terminates),
+// and Part 1 found ZERO null-staffId / location-wide closure blocks across 5000 rows at two
+// locations, so scoping the query to the target staff alone is sufficient and complete.
+describe('P1-A staff-scoped timeblock query', () => {
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
+
+  it('scopes the timeblock query to the target staff (staffId filter), not the whole location', async () => {
+    process.env = env();
+    global.fetch = buildFetch();
+    await runReverify();
+    expect(timeblockQueries.length).toBeGreaterThan(0);
+    // The fix reconstructs the canonical staff urn from the provider id (prov-1 in this fixture).
+    expect(timeblockQueries.some(q => q.includes("staffId = 'urn:blvd:Staff:prov-1'"))).toBe(true);
+  });
+
+  it('a target-staff block still aborts when the query is staff-scoped', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('a different-staff block is not fetched under the staff-scoped query and does not abort', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-2', startAt: '2026-06-04T14:30:00.000Z', endAt: '2026-06-04T15:00:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(calls).toContain('bookingComplete');
   });
 });
