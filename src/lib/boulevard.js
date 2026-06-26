@@ -3266,12 +3266,20 @@ async function scanTimeblocks(apiUrl, headers, context = {}) {
     if (!data || data.__error) return { timeblocks: null }; // transport / GraphQL error -> fail closed
     const payload = data?.data?.timeblocks;
     if (payload === null || payload === undefined) return { timeblocks: null }; // null list -> fail closed
-    if (Array.isArray(payload?.edges)) all.push(...payload.edges.map(edge => edge?.node).filter(Boolean));
-    else if (Array.isArray(payload?.nodes)) all.push(...payload.nodes.filter(Boolean));
-    else if (Array.isArray(payload)) all.push(...payload.filter(Boolean));
-    else if (payload && typeof payload === 'object' && !payload.pageInfo) all.push(payload);
+    // A bare array shape has no cursor concept: it is the complete set by definition.
+    if (Array.isArray(payload)) { all.push(...payload.filter(Boolean)); return { timeblocks: all }; }
+    // Otherwise this must be a connection: a RECOGNIZED node container is required to read the
+    // page's contents, and pageInfo is required to prove completeness. A malformed page (non-array
+    // edges/nodes, or a connection missing pageInfo) cannot be read as "no blocks" -> fail closed,
+    // never trusted as an empty/last page.
+    let pageNodes;
+    if (Array.isArray(payload?.edges)) pageNodes = payload.edges.map(edge => edge?.node).filter(Boolean);
+    else if (Array.isArray(payload?.nodes)) pageNodes = payload.nodes.filter(Boolean);
+    else return { timeblocks: null }; // unrecognized / malformed page container -> fail closed
+    all.push(...pageNodes);
     const pageInfo = payload?.pageInfo;
-    if (!pageInfo || !pageInfo.hasNextPage) return { timeblocks: all }; // last page -> the full set
+    if (!pageInfo) return { timeblocks: null }; // connection without pageInfo -> cannot prove complete -> fail closed
+    if (!pageInfo.hasNextPage) return { timeblocks: all }; // last page -> the full set
     after = pageInfo.endCursor;
     if (!after) return { timeblocks: null }; // more pages but no cursor to advance -> fail closed
   }

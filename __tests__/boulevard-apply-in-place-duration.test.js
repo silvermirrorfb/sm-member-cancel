@@ -66,6 +66,7 @@ function buildFetch({
   timeblockTruncated = false, // page 1 reports hasNextPage with NO cursor -> cannot advance -> fail closed
   timeblockNodesPage2 = null, // when set, page 1 hasNextPage->page 2 (cursor 'cur1'); exercises pagination
   timeblockInfinitePages = false, // every page reports hasNextPage+cursor -> runaway -> page-cap fail closed
+  timeblockMalformedPage = false, // page 1 returns a non-array edges container -> unparseable -> fail closed
 } = {}) {
   let completed = false;
   let locationScanCount = 0;
@@ -129,6 +130,11 @@ function buildFetch({
       const filt = (arr) => (arr || []).filter(node => passesTimeblockQuery(node, tbQuery)).map(node => ({ node }));
       if (timeblockInfinitePages) {
         return json({ data: { timeblocks: { edges: filt(timeblockNodes), pageInfo: { hasNextPage: true, endCursor: 'cur-next' } } } });
+      }
+      if (timeblockMalformedPage) {
+        // Structurally successful response, but the node container is not an array and the page
+        // claims completeness. A trusting reader would treat it as "no blocks".
+        return json({ data: { timeblocks: { edges: null, pageInfo: { hasNextPage: false, endCursor: null } } } });
       }
       if (after === 'cur1') {
         return json({ data: { timeblocks: { edges: filt(timeblockNodesPage2), pageInfo: { hasNextPage: false, endCursor: null } } } });
@@ -585,6 +591,14 @@ describe('P1-A pagination: multi-page timeblock scan', () => {
   it('FAILS CLOSED on a runaway scan (every page reports hasNextPage) rather than looping or trusting open', async () => {
     process.env = env();
     global.fetch = buildFetch({ timeblockNodes: [], timeblockInfinitePages: true });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED on a malformed-but-successful page (non-array node container) instead of trusting it as empty', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ timeblockMalformedPage: true });
     const result = await runReverify();
     expect(result.success).toBe(false);
     expect(calls).not.toContain('bookingComplete');
