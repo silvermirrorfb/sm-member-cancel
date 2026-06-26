@@ -135,8 +135,19 @@ Read-only probes against LIVE Boulevard (Brickell):
    clear". This is sound because the staffId filter is the canonical Boulevard urn (probe-
    confirmed to match real staff); the end-to-end probe below is the final confirmation.
 
-Before flipping `BOULEVARD_ENABLE_BOOKING_UPGRADE`, run the supervised end-to-end probe:
-open ONE draft on a test appointment (test client b836d3ef ONLY) positioned to overlap a real
-block on its staff, run the shipped apply gate in local-flag-on mode, and confirm it ABORTS
-before `bookingComplete` with the timeblock-collision reason. Do NOT call `bookingComplete`;
-`cancelAppointment` must never be in the path. Do NOT flip the flag on these commits alone.
+Before flipping `BOULEVARD_ENABLE_BOOKING_UPGRADE`, run the supervised end-to-end probe AND
+re-affirm the two data/contract-dependent residuals the gauntlet (codex + independent review)
+flagged on the staff-scoping:
+1. END-TO-END: open ONE draft on a test appointment (test client b836d3ef ONLY) positioned to
+   overlap a real block on its staff, run the shipped apply gate in local-flag-on mode, and
+   confirm it ABORTS before `bookingComplete` with the timeblock-collision reason. Do NOT call
+   `bookingComplete`; `cancelAppointment` must never be in the path.
+2. CLOSURE INVARIANT (basis for staff-scope completeness): re-confirm ZERO location-wide closures
+   modeled as null-staffId timeblocks at each location being enabled. If that ever changes, the
+   staff-scoped query would miss them. Do NOT blind-add `OR staffId IS NULL` (it can re-trigger
+   the page-cap fail-closed-everything bug); use a window-tight location pass only if needed.
+3. EQUIVALENCE ANCHOR (substitutes for the missing source-present sanity gate): for one known-busy
+   staff, confirm the staff-scoped query returns the SAME blocks as an unfiltered + client-side
+   filter pass, proving the `staffId` filter is not silently dropped to an empty result.
+
+Do NOT flip the flag on these commits alone.
