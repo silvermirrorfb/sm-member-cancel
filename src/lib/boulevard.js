@@ -2424,10 +2424,17 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     return { eligible: false, reason: 'already_at_or_above_target_duration' };
   }
 
-  // 30->50 requires the REAL added service minutes (target minus current), not a
-  // flat 15. A 45-minute room (30 booked + 15 free) does NOT fit a 50-minute
-  // service, which needs 20 more minutes. Computed, never hardcoded.
-  const requiredExtraMinutes = Math.max(0, targetDurationMinutes - currentDurationMinutes);
+  // 30->50 requires the BLOCK extension, not the raw service delta. Each booking occupies a
+  // schedule block of (service minutes + its prep buffer): a 30-min facial -> 45-min block
+  // (30 + PREP_BUFFER_30MIN), a 50-min facial -> 60-min block (50 + PREP_BUFFER_50MIN). The
+  // upgrade therefore grows the footprint by (50+10) - (30+15) = 15, NOT the 20-min service
+  // delta. currentDurationMinutes is the bucketed/clamped service tier above (30, never the
+  // raw padded block), so prepBufferMinutesForDuration keys off the tier. This keeps the
+  // requirement in the same block-based unit as availableGapMinutes, which is measured from
+  // the block-end endOn. Derived from the PREP_BUFFER_* constants, never hardcoded.
+  const currentBlockMinutes = currentDurationMinutes + prepBufferMinutesForDuration(currentDurationMinutes);
+  const targetBlockMinutes = targetDurationMinutes + prepBufferMinutesForDuration(targetDurationMinutes);
+  const requiredExtraMinutes = Math.max(0, targetBlockMinutes - currentBlockMinutes);
   const prepBufferMinutes = 0;
   const pricing = computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember);
   if (!pricing) return { eligible: false, reason: 'pricing_unavailable' };
@@ -3796,19 +3803,17 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     if (collisionProven) {
       staffWindowClear = false;
     } else {
-      const currentDuration = Math.round(Number(options?.currentDurationMinutes));
-      const extensionMinutes = Number.isFinite(currentDuration) && currentDuration > 0
-        ? Math.max(0, targetDuration - currentDuration)
-        : targetDuration; // unknown current duration -> assume the full target (wider window, safer)
+      // The upgraded appointment occupies the target BLOCK: [start, start + (targetDuration +
+      // prepBuffer(target))]. For a 30->50 that is [start, start + 60] (50 + PREP_BUFFER_50MIN=10).
+      // Anchor the window at the appointment start and span exactly the upgraded block: it is
+      // independent of endOn (a booked block shorter OR longer than its bucketed duration can no
+      // longer shrink or inflate the window) and matches the eligibility block-delta. The old
+      // endOn + service-delta span over-covered (false-aborting a block just past the upgraded
+      // block), while start + targetDuration alone stopped at the 50-min service end, short of the
+      // 60-min block; the true boundary is exactly start + the target block.
+      const targetBlockMinutes = targetDuration + prepBufferMinutesForDuration(targetDuration);
       const startMs = Date.parse(appointmentContext?.startOn);
-      const endMs = Date.parse(appointmentContext?.endOn);
-      // The extended block occupies at least [start, start + targetDuration]. Take the
-      // widest of that and (end + extension) so a booked block shorter than its
-      // bucketed duration cannot shrink the checked window and hide a late collision.
-      const candidateEndMs = [];
-      if (Number.isFinite(startMs)) candidateEndMs.push(startMs + targetDuration * 60000);
-      if (Number.isFinite(endMs)) candidateEndMs.push(endMs + extensionMinutes * 60000);
-      const windowEndMs = candidateEndMs.length ? Math.max(...candidateEndMs) : NaN;
+      const windowEndMs = Number.isFinite(startMs) ? startMs + targetBlockMinutes * 60000 : NaN;
       staffWindowClear = await isStaffWindowClearOfOtherAppointments(apiUrl, headers, {
         appointmentId,
         providerId,

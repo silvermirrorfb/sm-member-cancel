@@ -498,7 +498,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.eligible).toBe(true);
     expect(result.currentDurationMinutes).toBe(30);
     expect(result.targetDurationMinutes).toBe(50);
-    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.requiredExtraMinutes).toBe(15);
     expect(result.availableGapMinutes).toBe(40);
     expect(result.pricing.memberDelta).toBe(40);
   });
@@ -531,7 +531,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.eligible).toBe(true);
     expect(result.currentDurationMinutes).toBe(30);
     expect(result.targetDurationMinutes).toBe(50);
-    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.requiredExtraMinutes).toBe(15);
   });
 
   it('infers 30-minute service for guests when raw appointment length is 30 + transition', () => {
@@ -699,7 +699,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.availableGapMinutes).toBe(30);
   });
 
-  it('treats exactly 20 minutes of post-prep gap as eligible for 30->50', () => {
+  it('marks 30->50 eligible when the gap exceeds the 15-min block extension', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -726,7 +726,7 @@ describe('upgrade eligibility engine', () => {
 
     expect(result.eligible).toBe(true);
     expect(result.availableGapMinutes).toBe(35);
-    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.requiredExtraMinutes).toBe(15);
   });
 
   it('treats less than 15 minutes after appointment end as ineligible for 30->50', () => {
@@ -1214,7 +1214,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                     },
                   },
                   {
-                    // Bounding next commitment so the 30->50 gap (needs 20) is provable.
+                    // Bounding next commitment so the 30->50 gap (needs 15) is provable.
                     node: {
                       id: 'appt-next',
                       clientId: 'other',
@@ -2496,7 +2496,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
           },
           {
             // Bounding next commitment for the same provider, 25 min after the
-            // 30-min block ends, so the 30->50 gap (needs 20) is provably enough.
+            // 30-min block ends, so the 30->50 gap (needs 15) is provably enough.
             node: {
               id: 'appt-next',
               clientId: 'other',

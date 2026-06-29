@@ -26,7 +26,9 @@ const json = (payload) => ({ ok: true, json: async () => payload });
 const LOC = 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa';
 
 // Source appointment appt-1: 14:00-14:30 (30 min) with staff prov-1, service svc-30.
-// Target upgrade: 50 min => extended occupied window [14:00, 14:50].
+// Target upgrade: 50 min => extended occupied BLOCK [14:00, 15:00], anchored at the appointment
+// start. A 50-min service occupies a 60-min block (50 + PREP_BUFFER_50MIN=10), so the upgraded
+// footprint runs start..start+60, NOT the 50-min service end (14:50) and NOT an endOn-derived span.
 const SOURCE_NODE = { id: 'appt-1', clientId: 'client-1', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:00:00.000Z', endOn: '2026-06-04T14:30:00.000Z', status: 'BOOKED', canceledAt: null };
 // A later same-staff appointment that does NOT overlap the extended window.
 const LATER_NODE = { id: 'appt-next', clientId: 'other', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T16:00:00.000Z', endOn: '2026-06-04T16:30:00.000Z', status: 'BOOKED', canceledAt: null };
@@ -469,9 +471,9 @@ describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real c
 
   it('does NOT block a timeblock that abuts the window end but does not overlap it', async () => {
     process.env = env();
-    // Window ends 14:50; a block starting exactly 14:50 does not overlap [14:00, 14:50).
+    // Window ends 15:00 (the 60-min block end); a block starting exactly 15:00 does not overlap [14:00, 15:00).
     global.fetch = buildFetch({
-      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T14:50:00.000Z', endAt: '2026-06-04T15:20:00.000Z', reason: 'Break', cancelled: false }],
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T15:00:00.000Z', endAt: '2026-06-04T15:30:00.000Z', reason: 'Break', cancelled: false }],
     });
     const result = await runReverify();
     expect(result.success).toBe(true);
@@ -650,6 +652,41 @@ describe('P1-A staff-scoped timeblock query', () => {
     });
     const result = await runReverify();
     expect(result.success).toBe(true);
+    expect(calls).toContain('bookingComplete');
+  });
+});
+
+// Block-math window (2026-06-29): the extended occupancy window must be the upgraded 60-min
+// BLOCK [start, start + (50 + PREP_BUFFER_50MIN)] = [14:00, 15:00], anchored at the appointment
+// start, NOT the 50-min service end (14:50) and NOT an endOn-derived span. A non-cancelled staff
+// block inside [14:00, 15:00) is a real collision; one at or after 15:00 is not. This pairs with
+// the eligibility block-delta (15 min): both sides measure the same 60-min upgraded footprint.
+describe('block-math collision window: exactly the 60-min upgraded block', () => {
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
+
+  it('ABORTS on a staff block at start+55 (14:55), inside the 60-min block but past the 50-min service end', async () => {
+    process.env = env();
+    // 14:55 is inside [14:00, 15:00) yet OUTSIDE the old service-end window [14:00, 14:50). Under the
+    // old service-delta window this upgrade would have committed over a real break (the bug this fixes).
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T14:55:00.000Z', endAt: '2026-06-04T15:25:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('PROCEEDS on a staff block at start+62 (15:02), past the 60-min block end: no over-coverage', async () => {
+    process.env = env();
+    // 15:02 is OUTSIDE [14:00, 15:00); the upgraded appointment never reaches it, so a window that
+    // extended past 15:00 would false-abort here. Guards the upper bound of the block window.
+    global.fetch = buildFetch({
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T15:02:00.000Z', endAt: '2026-06-04T15:32:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(result.reason).toBe('applied');
     expect(calls).toContain('bookingComplete');
   });
 });
