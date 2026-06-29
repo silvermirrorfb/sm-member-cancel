@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { evaluateUpgradeEligibilityFromAppointments } from '../src/lib/boulevard.js';
 
-// PR-A: eligibility must require the REAL added minutes (30->50 adds 20, not 15)
-// and must never assume infinite room when there is no next commitment to bound
-// against (we cannot prove the extension fits without location-hours/shift data).
+// Eligibility requires the BLOCK extension: a 30-min facial occupies a 45-min block
+// (30 + PREP_BUFFER_30MIN=15) and a 50-min facial a 60-min block (50 + PREP_BUFFER_50MIN=10),
+// so 30->50 needs 60-45 = 15 more minutes (derived from the prep buffers), NOT the 20-minute
+// service delta. It must also never assume infinite room when there is no next commitment to
+// bound against (we cannot prove the extension fits without location-hours/shift data).
 
 const member30 = { clientId: 'client-1', tier: '30', accountStatus: 'ACTIVE' };
 
