@@ -6,11 +6,6 @@ import { processConversationEnd } from '../../../../lib/notify';
 const MAX_RECOVERY_MESSAGES = 60;
 const MAX_RECOVERY_MESSAGE_CHARS = 4000;
 
-function toFiniteNumberOrNull(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
 // cancel-bot #22: bot was hallucinating session_summary.date (e.g. emitting
 // 2024-12-19 for a May 2026 session). Stamp the date server-side so the
 // canonical cancellation record reflects the actual session timestamp.
@@ -64,27 +59,11 @@ export async function POST(request) {
       for (const msg of recoveredHistory) {
         await addMessage(session.id, msg.role, msg.content);
       }
-      // Restore member profile if provided by client
-      if (body.memberProfile && typeof body.memberProfile === 'object') {
-        session.memberProfile = body.memberProfile;
-        session.mode = 'membership';
-      }
-      // Use client-provided summary if available (avoids redundant Claude call)
-      if (body.summary && typeof body.summary === 'object') {
-        session.summary = body.summary;
-        if (!session.memberProfile) {
-          session.memberProfile = {
-            name: body.summary.client_name || 'Unknown',
-            email: body.summary.email || null,
-            phone: body.summary.phone || null,
-            location: body.summary.location || 'Unknown',
-            tier: body.summary.membership_tier || null,
-            monthlyRate: toFiniteNumberOrNull(body.summary.monthly_rate),
-            tenureMonths: toFiniteNumberOrNull(body.summary.tenure_months),
-          };
-          session.mode = 'membership';
-        }
-      }
+      // SECURITY (pen test 2026-07-01, VULN-1): recover the conversation history
+      // ONLY. Never elevate to a membership session from body.memberProfile or
+      // body.summary. Membership status is set exclusively by the server-side
+      // Boulevard lookup during the live conversation; a recovered session with no
+      // server-side member resolves to GENERAL below (no ops email, no sheet row).
     }
 
     if (!session) {
@@ -96,23 +75,10 @@ export async function POST(request) {
       });
     }
 
-    // Also accept profile/summary hints on an existing session to avoid false GENERAL fallback.
-    if (!session.memberProfile && body.memberProfile && typeof body.memberProfile === 'object') {
-      session.memberProfile = body.memberProfile;
-      session.mode = 'membership';
-    } else if (!session.memberProfile && body.summary && typeof body.summary === 'object') {
-      session.memberProfile = {
-        name: body.summary.client_name || 'Unknown',
-        email: body.summary.email || null,
-        phone: body.summary.phone || null,
-        location: body.summary.location || 'Unknown',
-        tier: body.summary.membership_tier || null,
-        monthlyRate: toFiniteNumberOrNull(body.summary.monthly_rate),
-        tenureMonths: toFiniteNumberOrNull(body.summary.tenure_months),
-      };
-      session.mode = 'membership';
-      if (!session.summary) session.summary = body.summary;
-    }
+    // SECURITY (pen test 2026-07-01, VULN-1): do NOT accept body.memberProfile or
+    // body.summary as a way to elevate an existing session to membership. Only the
+    // server-side Boulevard lookup may set session.memberProfile; without it the
+    // session finalizes as GENERAL below.
     await saveSession(session);
 
     // For general conversations (no member identified), just close cleanly

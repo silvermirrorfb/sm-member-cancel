@@ -266,19 +266,39 @@ function buildAnonymousClientKey(request) {
   return `anon:${Buffer.from(source).toString('base64url').slice(0, 32)}`;
 }
 
-function getClientIP(request) {
-  const headers = request?.headers;
-  const candidates = [
-    headers?.get('x-vercel-forwarded-for'),
-    headers?.get('cf-connecting-ip'),
-    headers?.get('x-real-ip'),
-    headers?.get('x-forwarded-for'),
-  ];
-
-  for (const candidate of candidates) {
-    const normalized = normalizeIpCandidate(candidate);
+// Returns the last valid entry of an x-forwarded-for header value. Vercel
+// appends the true client IP as the LAST entry, after any client-supplied ones,
+// so scanning from the end yields the trustworthy IP and never a spoofed one.
+function lastTrustedForwardedForIp(headerValue) {
+  const raw = String(headerValue || '');
+  if (!raw) return '';
+  const segments = raw.split(',');
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    const normalized = normalizeIpCandidate(segments[i]);
     if (normalized) return normalized;
   }
+  return '';
+}
+
+// SECURITY (pen test 2026-07-01, VULN-2): only trust an IP source that the
+// serving infrastructure appends and a client cannot forge.
+//
+// Confirmed prod topology (2026-07-01): clients connect DIRECTLY to Vercel
+// (responses carry `server: Vercel` + `x-vercel-id`; no Cloudflare `cf-ray`).
+// Vercel appends the true client IP as the LAST entry of `x-forwarded-for`, so
+// that entry is the sole trustworthy identifier. We deliberately do NOT trust:
+//   - x-vercel-forwarded-for  (a client can send it; Vercel does not strip it)
+//   - x-real-ip               (client-forgeable; no proxy chain anchors it)
+//   - cf-connecting-ip        (no Cloudflare in front, so it is forgeable here)
+//   - the FIRST x-forwarded-for entry (client-supplied; the real IP is appended
+//     after any client-provided values)
+// When no trustworthy IP is available we fall back to a coarse anonymous
+// fingerprint rather than to a spoofable header.
+// NOTE: if Cloudflare is ever placed in front of Vercel, revisit this to trust
+// cf-connecting-ip first.
+function getClientIP(request) {
+  const clientIp = lastTrustedForwardedForIp(request?.headers?.get('x-forwarded-for'));
+  if (clientIp) return clientIp;
 
   return buildAnonymousClientKey(request);
 }

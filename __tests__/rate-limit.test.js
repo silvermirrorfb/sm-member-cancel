@@ -23,7 +23,10 @@ describe('rate-limit helpers', () => {
     __resetRateLimitStateForTests();
   });
 
-  it('prefers trusted platform IP headers when present', () => {
+  it('trusts only the Vercel-appended last x-forwarded-for entry, ignoring client-forgeable headers', () => {
+    // Pen test 2026-07-01 VULN-2: x-vercel-forwarded-for is client-forgeable and
+    // must be ignored. Vercel appends the true client IP as the LAST x-forwarded-for
+    // entry, so that (10.0.0.4), not the forged header (203.0.113.9), is the bucket key.
     const req = new Request('https://example.com', {
       headers: {
         'x-vercel-forwarded-for': '203.0.113.9',
@@ -31,7 +34,7 @@ describe('rate-limit helpers', () => {
       },
     });
 
-    expect(getClientIP(req)).toBe('203.0.113.9');
+    expect(getClientIP(req)).toBe('10.0.0.4');
   });
 
   it('falls back to an anonymous fingerprint when IP headers are missing', () => {
