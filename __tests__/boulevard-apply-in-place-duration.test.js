@@ -347,6 +347,59 @@ describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no c
     expect(calls).not.toContain('bookingComplete');
   });
 
+  // Live Boulevard returns an EMPTY appointment-level providerId in the location
+  // scan (only fetchAppointmentContextById resolves the real staff). The gate must
+  // resolve the service-line staff for an empty-provider overlap instead of
+  // auto-blocking, or every busy-time upgrade fails closed (near no-op).
+  it('does NOT over-block: an empty-provider overlapping appointment whose service line is on a DIFFERENT staff still commits', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      durationWarnings: [],
+      locationExtraNodes: [{ id: 'appt-empty', clientId: 'client-2', providerId: null, locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+      extraContexts: { 'appt-empty': [{ id: 'aps-e-1', serviceId: 'svc-a', staffId: 'prov-2' }] },
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(result.reason).toBe('applied');
+    expect(calls).toContain('bookingComplete');
+  });
+
+  it('BLOCKS an empty-provider overlapping appointment that carries a service line on the TARGET staff', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      durationWarnings: [],
+      locationExtraNodes: [{ id: 'appt-empty', clientId: 'client-2', providerId: null, locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+      extraContexts: { 'appt-empty': [{ id: 'aps-e-1', serviceId: 'svc-a', staffId: 'prov-2' }, { id: 'aps-e-2', serviceId: 'svc-b', staffId: 'prov-1' }] },
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED when an empty-provider overlapping appointment cannot be context-resolved', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      durationWarnings: [],
+      locationExtraNodes: [{ id: 'appt-empty', clientId: 'client-2', providerId: null, locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+      extraContexts: { 'appt-empty': 'FAIL' },
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED on an empty-provider overlap whose service lines are ALL unattributable (no resolvable staff at either level)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      durationWarnings: [],
+      locationExtraNodes: [{ id: 'appt-empty', clientId: 'client-2', providerId: null, locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
+      extraContexts: { 'appt-empty': [{ id: 'aps-e-1', serviceId: 'svc-a', staffId: null }] },
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
   it('collision scan requests the day BEFORE the appointment so a midnight-crossing overlap is not excluded by the date filter', async () => {
     process.env = env();
     global.fetch = buildFetch();

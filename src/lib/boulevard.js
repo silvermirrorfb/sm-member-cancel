@@ -3359,20 +3359,34 @@ async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
   const needsServiceCheck = [];
   for (const appt of overlapping) {
     const otherProviderBareId = bareBoulevardId(appt?.providerId);
-    if (!otherProviderBareId || otherProviderBareId === providerBareId) return false;
-    needsServiceCheck.push(appt);
+    // A resolved appointment-level provider that IS the target staff is a definite
+    // collision. Otherwise -- a different provider, OR an EMPTY provider (which live
+    // Boulevard location scans routinely return; only fetchAppointmentContextById
+    // resolves the real staff) -- resolve the service-line staff before deciding, so
+    // a busy time does not fail closed on every overlap regardless of actual staff.
+    if (otherProviderBareId && otherProviderBareId === providerBareId) return false;
+    needsServiceCheck.push({ appt, hasProviderSignal: Boolean(otherProviderBareId) });
   }
   if (needsServiceCheck.length > 0) {
     const contexts = await Promise.all(
-      needsServiceCheck.map(appt =>
+      needsServiceCheck.map(({ appt }) =>
         fetchAppointmentContextById(apiUrl, headers, appt.id).catch(() => null),
       ),
     );
-    for (const ctx of contexts) {
+    for (let i = 0; i < contexts.length; i += 1) {
+      const ctx = contexts[i];
       if (!ctx) return false; // could not resolve service staff -> fail closed
-      const hasTargetStaffLine = (Array.isArray(ctx.appointmentServices) ? ctx.appointmentServices : [])
-        .some(service => bareBoulevardId(service?.staffId) === providerBareId);
+      const lines = Array.isArray(ctx.appointmentServices) ? ctx.appointmentServices : [];
+      const hasTargetStaffLine = lines.some(service => bareBoulevardId(service?.staffId) === providerBareId);
       if (hasTargetStaffLine) return false; // a service line is on the target staff -> collision
+      // An EMPTY appointment-level provider carries no base signal, so require POSITIVE
+      // evidence the overlap is staffed by someone other than the target (at least one
+      // service line resolving to a real, non-target staff). An overlap we cannot
+      // attribute to any staff at either level fails closed.
+      if (!needsServiceCheck[i].hasProviderSignal) {
+        const hasResolvedOtherStaff = lines.some(service => bareBoulevardId(service?.staffId));
+        if (!hasResolvedOtherStaff) return false;
+      }
     }
   }
 
