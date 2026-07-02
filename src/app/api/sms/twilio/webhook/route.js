@@ -5,7 +5,7 @@ import {
   getSession,
   saveSession,
 } from '../../../../../lib/sessions';
-import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../../lib/rate-limit';
+import { buildRateLimitHeaders, buildInternalRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../../lib/rate-limit';
 import {
   bindPhoneToSession,
   getSessionIdForPhone,
@@ -395,12 +395,16 @@ function buildTwimlHeaders(rateLimit, extraHeaders = {}) {
 }
 
 async function runChatMessageForSms(sessionId, body, from) {
-  const ipKey = normalizePhone(from) || `sms:${String(from || '').trim()}`;
+  // Rate-limit the in-process chat/message call per sender. Carry the phone as a
+  // trusted internal identifier (authenticated by the per-process token) instead
+  // of smuggling it through x-forwarded-for, where an E.164 phone fails IP parsing
+  // and collapses every sender into one shared bucket.
+  const phoneKey = normalizePhone(from) || String(from || '').trim() || 'unknown';
   const internalReq = new Request('http://internal/api/chat/message', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-forwarded-for': ipKey,
+      ...buildInternalRateLimitHeaders(`sms:${phoneKey}`),
     },
     body: JSON.stringify({
       sessionId,
