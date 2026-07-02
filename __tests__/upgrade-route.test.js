@@ -59,6 +59,7 @@ vi.mock('../src/lib/notify.js', () => ({
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: () => ({ allowed: true, retryAfterMs: 0, limit: 30, remaining: 29, backend: 'memory' }),
   getClientIP: () => '127.0.0.1',
+  resolveClientRateLimitKey: () => '127.0.0.1',
   buildRateLimitHeaders: () => ({}),
 }));
 

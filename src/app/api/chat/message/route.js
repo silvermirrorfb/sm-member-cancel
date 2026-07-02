@@ -18,7 +18,7 @@ import {
 } from '../../../../lib/boulevard';
 import { logChatMessages, logSupportIncident } from '../../../../lib/notify';
 import { OPENING_MESSAGE } from '../../../../lib/chat-config';
-import { buildRateLimitHeaders, checkRateLimit, getClientIP } from '../../../../lib/rate-limit';
+import { buildRateLimitHeaders, checkRateLimit, resolveClientRateLimitKey } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
 import { buildSmsUpgradePendingReply, isSmsUpgradeLive } from '../../../../lib/sms-upgrade-policy';
 import { getDurationOfferDisplayName } from '../../../../lib/sms-copy';
@@ -689,8 +689,9 @@ async function flushChatTranscript(session, sessionCreated, entries, contextLabe
 export async function POST(request) {
     let rateLimit = null;
     try {
-          // Rate limit: max 30 messages per 10 minutes per IP
-      const ip = getClientIP(request);
+          // Rate limit: max 30 messages per 10 minutes per client (per IP for web,
+          // per phone for the in-process SMS bridge via a trusted internal key).
+      const ip = resolveClientRateLimitKey(request);
           rateLimit = await checkRateLimit(ip, 'message', 30, 10 * 60 * 1000);
 
       if (!rateLimit.allowed) {

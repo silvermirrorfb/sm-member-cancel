@@ -283,6 +283,39 @@ function getClientIP(request) {
   return buildAnonymousClientKey(request);
 }
 
+// Internal callers (the SMS webhook invoking the chat/message route in-process)
+// must rate-limit by a domain identifier (the sender's phone) rather than an IP.
+// They cannot smuggle it through x-forwarded-for: getClientIP only trusts real
+// IPs, so an E.164 phone falls through to one shared anonymous bucket. And we
+// must NOT let any request-supplied header pick the bucket, or an external
+// caller could rotate it per request and defeat the limiter. So the identifier
+// is honored ONLY when accompanied by a per-process token an outside client
+// cannot know. Both routes share this token because they load this one module.
+const INTERNAL_RATE_LIMIT_ID_HEADER = 'x-internal-ratelimit-id';
+const INTERNAL_RATE_LIMIT_TOKEN_HEADER = 'x-internal-ratelimit-token';
+const INTERNAL_RATE_LIMIT_TOKEN = crypto.randomUUID();
+
+function buildInternalRateLimitHeaders(identifier) {
+  const normalized = normalizeRateLimitKeyPart(identifier, '');
+  if (!normalized) return {};
+  return {
+    [INTERNAL_RATE_LIMIT_ID_HEADER]: normalized,
+    [INTERNAL_RATE_LIMIT_TOKEN_HEADER]: INTERNAL_RATE_LIMIT_TOKEN,
+  };
+}
+
+// Bucket key for a request: a trusted internal identifier when it carries the
+// correct process token, otherwise the client IP (getClientIP).
+function resolveClientRateLimitKey(request) {
+  const headers = request?.headers;
+  const token = headers?.get(INTERNAL_RATE_LIMIT_TOKEN_HEADER);
+  if (token && token === INTERNAL_RATE_LIMIT_TOKEN) {
+    const identifier = normalizeRateLimitKeyPart(headers?.get(INTERNAL_RATE_LIMIT_ID_HEADER), '');
+    if (identifier) return identifier;
+  }
+  return getClientIP(request);
+}
+
 function checkRateLimitInMemory(identifier, policy) {
   const key = `${identifier}:${policy.route}`;
   const now = Date.now();
@@ -467,8 +500,10 @@ function __resetRateLimitStateForTests() {
 
 export {
   buildRateLimitHeaders,
+  buildInternalRateLimitHeaders,
   checkRateLimit,
   getClientIP,
+  resolveClientRateLimitKey,
   getRateLimitPolicy,
   __resetRateLimitStateForTests,
 };

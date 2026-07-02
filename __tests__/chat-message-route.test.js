@@ -25,6 +25,7 @@ vi.mock('../src/lib/sessions.js', () => ({
 
 vi.mock('../src/lib/rate-limit.js', () => ({
   getClientIP: (...args) => mockGetClientIP(...args),
+  resolveClientRateLimitKey: (...args) => mockGetClientIP(...args),
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
   buildRateLimitHeaders: (...args) => mockBuildRateLimitHeaders(...args),
 }));

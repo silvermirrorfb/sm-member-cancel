@@ -27,6 +27,7 @@ const originalEnv = process.env;
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
   getClientIP: (...args) => mockGetClientIP(...args),
+  buildInternalRateLimitHeaders: (identifier) => ({ 'x-internal-ratelimit-id': String(identifier || '') }),
   buildRateLimitHeaders: (...args) => mockBuildRateLimitHeaders(...args),
 }));
 
