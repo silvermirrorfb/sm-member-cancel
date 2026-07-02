@@ -2424,10 +2424,17 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     return { eligible: false, reason: 'already_at_or_above_target_duration' };
   }
 
-  // 30->50 requires the REAL added service minutes (target minus current), not a
-  // flat 15. A 45-minute room (30 booked + 15 free) does NOT fit a 50-minute
-  // service, which needs 20 more minutes. Computed, never hardcoded.
-  const requiredExtraMinutes = Math.max(0, targetDurationMinutes - currentDurationMinutes);
+  // 30->50 requires the BLOCK extension, not the raw service delta. Each booking occupies a
+  // schedule block of (service minutes + its prep buffer): a 30-min facial -> 45-min block
+  // (30 + PREP_BUFFER_30MIN), a 50-min facial -> 60-min block (50 + PREP_BUFFER_50MIN). The
+  // upgrade therefore grows the footprint by (50+10) - (30+15) = 15, NOT the 20-min service
+  // delta. currentDurationMinutes is the bucketed/clamped service tier above (30, never the
+  // raw padded block), so prepBufferMinutesForDuration keys off the tier. This keeps the
+  // requirement in the same block-based unit as availableGapMinutes, which is measured from
+  // the block-end endOn. Derived from the PREP_BUFFER_* constants, never hardcoded.
+  const currentBlockMinutes = currentDurationMinutes + prepBufferMinutesForDuration(currentDurationMinutes);
+  const targetBlockMinutes = targetDurationMinutes + prepBufferMinutesForDuration(targetDurationMinutes);
+  const requiredExtraMinutes = Math.max(0, targetBlockMinutes - currentBlockMinutes);
   const prepBufferMinutes = 0;
   const pricing = computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember);
   if (!pricing) return { eligible: false, reason: 'pricing_unavailable' };
@@ -3182,17 +3189,250 @@ function toBookingWarningList(rawWarnings) {
     message: String(warning?.message || '').trim() || null,
     staffId: String(warning?.staffId || '').trim() || null,
     serviceId: String(warning?.serviceId || '').trim() || null,
+    // bookingServiceId is the most precise self-overlap signal: it names the exact
+    // draft line being edited. Boulevard returns it as a bare uuid (see below).
+    bookingServiceId: String(warning?.bookingServiceId || '').trim() || null,
   }));
 }
 
-function hasBlockingBookingWarnings(warnings = []) {
+// A STAFF_DOUBLE_BOOKED warning is the benign SELF-OVERLAP of an in-place duration
+// edit when it names the exact line being edited AND an independent schedule read has
+// proven no OTHER real appointment occupies that staff/time window. Boulevard returns
+// warning ids as BARE uuids while the code carries full urn:blvd: ids, so every
+// comparison normalizes to the bare uuid tail via bareBoulevardId. (This bare-vs-urn
+// mismatch is exactly what falsely aborted the first dry-run harness.)
+function isSelfOverlapStaffDoubleBooked(warning, selfOverlapContext) {
+  if (!selfOverlapContext || selfOverlapContext.staffWindowClear !== true) return false;
+  if (String(warning?.code || '').trim().toUpperCase() !== 'STAFF_DOUBLE_BOOKED') return false;
+  const warnBookingServiceId = bareBoulevardId(warning?.bookingServiceId);
+  const warnServiceId = bareBoulevardId(warning?.serviceId);
+  const warnStaffId = bareBoulevardId(warning?.staffId);
+  const matchesByBookingServiceId =
+    Boolean(warnBookingServiceId) && warnBookingServiceId === bareBoulevardId(selfOverlapContext.baseBookingServiceId);
+  const matchesByServiceAndStaff =
+    Boolean(warnServiceId) && warnServiceId === bareBoulevardId(selfOverlapContext.sourceServiceId) &&
+    Boolean(warnStaffId) && warnStaffId === bareBoulevardId(selfOverlapContext.providerId);
+  return matchesByBookingServiceId || matchesByServiceAndStaff;
+}
+
+// Discriminating warning policy. RESOURCE_DOUBLE_BOOKED and STAFF_DOES_NOT_PERFORM_SERVICE
+// are always blocking. STAFF_DOUBLE_BOOKED is blocking UNLESS it is the proven benign
+// self-overlap of an in-place edit (selfOverlapContext supplied AND staffWindowClear AND
+// the warning names the edited line). The self-overlap context is supplied ONLY by the
+// in-place duration apply path; every other caller (e.g. the add-on path) passes no
+// context, so STAFF_DOUBLE_BOOKED stays a hard block for them, unchanged.
+function hasBlockingBookingWarnings(warnings = [], selfOverlapContext = null) {
   if (!Array.isArray(warnings) || warnings.length === 0) return false;
   const blockingCodes = new Set([
     'RESOURCE_DOUBLE_BOOKED',
     'STAFF_DOUBLE_BOOKED',
     'STAFF_DOES_NOT_PERFORM_SERVICE',
   ]);
-  return warnings.some(warning => blockingCodes.has(String(warning?.code || '').trim().toUpperCase()));
+  return warnings.some(warning => {
+    const code = String(warning?.code || '').trim().toUpperCase();
+    if (!blockingCodes.has(code)) return false;
+    if (code === 'STAFF_DOUBLE_BOOKED' && isSelfOverlapStaffDoubleBooked(warning, selfOverlapContext)) return false;
+    return true;
+  });
+}
+
+// Reads the target location's staff TIMEBLOCKS (breaks, time-off, holds) over a window.
+// Boulevard surfaces an upgrade that extends an appointment into a staff block as a
+// STAFF_DOUBLE_BOOKED *warning* (not a hard error), so the appointment-only scan cannot
+// see it; this is the read primitive that lets the provider-window-clear check fail
+// closed on a block. Returns { timeblocks: [...] } on success, { timeblocks: null } on
+// ANY transport/GraphQL failure, a null list, OR a truncated (multi-page) read, so the
+// caller treats the window as NOT clear rather than trusting an incomplete block read.
+async function scanTimeblocks(apiUrl, headers, context = {}) {
+  const locationId = String(context?.locationId || '').trim();
+  if (!locationId) return { timeblocks: null };
+  // The caller drives the window bounds (a wide lookback on the lower side, since timeblocks
+  // can run for months). PAGINATE the full result set: a single page would force a fail-closed
+  // abort whenever a busy location has more than one page of blocks in the lookback, wrongly
+  // killing legit upgrades. Mirrors the cursor pagination scanAppointments/clients/services use.
+  // Scope to the TARGET staff: a 365-day LOCATION-wide scan overruns the page cap at busy
+  // locations (a live probe saw >2000 blocks at Brickell -> fail closed -> every upgrade aborts).
+  // Boulevard supports a staffId filter (probe-confirmed: one staff is ~646 blocks / 7 pages and
+  // terminates), and SM models no null-staffId / location-wide closure blocks (probe: 0 of 5000
+  // across two locations), so staff scope is both safe and complete. An unscoped call (no staffId)
+  // falls back to the location-wide window.
+  const staffId = String(context?.staffId || '').trim();
+  const windowClause = buildAppointmentWindowQuery(context);
+  const windowQueryString = [staffId ? `staffId = '${staffId}'` : null, windowClause].filter(Boolean).join(' AND ');
+  const query = `
+    query ScanTimeblocks($locationId: ID!, $query: QueryString, $after: String) {
+      timeblocks(locationId: $locationId, query: $query, first: ${APPOINTMENT_SCAN_PAGE_SIZE}, after: $after) {
+        edges { node { staffId startAt endAt reason cancelled } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+  const all = [];
+  let after = null;
+  for (let page = 0; page < APPOINTMENT_SCAN_MAX_PAGES; page++) {
+    // Read-only and idempotent, so transient retry is safe (mirrors scanAppointments).
+    const data = await fetchBoulevardGraphQL(
+      apiUrl,
+      headers,
+      query,
+      { locationId, query: windowQueryString, after },
+      { silentErrors: true, returnErrors: true, retryTransient: true },
+    );
+    if (!data || data.__error) return { timeblocks: null }; // transport / GraphQL error -> fail closed
+    const payload = data?.data?.timeblocks;
+    if (payload === null || payload === undefined) return { timeblocks: null }; // null list -> fail closed
+    // A bare array shape has no cursor concept: it is the complete set by definition.
+    if (Array.isArray(payload)) { all.push(...payload.filter(Boolean)); return { timeblocks: all }; }
+    // Otherwise this must be a connection: a RECOGNIZED node container is required to read the
+    // page's contents, and pageInfo is required to prove completeness. A malformed page (non-array
+    // edges/nodes, or a connection missing pageInfo) cannot be read as "no blocks" -> fail closed,
+    // never trusted as an empty/last page.
+    let pageNodes;
+    if (Array.isArray(payload?.edges)) pageNodes = payload.edges.map(edge => edge?.node).filter(Boolean);
+    else if (Array.isArray(payload?.nodes)) pageNodes = payload.nodes.filter(Boolean);
+    else return { timeblocks: null }; // unrecognized / malformed page container -> fail closed
+    all.push(...pageNodes);
+    const pageInfo = payload?.pageInfo;
+    if (!pageInfo) return { timeblocks: null }; // connection without pageInfo -> cannot prove complete -> fail closed
+    if (!pageInfo.hasNextPage) return { timeblocks: all }; // last page -> the full set
+    after = pageInfo.endCursor;
+    if (!after) return { timeblocks: null }; // more pages but no cursor to advance -> fail closed
+  }
+  return { timeblocks: null }; // page cap hit with pages remaining -> cannot prove clear -> fail closed
+}
+
+// Reuses scanAppointments (the same appointment-read primitive the eligibility path
+// uses) to prove the edited appointment's extended window holds NO OTHER real
+// appointment on the same provider. This is the safety core of the in-place upgrade:
+// the eligibility gap read is client-scoped and cannot see other clients' bookings on
+// the staff, so a genuine cross-client collision is detectable only here. FAILS CLOSED:
+// any scan failure, or any in-window appointment on the same provider OR with an
+// unresolvable provider, returns false so a real collision can never be mistaken for
+// the benign self-overlap. The source appointment is excluded by id (it is the line
+// being edited); cancelled rows are already dropped at the scan source.
+async function isStaffWindowClearOfOtherAppointments(apiUrl, headers, context) {
+  const appointmentBareId = bareBoulevardId(context?.appointmentId);
+  const providerBareId = bareBoulevardId(context?.providerId);
+  const locationId = String(context?.locationId || '').trim();
+  const startMs = Date.parse(context?.startOn);
+  const windowEndMs = Date.parse(context?.windowEndOn);
+  if (!appointmentBareId || !providerBareId || !locationId || !Number.isFinite(startMs) || !Number.isFinite(windowEndMs)) {
+    return false; // missing inputs -> cannot prove clear -> fail closed
+  }
+  // buildAppointmentWindowQuery filters by START date at day granularity. Pull the
+  // lower bound back one day so an appointment that STARTS before the source's UTC
+  // midnight but RUNS INTO the window (e.g. an evening ET booking that straddles UTC
+  // midnight) is still returned and time-overlap-filtered below; without this the
+  // date filter (startAt >= source-date) would silently exclude it. The window stays
+  // a few days at one location, far under the scan page cap, and the source-present
+  // sanity gate below independently fails closed on any truncation.
+  const scanWindowStart = new Date(startMs - 24 * 60 * 60 * 1000);
+  const scanWindowEnd = new Date(windowEndMs + 24 * 60 * 60 * 1000);
+  const scan = await scanAppointments(apiUrl, headers, {
+    locationId,
+    windowStart: scanWindowStart,
+    windowEnd: scanWindowEnd,
+  });
+  if (!scan || !Array.isArray(scan.appointments)) return false; // scan failed -> fail closed
+  // Sanity gate: the appointment being edited MUST appear in its own window scan. If
+  // it does not, the scan did not actually cover this window (date-filter mismatch,
+  // pagination truncation, a dropped row), so it cannot be trusted to prove the
+  // window is clear. Fail closed rather than read an incomplete scan as "no others".
+  const sawSourceAppointment = scan.appointments.some(appt => bareBoulevardId(appt?.id) === appointmentBareId);
+  if (!sawSourceAppointment) return false;
+
+  // Appointments overlapping the extended window (excluding the source being edited).
+  const overlapping = scan.appointments.filter(appt => {
+    if (bareBoulevardId(appt?.id) === appointmentBareId) return false;
+    const otherStart = Date.parse(appt?.startOn);
+    const otherEnd = Date.parse(appt?.endOn);
+    if (!Number.isFinite(otherStart) || !Number.isFinite(otherEnd)) return false;
+    return otherStart < windowEndMs && otherEnd > startMs;
+  });
+
+  // Decide same-staff at SERVICE level, not just by the appointment-level provider:
+  // a multi-staff appointment can carry a line on the target staff while its
+  // appointment-level provider resolves to someone else. For each overlapping
+  // appointment, an appointment-level provider that already matches (or is
+  // unresolvable) blocks immediately; otherwise resolve its service-line staff and
+  // block if any line is on the target staff. Any resolution failure fails closed.
+  const needsServiceCheck = [];
+  for (const appt of overlapping) {
+    const otherProviderBareId = bareBoulevardId(appt?.providerId);
+    // A resolved appointment-level provider that IS the target staff is a definite
+    // collision. Otherwise -- a different provider, OR an EMPTY provider (which live
+    // Boulevard location scans routinely return; only fetchAppointmentContextById
+    // resolves the real staff) -- resolve the service-line staff before deciding, so
+    // a busy time does not fail closed on every overlap regardless of actual staff.
+    if (otherProviderBareId && otherProviderBareId === providerBareId) return false;
+    needsServiceCheck.push({ appt, hasProviderSignal: Boolean(otherProviderBareId) });
+  }
+  if (needsServiceCheck.length > 0) {
+    const contexts = await Promise.all(
+      needsServiceCheck.map(({ appt }) =>
+        fetchAppointmentContextById(apiUrl, headers, appt.id).catch(() => null),
+      ),
+    );
+    for (let i = 0; i < contexts.length; i += 1) {
+      const ctx = contexts[i];
+      if (!ctx) return false; // could not resolve service staff -> fail closed
+      const lines = Array.isArray(ctx.appointmentServices) ? ctx.appointmentServices : [];
+      const hasTargetStaffLine = lines.some(service => bareBoulevardId(service?.staffId) === providerBareId);
+      if (hasTargetStaffLine) return false; // a service line is on the target staff -> collision
+      // An EMPTY appointment-level provider carries no base signal, so require POSITIVE
+      // evidence the overlap is staffed by someone other than the target (at least one
+      // service line resolving to a real, non-target staff). An overlap we cannot
+      // attribute to any staff at either level fails closed.
+      if (!needsServiceCheck[i].hasProviderSignal) {
+        const hasResolvedOtherStaff = lines.some(service => bareBoulevardId(service?.staffId));
+        if (!hasResolvedOtherStaff) return false;
+      }
+    }
+  }
+
+  // Staff TIMEBLOCKS (breaks, time-off, holds) are invisible to the appointment scan, but
+  // a duration extension into one is a real collision Boulevard only WARNS (not errors) on
+  // - the probe-confirmed P1-A gap (2026-06-25): a draft on a "no appointments" staff block
+  // raised STAFF_DOUBLE_BOOKED on a window with zero real appointments. Scan the SAME padded
+  // window for the target staff and FAIL CLOSED: any block-read failure, or a non-cancelled
+  // block overlapping [start, windowEnd), means the window is NOT clear and the apply aborts
+  // before bookingComplete. Without this, such a block reads as the benign self-overlap.
+  // Timeblocks can run for MONTHS (PTO, leave, indefinite holds), unlike appointments. The
+  // startAt filter would miss a long block that STARTED before the appointment's day yet
+  // overlaps the window, so the timeblock fetch uses a wide lookback on its lower bound
+  // (default 365 days, BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) instead of the appointment scan's
+  // +/-1-day pad. Safe to set this wide because scanTimeblocks paginates the full result set.
+  // The upper bound is unchanged: a block starting after the window cannot overlap it. (A
+  // still-running block that started before the lookback horizon is the documented residual
+  // the pre-flag-flip supervised probe must assess.)
+  const timeblockLookbackDays = Math.max(1, Number(process.env.BOULEVARD_TIMEBLOCK_LOOKBACK_DAYS) || 365);
+  const timeblockWindowStart = new Date(startMs - timeblockLookbackDays * 24 * 60 * 60 * 1000);
+  const blockScan = await scanTimeblocks(apiUrl, headers, {
+    locationId,
+    // Scope to the target staff. providerBareId is the bare uuid; Boulevard's Timeblock.staffId
+    // is the canonical urn, so reconstruct it (matches what the live probe filtered on). The gate
+    // already failed closed above if providerBareId was empty, so the filter is always well-formed.
+    staffId: `urn:blvd:Staff:${providerBareId}`,
+    windowStart: timeblockWindowStart,
+    windowEnd: scanWindowEnd,
+  });
+  if (!blockScan || !Array.isArray(blockScan.timeblocks)) return false; // block scan failed -> fail closed
+  const blockedByTimeblock = blockScan.timeblocks.some(block => {
+    if (block?.cancelled === true) return false; // cancelled blocks do not occupy the staff
+    const blockStaff = bareBoulevardId(block?.staffId);
+    // Only the target staff's blocks matter, EXCEPT a null/empty staffId may be an all-staff or
+    // location-wide closure that cannot be attributed away -> treat as target-staff (fail closed).
+    if (blockStaff && blockStaff !== providerBareId) return false;
+    const blockStart = Date.parse(block?.startAt);
+    const blockEnd = Date.parse(block?.endAt);
+    // A target-staff (or unattributable) non-cancelled block whose bounds will not parse cannot
+    // be proven NOT to overlap -> fail closed rather than ignore it.
+    if (!Number.isFinite(blockStart) || !Number.isFinite(blockEnd)) return true;
+    return blockStart < windowEndMs && blockEnd > startMs; // [startAt, endAt) overlaps the extended window
+  });
+  if (blockedByTimeblock) return false;
+
+  return true;
 }
 
 // Formats a Boulevard __error object (the shape returned by fetchBoulevardGraphQL
@@ -3492,14 +3732,22 @@ async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointme
   };
 }
 
-// Non-destructive duration swap via Boulevard's booking-edit flow. Opens an
-// editing booking over the existing appointment, ADDS the target service before
-// REMOVING the original (so the booking is never empty), optionally re-prices to
-// the quoted total, then commits back to the SAME appointment id. Every step
-// targets the draft bookingId, never the live appointment; the live appointment
-// changes only at bookingComplete. No cancelAppointment, no fresh bookingCreate.
-// Any step error or blocking warning aborts BEFORE bookingComplete, leaving the
-// appointment untouched (the draft is abandoned).
+// Non-destructive IN-PLACE duration upgrade via Boulevard's booking-edit flow
+// (Fix A). Opens an editing booking over the existing appointment, edits the
+// existing editing-linked service line in place (bookingServiceSetDurations to the
+// target duration, bookingServiceSetPrice to the quoted total), then commits back to
+// the SAME appointment id. No bookingAddService, no bookingRemoveService, no fresh
+// bookingCreate, no cancelAppointment, so a second service line never exists. Every
+// step targets the draft bookingId; the live appointment changes only at
+// bookingComplete.
+//
+// The in-place edit unavoidably provokes a STAFF_DOUBLE_BOOKED warning at
+// setDurations: the edit-draft transiently overlaps the source appointment it is
+// editing, on the same staff/time, until bookingComplete reconciles them. That
+// self-overlap is benign (proven by a supervised write-test: bookingComplete commits
+// in place, same appointment id). We PROCEED past it only when an independent
+// schedule read proves the window holds NO OTHER real appointment on that staff; a
+// genuine collision still aborts BEFORE bookingComplete and the draft is abandoned.
 async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContext, targetServiceId, options = {}) {
   const appointmentId = String(appointmentContext?.appointmentId || '').trim();
   const targetId = String(targetServiceId || '').trim();
@@ -3516,7 +3764,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
           bookingClients { id clientId }
           bookingServices { id baseBookingServiceId editingAppointmentServiceId serviceId staffId }
         }
-        bookingWarnings { code message staffId serviceId }
+        bookingWarnings { code message staffId serviceId bookingServiceId }
       }
     }
   `;
@@ -3533,13 +3781,13 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
   if (!createAttempt.ok || !bookingId) {
     return { applied: false, reason: 'duration_booking_create_failed', error: createAttempt.error || null, warnings: createWarnings };
   }
-  if (hasBlockingBookingWarnings(createWarnings)) {
-    return { applied: false, reason: 'duration_booking_create_warning_block', warnings: createWarnings, bookingId };
-  }
 
+  // Resolve the editing-linked service line BEFORE any warning gate, so the
+  // self-overlap discrimination has the exact line ids it needs to match against.
   const bookingClientId = String(booking?.bookingClients?.[0]?.id || '').trim();
   const sourcePrimary = getPrimaryAppointmentService(appointmentContext);
   const sourceAppointmentServiceId = String(sourcePrimary?.id || '').trim();
+  const sourceServiceId = String(sourcePrimary?.serviceId || appointmentContext?.serviceId || '').trim();
   const bookingServices = Array.isArray(booking?.bookingServices) ? booking.bookingServices : [];
   const baseBookingService = bookingServices.find(service =>
     !String(service?.baseBookingServiceId || '').trim() &&
@@ -3550,21 +3798,68 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     return { applied: false, reason: 'duration_booking_missing_booking_context', bookingId };
   }
 
-  // IN-PLACE duration extension (Fix A): edit the existing editing-linked service
-  // line instead of add-new + remove-old. No second service line is ever created,
-  // so the draft never holds two services on the same staff/time and a
-  // STAFF_DOUBLE_BOOKED self-overlap cannot arise. There is no bookingAddService,
-  // no bookingRemoveService, and no cancelAppointment in this path. The booked
-  // service stays the same line, extended to the target duration.
   const targetDuration = Math.round(Number(options?.targetDurationMinutes));
   if (!Number.isFinite(targetDuration) || targetDuration <= 0) {
     return { applied: false, reason: 'duration_booking_missing_target_duration', bookingId };
   }
+
+  // Prove the staff window is clear of OTHER real appointments, recomputed FRESH on
+  // each gate that sees a STAFF_DOUBLE_BOOKED. A positive (clear) result is never
+  // reused across mutating gates: a collision can be booked, or first surface at
+  // commit, in the gap between gates. Once a collision is proven it sticks (a real
+  // conflict does not vanish). The check reuses scanAppointments (location-scoped)
+  // because the eligibility gap read is client-scoped and cannot see other clients'
+  // bookings on the staff. Runs only when a STAFF_DOUBLE_BOOKED is present, so the
+  // clean path adds no fetch. Fails closed on any doubt.
+  let collisionProven = false;
+  async function selfOverlapContext() {
+    let staffWindowClear;
+    if (collisionProven) {
+      staffWindowClear = false;
+    } else {
+      // The upgraded appointment occupies the target BLOCK: [start, start + (targetDuration +
+      // prepBuffer(target))]. For a 30->50 that is [start, start + 60] (50 + PREP_BUFFER_50MIN=10).
+      // Anchor the window at the appointment start and span exactly the upgraded block: it is
+      // independent of endOn (a booked block shorter OR longer than its bucketed duration can no
+      // longer shrink or inflate the window) and matches the eligibility block-delta. The old
+      // endOn + service-delta span over-covered (false-aborting a block just past the upgraded
+      // block), while start + targetDuration alone stopped at the 50-min service end, short of the
+      // 60-min block; the true boundary is exactly start + the target block.
+      const targetBlockMinutes = targetDuration + prepBufferMinutesForDuration(targetDuration);
+      const startMs = Date.parse(appointmentContext?.startOn);
+      const windowEndMs = Number.isFinite(startMs) ? startMs + targetBlockMinutes * 60000 : NaN;
+      staffWindowClear = await isStaffWindowClearOfOtherAppointments(apiUrl, headers, {
+        appointmentId,
+        providerId,
+        locationId: appointmentContext?.locationId || null,
+        startOn: appointmentContext?.startOn || null,
+        windowEndOn: Number.isFinite(windowEndMs) ? new Date(windowEndMs).toISOString() : null,
+      });
+      if (!staffWindowClear) collisionProven = true;
+    }
+    return { baseBookingServiceId, sourceServiceId, providerId, staffWindowClear };
+  }
+  // A step's warnings block UNLESS the only blocking one is the benign self-overlap on
+  // the edited line in a proven-clear window. The window read happens only when a
+  // STAFF_DOUBLE_BOOKED is actually present, so the clean path adds no fetch.
+  async function warningsBlock(warnings) {
+    const hasStaffDoubleBooked = Array.isArray(warnings)
+      && warnings.some(w => String(w?.code || '').trim().toUpperCase() === 'STAFF_DOUBLE_BOOKED');
+    const context = hasStaffDoubleBooked ? await selfOverlapContext() : null;
+    return hasBlockingBookingWarnings(warnings, context);
+  }
+
+  if (await warningsBlock(createWarnings)) {
+    return { applied: false, reason: 'duration_booking_create_warning_block', warnings: createWarnings, bookingId };
+  }
+
+  // IN-PLACE duration extension: edit the existing editing-linked service line. No
+  // bookingAddService, no bookingRemoveService, no cancelAppointment in this path.
   const setDurationsQuery = `
     mutation DurationBookingServiceSetDurations($input: BookingServiceSetDurationsInput!) {
       bookingServiceSetDurations(input: $input) {
         booking { id }
-        bookingWarnings { code message staffId serviceId }
+        bookingWarnings { code message staffId serviceId bookingServiceId }
       }
     }
   `;
@@ -3579,7 +3874,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
   if (!durationAttempt.ok) {
     return { applied: false, reason: 'duration_booking_set_durations_failed', error: durationAttempt.error || null, warnings: durationWarnings, bookingId };
   }
-  if (hasBlockingBookingWarnings(durationWarnings)) {
+  if (await warningsBlock(durationWarnings)) {
     return { applied: false, reason: 'duration_booking_set_durations_warning_block', warnings: durationWarnings, bookingId };
   }
 
@@ -3591,7 +3886,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
       mutation DurationBookingServiceSetPrice($input: BookingServiceSetPriceInput!) {
         bookingServiceSetPrice(input: $input) {
           booking { id }
-          bookingWarnings { code message staffId serviceId }
+          bookingWarnings { code message staffId serviceId bookingServiceId }
         }
       }
     `;
@@ -3605,6 +3900,21 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     if (!priceAttempt.ok) {
       return { applied: false, reason: 'duration_booking_set_price_failed', error: priceAttempt.error || null, bookingId };
     }
+    const priceWarnings = toBookingWarningList(priceAttempt.payload?.bookingWarnings);
+    if (await warningsBlock(priceWarnings)) {
+      return { applied: false, reason: 'duration_booking_set_price_warning_block', warnings: priceWarnings, bookingId };
+    }
+  }
+
+  // INVARIANT GATE (safety-critical): commit ONLY if the staff window is
+  // affirmatively proven clear of OTHER appointments. This runs unconditionally,
+  // regardless of whether Boulevard surfaced a STAFF_DOUBLE_BOOKED warning, so the
+  // proof is invariant-triggered, not warning-triggered: a real collision is blocked
+  // BEFORE bookingComplete even if the provider returns no warning. selfOverlapContext
+  // recomputes the window fresh here (never a stale positive). Fails closed.
+  const preCommitContext = await selfOverlapContext();
+  if (!preCommitContext.staffWindowClear) {
+    return { applied: false, reason: 'duration_booking_staff_window_not_clear', bookingId };
   }
 
   // Commit the edit back to the SAME appointment. notifyClient:false: we send our
@@ -3614,7 +3924,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
       bookingComplete(input: $input) {
         booking { id }
         bookingAppointments { appointmentId clientId }
-        bookingWarnings { code message staffId serviceId }
+        bookingWarnings { code message staffId serviceId bookingServiceId }
       }
     }
   `;
@@ -3629,7 +3939,7 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
   if (!completeAttempt.ok) {
     return { applied: false, reason: 'duration_booking_complete_failed', error: completeAttempt.error || null, warnings: completeWarnings, bookingId };
   }
-  if (hasBlockingBookingWarnings(completeWarnings)) {
+  if (await warningsBlock(completeWarnings)) {
     return { applied: false, reason: 'duration_booking_complete_warning_block', warnings: completeWarnings, bookingId };
   }
 
@@ -3838,7 +4148,7 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
       auth.headers,
       swapContext,
       serviceId,
-      { quotedTotalDollars: Number(pendingOffer?.totalDollars) || null, targetDurationMinutes: Number(fresh.targetDurationMinutes) },
+      { quotedTotalDollars: Number(pendingOffer?.totalDollars) || null, targetDurationMinutes: Number(fresh.targetDurationMinutes), currentDurationMinutes: Number(fresh.currentDurationMinutes) || null },
     );
     if (!bookingApplied.applied) {
       await recordUpgradeApplyRejection('booking', fresh.appointmentId, bookingApplied.error, bookingApplied.warnings);
@@ -4401,6 +4711,7 @@ export {
   buildAppointmentWindowQuery,
   evaluateUpgradeOpportunityForProfile,
   evaluateUpgradeEligibilityFromAppointments,
+  hasBlockingBookingWarnings,
   computeCloseShiftGapMinutes,
   zonedWallClockToUtcMs,
   probeCancelRebookCapabilities,

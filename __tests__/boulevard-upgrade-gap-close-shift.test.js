@@ -10,7 +10,7 @@ import {
 // appointment, location close, provider shift end). The provider's last booking
 // of the day must not be skipped as gap_unprovable when the salon is open long
 // enough after it for the added minutes to fit. Real case: Samantha Lozada's
-// last UWS booking ends 8:30 PM, UWS closes 9:00 PM, a 30->50 needs 20 min, so
+// last UWS booking ends 8:30 PM, UWS closes 9:00 PM, a 30->50 needs 15 min, so
 // it fits and must be ELIGIBLE.
 
 // Real UWS shape: index 0 = Sunday. Mon-Fri 08:00-21:00, Sat 09:00-19:00, Sun 10:00-18:00.
@@ -228,7 +228,7 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     expect(result.eligible).toBe(true);
     expect(result.reason).toBe('eligible');
     expect(result.availableGapMinutes).toBe(30);
-    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.requiredExtraMinutes).toBe(15);
   });
 
   it('PREFIXED urn staffId in the shifts response still binds (open day, both bounds) -> eligible', async () => {
@@ -273,7 +273,7 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
     expect(result.eligible).toBe(false);
     expect(result.reason).toBe('insufficient_gap');
-    expect(result.availableGapMinutes).toBe(10); // only 10 minutes to 9:00 PM close, needs 20
+    expect(result.availableGapMinutes).toBe(10); // only 10 minutes to 9:00 PM close, needs 15
   });
 
   it('FAIL-SAFE: when the hours and shift fetches return nothing, stays gap_unprovable (never falsely eligible)', async () => {

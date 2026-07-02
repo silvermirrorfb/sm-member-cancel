@@ -76,6 +76,10 @@ function buildFetch({ reject = null, rejectMessage = 'Service is not bookable' }
       return json({ data: { appointment: { id: 'appt-1', duration: d, appointmentServices: [{ id: 'aps-1', serviceId: completed ? 'svc-50' : 'svc-30', duration: d, totalDuration: d }] } } });
     }
 
+    if (query.includes('ScanTimeblocks')) {
+      // P1-A: the in-place duration apply now also scans staff timeblocks; no blocks here -> window clear.
+      return json({ data: { timeblocks: { edges: [], pageInfo: { hasNextPage: false, endCursor: null } } } });
+    }
     if (query.includes('ScanAppointments')) {
       return json({ data: { appointments: { edges: [
         { node: { id: 'appt-1', clientId: 'client-1', providerId: 'prov-1', locationId: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa', startOn: '2026-06-04T14:00:00.000Z', endOn: '2026-06-04T14:30:00.000Z', status: 'BOOKED', canceledAt: null } },
