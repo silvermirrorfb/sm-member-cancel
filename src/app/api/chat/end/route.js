@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSession, createSession, addMessage, completeSession, saveSession } from '../../../../lib/sessions';
 import { sendMessage, parseSessionSummary, stripSummaryFromResponse } from '../../../../lib/claude';
 import { processConversationEnd } from '../../../../lib/notify';
+import { getClientIP, checkRateLimit, buildRateLimitHeaders } from '../../../../lib/rate-limit';
 
 const MAX_RECOVERY_MESSAGES = 60;
 const MAX_RECOVERY_MESSAGE_CHARS = 4000;
@@ -41,6 +42,18 @@ function sanitizeRecoveredHistory(history) {
 
 export async function POST(request) {
   try {
+    // Rate limit before any session-store work: this route is unauthenticated
+    // and its recovery path writes to the session store for any caller-chosen
+    // sessionId. Fail-open (default) so a Redis blip never blocks a real close.
+    const ip = getClientIP(request);
+    const rateLimit = await checkRateLimit(ip, 'chat-end', 30, 10 * 60 * 1000);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        { error: 'Too many requests. Please wait a moment and try again.' },
+        { status: 429, headers: buildRateLimitHeaders(rateLimit) },
+      );
+    }
+
     const body = await request.json();
     const { sessionId } = body;
 
