@@ -124,6 +124,17 @@ describe('sendBookingEscalationEmail (booking issue routing to hello@)', () => {
     expect(body).toContain('(888) 677-0055');
   });
 
+  it('keeps a caller-chosen session id from running away with the subject line', async () => {
+    vi.resetModules();
+    const { sendBookingEscalationEmail } = await import('../src/lib/notify.js');
+
+    await sendBookingEscalationEmail(details({ session_id: 'x'.repeat(500) }));
+
+    const subject = sendMail.mock.calls[0][0].subject;
+    expect(subject).not.toMatch(/\n|\r/);
+    expect(subject.length).toBeLessThan(140);
+  });
+
   it('contains no em or en dashes', async () => {
     vi.resetModules();
     const { sendBookingEscalationEmail } = await import('../src/lib/notify.js');

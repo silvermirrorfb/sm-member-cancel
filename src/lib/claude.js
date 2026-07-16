@@ -305,7 +305,14 @@ function parseBookingIssue(text) {
 
   try {
     const parsed = JSON.parse(match[1]);
-    const errorText = typeof parsed.error_text === 'string' ? parsed.error_text.trim() : '';
+    // Collapse whitespace before anything else. An error message is one line by
+    // nature, and the escalation email interpolates this text directly above its
+    // Name/Email/Phone block: newlines would let a guest forge those fields and
+    // turn a staff notification into a convincing phishing email sent from our
+    // own authenticated sender.
+    const errorText = typeof parsed.error_text === 'string'
+      ? parsed.error_text.replace(/\s+/g, ' ').trim()
+      : '';
     const step = typeof parsed.step === 'string' ? parsed.step.trim().toLowerCase() : '';
     // Both fields are the whole point of the capture. Without them the email
     // would carry no more information than the detection-time incident record,
@@ -319,7 +326,10 @@ function parseBookingIssue(text) {
       step,
     };
   } catch (err) {
-    console.error('Failed to parse booking_issue JSON:', err);
+    // Deliberately not logging err: V8 embeds a slice of the parsed input in the
+    // message, and that input is guest-typed error text that routinely carries an
+    // email address or a card fragment.
+    console.error('Failed to parse booking_issue JSON:', err?.name || 'SyntaxError');
     return null;
   }
 }

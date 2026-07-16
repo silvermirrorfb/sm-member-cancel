@@ -63,7 +63,12 @@ describe('system prompt: BOOKING SUPPORT flow', () => {
     expect(s).toMatch(/Do NOT promise a timeline, an outcome, or a specific action/i);
     expect(s).toMatch(/HARD RULE - NO FABRICATED ESCALATION/);
     expect(s).not.toMatch(/within 24 hours|within 48 hours|within 24 to 48 hours/i);
-    expect(s).not.toMatch(/QA team|engineering team|ticket number/i);
+    // Fabricated-team names may appear only where the section forbids them.
+    const teamMentions = s
+      .split('\n')
+      .filter(l => /QA team|engineering|ticket number/i.test(l))
+      .filter(l => !/no ticket number|no ticket, no|no "engineering"|no named department|Do not embellish/i.test(l));
+    expect(teamMentions).toEqual([]);
   });
 
   it('defines the booking_issue tag with both required fields and the allowed steps', () => {
@@ -210,6 +215,68 @@ describe('system prompt: custom pause lock', () => {
   });
 });
 
+// Each of these pins a contradiction the codex prompt review found between the new
+// sections and a pre-existing rule. Without the fix the model has to resolve the
+// conflict at runtime, and it resolves several of them the wrong way.
+describe('system prompt: new sections do not contradict the pre-existing hard rules', () => {
+  const bookingSection = () =>
+    section(getSystemPrompt(), 'BOOKING SUPPORT: BOOKING/PAYMENT ISSUE FLOW', 'APPOINTMENT CANCELLATION:');
+
+  it('defers to billing dispute handling when the guest alleges an actual charge', () => {
+    // "the payment screen errored and I was charged twice" must not become a booking capture.
+    const s = bookingSection();
+    expect(s).toMatch(/SCOPE BOUNDARY, check this FIRST/);
+    expect(s).toMatch(/charged twice, duplicate charge, wrong amount, unauthorized charge/i);
+    expect(s).toMatch(/HARD RULE - BILLING DISPUTE HANDLING/);
+    expect(s).toMatch(/the charge is the priority/i);
+  });
+
+  it('does not hand back a channel the guest already tried', () => {
+    const s = bookingSection();
+    expect(s).toMatch(/EXCEPTION, already-attempted channel/i);
+    expect(s).toMatch(/HARD RULE - ALREADY ATTEMPTED CHANNEL/);
+    expect(s).toMatch(/Still emit the Step 5 tag/);
+  });
+
+  it('is named as a real destination in NO FABRICATED ESCALATION, so the routing claim is true', () => {
+    const s = section(
+      getSystemPrompt(),
+      'HARD RULE - NO FABRICATED ESCALATION:',
+      'HARD RULE - NO HUMAN-TEAM SLA PROMISES'
+    );
+    expect(s).toMatch(/guest support inbox for a captured booking or checkout failure/i);
+    expect(s).toMatch(/is therefore a true statement/i);
+    // The carve-out must not become a licence to embellish.
+    expect(s).toMatch(/no ticket, no queue, no named department, no timeline/i);
+  });
+
+  it('the pause-intent handler defers to the standard-lengths rule instead of confirming any duration', () => {
+    const prompt = getSystemPrompt();
+    const line = prompt.split('\n').find(l => l.includes('If the member opens with a PAUSE intent'));
+    expect(line).toBeDefined();
+    // The old wording said "Confirm the pause duration the member wants (1-month, 2-month, etc.)"
+    // and that "etc." defeated the custom-pause lock.
+    expect(line).not.toMatch(/1-month, 2-month, etc\./);
+    expect(line).toMatch(/If they ask for ANY other length, do not confirm it/);
+    expect(line).toMatch(/HARD RULE - STANDARD PAUSE LENGTHS ONLY/);
+  });
+
+  it('no promo copy still tells guests to clear their cache', () => {
+    const prompt = getSystemPrompt();
+    const offenders = prompt
+      .split('\n')
+      .filter(l => /clearing your cache|clear your cache/i.test(l))
+      .filter(l => !/Do NOT|do not recommend|bans/i.test(l));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the gift card and promo route respects the already-attempted channel rule', () => {
+    const s = section(getSystemPrompt(), 'GIFT CARD AND PROMO RULES THE BOT DOES NOT STATE:', '---');
+    expect(s).toMatch(/already tried one of those channels/i);
+    expect(s).toMatch(/HARD RULE - ALREADY ATTEMPTED CHANNEL/);
+  });
+});
+
 describe('system prompt: brand and compliance rules survive the booking changes', () => {
   it('keeps cosmetic-only, facial-bar identity language in the booking section', () => {
     const s = section(getSystemPrompt(), 'BOOKING SUPPORT: BOOKING/PAYMENT ISSUE FLOW', 'APPOINTMENT CANCELLATION:');
@@ -219,15 +286,19 @@ describe('system prompt: brand and compliance rules survive the booking changes'
 
   it('adds no em or en dashes to the new sections', () => {
     const prompt = getSystemPrompt();
-    for (const marker of [
-      'BOOKING SUPPORT: BOOKING/PAYMENT ISSUE FLOW',
-      'HARD RULE - NO INVENTED CREDIT TRANSFER POLICY',
-      'HARD RULE - STANDARD PAUSE LENGTHS ONLY',
-      'GIFT CARD AND PROMO RULES THE BOT DOES NOT STATE:',
-    ]) {
-      const start = prompt.indexOf(marker);
-      expect(start, `missing: ${marker}`).toBeGreaterThan(-1);
-      expect(prompt.slice(start, start + 2600)).not.toMatch(/[–—]/);
+    // Whole sections, not a fixed-size window: a truncated window silently stops
+    // checking partway through. The credit marker must be the rule HEADING, since the
+    // bare rule name also appears earlier as a cross-reference.
+    const sections = [
+      ['BOOKING SUPPORT: BOOKING/PAYMENT ISSUE FLOW', 'APPOINTMENT CANCELLATION:'],
+      [CREDIT_RULE_HEADING, CREDIT_RULE_END],
+      ['HARD RULE - STANDARD PAUSE LENGTHS ONLY', 'HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY'],
+      ['GIFT CARD AND PROMO RULES THE BOT DOES NOT STATE:', '---'],
+    ];
+    for (const [startMarker, endMarker] of sections) {
+      const body = section(prompt, startMarker, endMarker);
+      expect(body.length, `empty section: ${startMarker}`).toBeGreaterThan(200);
+      expect(body, `em dash in: ${startMarker}`).not.toMatch(/[–—]/);
     }
   });
 

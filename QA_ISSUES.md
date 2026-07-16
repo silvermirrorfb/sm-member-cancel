@@ -2,7 +2,9 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 28, 2026 (Phase 1-10 decision-audit branch + P2 code-level follow-up branch. Decision-audit branch `fix/cancel-bot-decision-audit-2026-05-27` shipped cancel-bot #25-29 plus lock-in regressions and the Decision 7 open-conflict surface. Stacked follow-up branch `fix/cancel-bot-code-level-sla-and-perk-enforcement` shipped cancel-bot #30 server-side SLA strings stripped + cancel-bot #31 runtime perk-value injection stripped. Both branches awaiting Matt's ship word; second branch depends on the first merging first.)
+**Last updated:** July 16, 2026 (cancel-bot #32 shipped on branch `fix/prompt-booking-support`: booking support capture flow replacing the canned reply, credit-transfer policy removed, custom-pause lock. Awaiting Matt's review, not merged.)
+
+**Previously:** May 28, 2026 (Phase 1-10 decision-audit branch + P2 code-level follow-up branch. Decision-audit branch `fix/cancel-bot-decision-audit-2026-05-27` shipped cancel-bot #25-29 plus lock-in regressions and the Decision 7 open-conflict surface. Stacked follow-up branch `fix/cancel-bot-code-level-sla-and-perk-enforcement` shipped cancel-bot #30 server-side SLA strings stripped + cancel-bot #31 runtime perk-value injection stripped. Both branches awaiting Matt's ship word; second branch depends on the first merging first.)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -832,6 +834,24 @@ The decision-audit branch (commit 5980dbc) stripped `($XX value)` annotations fr
 No downstream parser of these strings exists - they are display-only, formatted into the prompt for the LLM to read. Verified via grep: the only references to "Next Perk Milestone" / "Loyalty Redeemable" in `src/` are the formatter itself and the system-prompt.txt HARD RULE #22 reference.
 
 12 regression tests in `__tests__/boulevard-format-profile-prompt-no-perk-values.test.js` cover: no "= $XX value" annotation in the Loyalty Redeemable line, no "($XX value)" annotation in the Next Perk Milestone line (iterated across 6 sample perks), Enhancement Credit identity preservation, mid-year Enhancement Credit em-dash-to-comma conversion, Months Until Next Perk arithmetic, missing-field handling, em-dash defense across all perk names, and an end-to-end scan that no banned `$XX value` pattern appears anywhere in the rendered profile.
+
+---
+
+### cancel-bot #32
+
+**System:** cancel-bot
+**Severity:** trust-erosion (booking support), compliance-risk (invented policy)
+**Status:** FIXED IN CODE 2026-07-16 by PR `fix/prompt-booking-support`, awaiting Matt's review. Bump to VERIFIED FIXED after merge + production deploy.
+
+Three things, all in the guest-facing prompt, from the approved QA knowledge base and the 129-session log review.
+
+**1. Booking support was a canned reply the prompt could not reach.** A guest reporting a checkout or payment failure was intercepted by `isBookingPaymentIncident` in `src/app/api/chat/message/route.js` and handed a fixed string; the model was never called, so no prompt rule applied. That canned reply also claimed the issue "has been flagged for follow-up" while the only email it fired went to `qatesting@silvermirror.com` carrying no error text (and a hardcoded `SLA Shared With Guest: 48 hours` line, an SLA already removed from guest copy as a false promise). The canned reply is retired. Booking issues now run a BOOKING SUPPORT flow in the prompt: a two-question capture (exact error message; did it fail while selecting an appointment or during payment), at most ONE page-level fix (refresh, different browser or device), then escalation giving the guest (888) 677-0055 and routing the captured details to `hello@silvermirror.com`. Repeated device troubleshooting is banned outright: checkout failures are Silver Mirror's bugs, and making the guest debug them reads as blaming the guest. Routing uses a new `<booking_issue>` tag (same interception mechanism as `<member_lookup>`) and a new `EMAIL_BOOKING_ESCALATION` var defaulting to hello@. `EMAIL_QA_ALERT` still receives the detection-time incident, so nothing that fires today stops firing. Gift cards, promo codes, stacking and redemption now get a generic check-the-terms answer only (those rules live in Boulevard and at checkout; the bot cannot verify them). International bookings are allowed, with a note to confirm the time reads in the location's local time zone.
+
+**2. The prompt stated a credit-transfer policy it could not verify.** "Credits can be transferred to someone else once per year" appeared twice (the MEMBERSHIP CREDITS block and the shareable-policy list inside HARD RULE - CREDIT VISIBILITY DISCLAIMER). Removed. Transfer questions now route to the memberships team under a new HARD RULE - NO INVENTED CREDIT TRANSFER POLICY, the same discipline already applied to gift cards.
+
+**3. The bot could agree to a custom pause length it has no authority to approve.** The tree offers 1-month and 2-month pauses, but nothing stopped the bot confirming a 3-month or 6-month hold, and HARD RULE - PAUSE VS CANCEL INTENT BOUNDARY actively invited it ("Confirm the pause duration the member wants (1-month, 2-month, etc.)"). New HARD RULE - STANDARD PAUSE LENGTHS ONLY: standard options only, any other length is flagged to the team and never confirmed. The "etc." wording was corrected to defer to it.
+
+**Review gauntlet findings fixed in this PR, worth knowing about:** the escalation email was an unauthenticated path putting guest-authored text into a staff inbox, bounded only by the 30-per-10-minute message limit that fails open, so a dedicated fail-closed `booking-escalation` limiter (2/hour/IP) was added; `error_text` newlines could forge the email's Name/Email/Phone block into a convincing phishing message sent from our own authenticated sender, so whitespace is collapsed at parse time; a failed send used to mark itself escalated forever (the Issue 6 silent-no-op class), so it now fires an ops alert and retries up to 3 attempts; and a failed detection-time incident log is now retried rather than swallowed by `allSettled`.
 
 ---
 

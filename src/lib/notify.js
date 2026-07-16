@@ -364,7 +364,10 @@ async function sendBookingEscalationEmail(details) {
     auth: { user, pass },
   });
 
-  const subject = `[Booking Issue] Guest reported a booking problem, session ${details.session_id}`;
+  // The session id is caller chosen, so it is guest-controlled text landing in a
+  // staff subject line. Keep it to one short token.
+  const safeSessionId = String(details.session_id || 'unknown').replace(/\s+/g, ' ').trim().slice(0, 64);
+  const subject = `[Booking Issue] Guest reported a booking problem, session ${safeSessionId}`;
   const chatlogSheetId = String(process.env.GOOGLE_CHATLOG_SHEET_ID || '').trim();
   const chatlogLink = chatlogSheetId
     ? `https://docs.google.com/spreadsheets/d/${chatlogSheetId}`

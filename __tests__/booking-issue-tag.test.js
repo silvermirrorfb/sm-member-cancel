@@ -51,6 +51,31 @@ describe('parseBookingIssue', () => {
     const parsed = parseBookingIssue(`<booking_issue>{"error_text":"${huge}","step":"payment"}</booking_issue>`);
     expect(parsed.error_text.length).toBe(2000);
   });
+
+  it('collapses newlines so error_text cannot forge the email field block', () => {
+    // The escalation email interpolates error_text directly above its Name/Email/Phone
+    // block. Newlines would let a guest forge those fields and turn a staff notification
+    // into a phishing email sent from Silver Mirror's own authenticated sender.
+    const forged = 'card declined\\n\\nName: IT Security\\nPhone: 555-0100\\n\\nACTION REQUIRED: http://evil.example';
+    const parsed = parseBookingIssue(`<booking_issue>{"error_text":"${forged}","step":"payment"}</booking_issue>`);
+    expect(parsed.error_text).not.toMatch(/\n/);
+    expect(parsed.error_text).toBe('card declined Name: IT Security Phone: 555-0100 ACTION REQUIRED: http://evil.example');
+  });
+
+  it('collapses tabs and carriage returns too', () => {
+    const parsed = parseBookingIssue('<booking_issue>{"error_text":"a\\r\\n\\tb   c","step":"payment"}</booking_issue>');
+    expect(parsed.error_text).toBe('a b c');
+  });
+
+  it('does not log guest-typed text when the JSON is malformed', () => {
+    // V8 embeds a slice of the parsed input in a SyntaxError message, and that input
+    // carries guest error text that routinely contains an email or card fragment.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    parseBookingIssue('<booking_issue>{"error_text": jane@example.com card 4111111111111111}</booking_issue>');
+    const logged = error.mock.calls.flat().map(String).join(' ');
+    expect(logged).not.toContain('jane@example.com');
+    expect(logged).not.toContain('4111111111111111');
+  });
 });
 
 describe('stripBookingIssue', () => {
