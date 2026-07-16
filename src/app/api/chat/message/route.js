@@ -6,6 +6,7 @@ import {
     buildSystemPromptWithProfile,
     sendMessage,
     parseMemberLookup,
+    parseBookingIssue,
     parseSessionSummary,
     stripAllSystemTags,
 } from '../../../../lib/claude';
@@ -16,7 +17,7 @@ import {
     evaluateUpgradeOpportunityForProfile,
     reverifyAndApplyUpgradeForProfile,
 } from '../../../../lib/boulevard';
-import { logChatMessages, logSupportIncident } from '../../../../lib/notify';
+import { logChatMessages, logSupportIncident, sendBookingEscalationEmail } from '../../../../lib/notify';
 import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, resolveClientRateLimitKey } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
@@ -133,22 +134,6 @@ function extractLocation(text) {
     const input = String(text || '').toLowerCase();
     const hit = LOCATION_CANDIDATES.find(loc => input.includes(loc.toLowerCase()));
     return hit || null;
-}
-
-export function buildSupportIncidentResponse() {
-    // Wording matches HARD RULE - NO HUMAN-TEAM SLA PROMISES and HARD RULE - NO FABRICATED
-    // ESCALATION in src/lib/system-prompt.txt. No fabricated team ("QA team" does not exist
-    // and has no defined SLA), no specific timeline ("48 hours" is not a real SLA), no
-    // outcome guarantee. Uses the canonical "Someone will follow up about next steps"
-    // pattern plus the BOOKING/PAYMENT ISSUE FLOW guidance: flag for follow-up, give the
-    // urgent phone path, ask for troubleshooting details. See also: codex-review-2026-05-27
-    // P2 follow-up findings.
-    return [
-      "Thanks for flagging this. I'm flagging this for follow-up.",
-      `The fastest way to get help is to call ${SUPPORT_PHONE}.`,
-      `For non-urgent follow-up, email ${HELLO_EMAIL}. Someone will follow up with you about next steps.`,
-      'If you can, please share your location, device/browser, and a screenshot to help troubleshoot.',
-    ].join(' ');
 }
 
 function isInactiveAccountStatus(status) {
@@ -837,7 +822,11 @@ export async function POST(request) {
             });
       }
 
-      // Booking/payment incident fast-path: auto-alert QA + write to support sheet
+      // Booking/payment incident detection: alert QA + write to support sheet, then let
+      // the model run the BOOKING SUPPORT flow in system-prompt.txt (two-question capture,
+      // one page-level fix, then escalate). This logging is the safety net that guarantees
+      // an incident record even if the guest abandons the chat before the capture finishes;
+      // the richer hello@ escalation fires later, off the <booking_issue> tag.
       if (!session.memberProfile && session.mode !== 'membership' && isBookingPaymentIncident(sanitizedMessage)) {
             const incident = {
                   date: new Date().toISOString(),
@@ -851,26 +840,24 @@ export async function POST(request) {
                   user_message: sanitizedMessage,
             };
 
-            let supportNotifications = null;
-            try {
-                  supportNotifications = await logSupportIncident(incident);
-            } catch (err) {
-                  console.error('Support incident logging failed:', err);
+            if (!session.bookingIssueContext) {
+                  try {
+                        await logSupportIncident(incident);
+                  } catch (err) {
+                        console.error('Support incident logging failed:', err);
+                  }
+                  // Carry the contact details extracted from the first report so the
+                  // escalation email can include them once the capture completes.
+                  session.bookingIssueContext = {
+                        session_created: sessionCreated,
+                        name: incident.name,
+                        email: incident.email,
+                        phone: incident.phone,
+                        location: incident.location,
+                        user_message: incident.user_message,
+                  };
+                  await saveSession(session);
             }
-
-            const supportResponse = buildSupportIncidentResponse();
-            await addMessage(sessionId, 'assistant', supportResponse);
-            pendingTranscriptEntries.push({ role: 'assistant', content: supportResponse });
-            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'support incident response');
-
-            return NextResponse.json({
-                  message: supportResponse,
-                  sessionId,
-                  supportIncident: true,
-                  supportNotifications,
-            }, {
-                  headers: buildRateLimitHeaders(rateLimit),
-            });
       }
 
       // Expire stale pending upgrade offers
@@ -1186,6 +1173,34 @@ export async function POST(request) {
                 }, {
                             headers: buildRateLimitHeaders(rateLimit),
                 });
+            }
+      }
+
+      // Booking-issue escalation: the model emits <booking_issue> once it has the guest's
+      // exact error text and the step it failed on. Only honored for a session that
+      // actually reported a booking problem, so a stray or injected tag cannot fire mail.
+      if (session.bookingIssueContext && !session.bookingIssueEscalatedAt) {
+            const bookingIssue = parseBookingIssue(response);
+            if (bookingIssue) {
+                  try {
+                        await sendBookingEscalationEmail({
+                              date: new Date().toISOString(),
+                              session_id: sessionId,
+                              session_created: session.bookingIssueContext.session_created,
+                              error_text: bookingIssue.error_text,
+                              step: bookingIssue.step,
+                              name: session.bookingIssueContext.name,
+                              email: session.bookingIssueContext.email,
+                              phone: session.bookingIssueContext.phone,
+                              location: session.bookingIssueContext.location,
+                        });
+                  } catch (err) {
+                        console.error('Booking escalation email failed:', err);
+                  }
+                  // Mark regardless of send result: one escalation per session, so a
+                  // retrying model cannot mail the team on every subsequent turn.
+                  session.bookingIssueEscalatedAt = new Date().toISOString();
+                  await saveSession(session);
             }
       }
 

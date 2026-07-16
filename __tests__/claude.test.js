@@ -1293,11 +1293,19 @@ describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
   });
 
   it('booking/payment issue flow no longer targets a 48-hour response', () => {
+    // The single "flagged for follow-up" line this used to pin was replaced by the
+    // BOOKING SUPPORT flow (capture, one page fix, then escalate). Same intent, asserted
+    // against the whole section: no timeline promise reaches the guest.
     const prompt = getSystemPrompt();
-    const lineMatch = prompt.match(/- Tell the guest the issue has been flagged for follow-up[^\n]*/);
-    expect(lineMatch).not.toBeNull();
-    expect(lineMatch[0].toLowerCase()).not.toContain('within 48 hours');
-    expect(lineMatch[0].toLowerCase()).not.toContain('targeted within');
+    const startIdx = prompt.indexOf('BOOKING SUPPORT: BOOKING/PAYMENT ISSUE FLOW');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('APPOINTMENT CANCELLATION:', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx).toLowerCase();
+    expect(section).not.toContain('within 48 hours');
+    expect(section).not.toContain('targeted within');
+    expect(section).not.toContain('24-48');
+    expect(section).toContain('someone will follow up with you about next steps');
   });
 
   it('HARD RULE - INFINITE LOOP ESCAPE uses the PR #18 standard handoff phrase, no 24-hour promise', () => {
