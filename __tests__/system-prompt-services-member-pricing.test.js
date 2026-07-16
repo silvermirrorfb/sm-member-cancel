@@ -74,15 +74,51 @@ describe('system prompt: services menu shows member pricing alongside walk-in', 
     }
   });
 
+  it('the first-time recommendation shows both price points', () => {
+    // "It's my first time, which facial should I book?" is the prospect question the
+    // whole rule exists for, and this line used to answer it with walk-in only.
+    const prompt = getSystemPrompt();
+    const line = prompt.split('\n').find(l => l.startsWith('- First-time'));
+    expect(line).toBeDefined();
+    expect(line).toContain(`$${WALKIN_PRICES['30']}`);
+    expect(line).toContain(`$${CURRENT_RATES['30']}`);
+    expect(line).toContain(`$${WALKIN_PRICES['50']}`);
+    expect(line).toContain(`$${CURRENT_RATES['50']}`);
+  });
+
+  it('no worked example the bot should copy quotes a facial price without the member price', () => {
+    // A GOOD example that quotes walk-in alone teaches the bot to do the same.
+    // Example BAD blocks are exempt: two of them record real production failures
+    // (the Accutane and multi-condition probes) verbatim, and claude.test.js pins
+    // that exact wording. The price is incidental to why those are BAD.
+    const prompt = getSystemPrompt();
+    const walkin50 = `$${WALKIN_PRICES['50']}`;
+    const member50 = `$${CURRENT_RATES['50']}`;
+    const lines = prompt.split('\n');
+    const underBadExample = (idx) => {
+      for (let i = idx; i >= Math.max(0, idx - 4); i--) {
+        if (/Example BAD|Example GOOD/i.test(lines[i])) return /Example BAD/i.test(lines[i]);
+      }
+      return false;
+    };
+    const offenders = lines.filter((l, idx) =>
+      l.includes('Facial') && l.includes(walkin50) && !l.includes(member50) && !underBadExample(idx)
+    );
+    expect(offenders).toEqual([]);
+  });
+
   it('the style-rule pricing example models both price points, not walk-in alone', () => {
     // The bot copies this example when it lists services, so a single-price example
-    // teaches it to quote walk-in only.
+    // teaches it to quote walk-in only. Assert the actual prices: a bare /member/i
+    // match passed even on the old single-price example, because the same line
+    // mentions "member" elsewhere.
     const prompt = getSystemPrompt();
     const styleStart = prompt.indexOf('STYLE RULES');
     const styleEnd = prompt.indexOf('MODE', styleStart);
     const style = prompt.slice(styleStart, styleEnd);
     const exampleLine = style.split('\n').find(l => l.includes('Signature Facial'));
     expect(exampleLine).toBeDefined();
-    expect(exampleLine).toMatch(/member/i);
+    expect(exampleLine).toContain(`$${WALKIN_PRICES['30']} walk-in`);
+    expect(exampleLine).toContain(`$${CURRENT_RATES['30']} membership`);
   });
 });

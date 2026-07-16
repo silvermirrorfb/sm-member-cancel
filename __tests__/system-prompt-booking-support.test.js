@@ -188,8 +188,8 @@ describe('system prompt: custom pause lock', () => {
 
   it('flags the custom request to the team with no approval promise', () => {
     const s = pauseSection();
-    expect(s).toMatch(/isn't something I can set up from here/i);
-    expect(s).toMatch(/passing your request to our memberships team/i);
+    expect(s).toMatch(/isn't something I can request from here/i);
+    expect(s).toMatch(/passing it to our memberships team/i);
     expect(s).toMatch(/Do not promise the team will approve it/i);
   });
 
