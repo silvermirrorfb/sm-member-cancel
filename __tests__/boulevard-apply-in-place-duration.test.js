@@ -26,9 +26,10 @@ const json = (payload) => ({ ok: true, json: async () => payload });
 const LOC = 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa';
 
 // Source appointment appt-1: 14:00-14:30 (30 min) with staff prov-1, service svc-30.
-// Target upgrade: 50 min => extended occupied BLOCK [14:00, 15:00], anchored at the appointment
-// start. A 50-min service occupies a 60-min block (50 + PREP_BUFFER_50MIN=10), so the upgraded
-// footprint runs start..start+60, NOT the 50-min service end (14:50) and NOT an endOn-derived span.
+// Target upgrade: 50 min. The scanned window end is the MAX of the tier floor
+// (start + 50 + PREP_BUFFER_50MIN = 15:00) and the buffer-carried end (endOn + the 20-min
+// service delta; the in-place edit keeps the source service's own cleanup buffer, live-proven
+// 2026-07-16). With this default service-end endOn (14:30) the floor 15:00 governs.
 const SOURCE_NODE = { id: 'appt-1', clientId: 'client-1', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:00:00.000Z', endOn: '2026-06-04T14:30:00.000Z', status: 'BOOKED', canceledAt: null };
 // A later same-staff appointment that does NOT overlap the extended window.
 const LATER_NODE = { id: 'appt-next', clientId: 'other', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T16:00:00.000Z', endOn: '2026-06-04T16:30:00.000Z', status: 'BOOKED', canceledAt: null };
@@ -71,6 +72,7 @@ function buildFetch({
   locationExtraNodesSecondCall = null, // nodes for the 2nd location scan (cross-gate rescan)
   omitSourceFromLocationScan = false, // drop the source appt from the collision scan
   sourceEndOn = '2026-06-04T14:30:00.000Z', // booked block end (raw); may be shorter than bucketed duration
+  contextEndOn = undefined, // when set, ONLY the apply-path context fetch returns this endAt (eligibility scan keeps sourceEndOn)
   collisionScanFails = false,
   extraContexts = {}, // id -> appointmentServices array (service-level staff), or 'FAIL' to simulate a failed context fetch
   timeblockNodes = [], // staff timeblocks (breaks/time-off) the location-scoped block scan returns (page 1)
@@ -112,7 +114,7 @@ function buildFetch({
       }
       return json({ data: { appointment: {
         id: 'appt-1', clientId: 'client-1', locationId: LOC,
-        startAt: '2026-06-04T14:00:00.000Z', endAt: sourceEndOn, notes: 'note',
+        startAt: '2026-06-04T14:00:00.000Z', endAt: contextEndOn !== undefined ? contextEndOn : sourceEndOn, notes: 'note',
         appointmentServices: [{ id: 'aps-1', serviceId: 'svc-30', staffId: 'prov-1' }],
       } } });
     }
@@ -524,7 +526,8 @@ describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real c
 
   it('does NOT block a timeblock that abuts the window end but does not overlap it', async () => {
     process.env = env();
-    // Window ends 15:00 (the 60-min block end); a block starting exactly 15:00 does not overlap [14:00, 15:00).
+    // Window ends 15:00 (the tier floor; service-end endOn 14:30 carries to 14:50, so the floor
+    // governs); a block starting exactly 15:00 does not overlap [14:00, 15:00).
     global.fetch = buildFetch({
       timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T15:00:00.000Z', endAt: '2026-06-04T15:30:00.000Z', reason: 'Break', cancelled: false }],
     });
@@ -549,6 +552,64 @@ describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real c
       timeblockNodes: [],
       locationExtraNodes: [{ id: 'appt-collide', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T14:30:00.000Z', endOn: '2026-06-04T15:00:00.000Z', status: 'BOOKED', canceledAt: null }],
     });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  // Live-proven 2026-07-16: the in-place upgrade keeps the SAME service and Boulevard keeps that
+  // service's own cleanup buffer, so a 30->50 on a 45-min block (endOn = start+45, buffer 15)
+  // produces a 65-min block (start+65), NOT the 60-min tier model. The collision window must
+  // cover the FULL resulting block: endOn + the 20-min service delta (= start+65 here), not
+  // start+60. These pin the previously unscanned [start+60, start+65) tail.
+  it('BLOCKS a staff timeblock inside the buffer-carried tail at start+62 (the live-proven 65-min block, previously a blind spot)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      sourceEndOn: '2026-06-04T14:45:00.000Z', // block-end endOn (start+45), as live Boulevard stores it
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T15:02:00.000Z', endAt: '2026-06-04T15:30:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('BLOCKS a cross-client appointment inside the buffer-carried tail at start+62 (previously a blind spot)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      sourceEndOn: '2026-06-04T14:45:00.000Z',
+      locationExtraNodes: [{ id: 'appt-tail', clientId: 'client-2', providerId: 'prov-1', locationId: LOC, startOn: '2026-06-04T15:02:00.000Z', endOn: '2026-06-04T15:32:00.000Z', status: 'BOOKED', canceledAt: null }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('does NOT block a timeblock that abuts the buffer-carried end (starts exactly at start+65)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({
+      sourceEndOn: '2026-06-04T14:45:00.000Z',
+      timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T15:05:00.000Z', endAt: '2026-06-04T15:30:00.000Z', reason: 'Break', cancelled: false }],
+    });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(calls).toContain('bookingComplete');
+  });
+
+  // The window-end derivation fails closed (null windowEndOn -> the guard refuses) when the
+  // context endOn is missing or unparseable: the full resulting block cannot be proven
+  // scanned, so the self-overlap warning must stay blocking. Pins the codex [P2] from the
+  // 2026-07-16 gauntlet (a refactor falling back to the tier floor would reopen the tail).
+  it('FAILS CLOSED when the apply-path context endOn is unparseable (window end underivable)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ contextEndOn: 'not-a-date' });
+    const result = await runReverify();
+    expect(result.success).toBe(false);
+    expect(calls).not.toContain('bookingComplete');
+  });
+
+  it('FAILS CLOSED when the apply-path context endOn is missing (window end underivable)', async () => {
+    process.env = env();
+    global.fetch = buildFetch({ contextEndOn: '' });
     const result = await runReverify();
     expect(result.success).toBe(false);
     expect(calls).not.toContain('bookingComplete');
@@ -709,12 +770,13 @@ describe('P1-A staff-scoped timeblock query', () => {
   });
 });
 
-// Block-math window (2026-06-29): the extended occupancy window must be the upgraded 60-min
-// BLOCK [start, start + (50 + PREP_BUFFER_50MIN)] = [14:00, 15:00], anchored at the appointment
-// start, NOT the 50-min service end (14:50) and NOT an endOn-derived span. A non-cancelled staff
-// block inside [14:00, 15:00) is a real collision; one at or after 15:00 is not. This pairs with
-// the eligibility block-delta (15 min): both sides measure the same 60-min upgraded footprint.
-describe('block-math collision window: exactly the 60-min upgraded block', () => {
+// Block-math window (2026-06-29, re-derived 2026-07-16): the scanned window is the MAX of the
+// tier floor [start, start + (50 + PREP_BUFFER_50MIN)] = [14:00, 15:00] and the buffer-carried
+// end endOn + the 20-min service delta. With this suite's SERVICE-END fixture (endOn = 14:30)
+// the carried end is 14:50, so the floor 15:00 governs: a non-cancelled staff block inside
+// [14:00, 15:00) is a real collision; one at or after 15:00 is not. (The block-end-endOn case,
+// where the carried end 15:05 governs, is pinned in the P1-A suite above.)
+describe('block-math collision window: the tier-floor bound with a service-end endOn', () => {
   beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
@@ -732,8 +794,9 @@ describe('block-math collision window: exactly the 60-min upgraded block', () =>
 
   it('PROCEEDS on a staff block at start+62 (15:02), past the 60-min block end: no over-coverage', async () => {
     process.env = env();
-    // 15:02 is OUTSIDE [14:00, 15:00); the upgraded appointment never reaches it, so a window that
-    // extended past 15:00 would false-abort here. Guards the upper bound of the block window.
+    // With the service-end endOn (14:30) the carried end is 14:50 and the floor 15:00 governs;
+    // 15:02 is beyond both, so a window inflating past the floor would false-abort here.
+    // Guards the upper bound of the block window for this fixture shape.
     global.fetch = buildFetch({
       timeblockNodes: [{ staffId: 'prov-1', startAt: '2026-06-04T15:02:00.000Z', endAt: '2026-06-04T15:32:00.000Z', reason: 'Break', cancelled: false }],
     });

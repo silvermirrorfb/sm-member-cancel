@@ -2424,17 +2424,22 @@ function evaluateUpgradeEligibilityFromAppointments(appointments, profile, optio
     return { eligible: false, reason: 'already_at_or_above_target_duration' };
   }
 
-  // 30->50 requires the BLOCK extension, not the raw service delta. Each booking occupies a
-  // schedule block of (service minutes + its prep buffer): a 30-min facial -> 45-min block
-  // (30 + PREP_BUFFER_30MIN), a 50-min facial -> 60-min block (50 + PREP_BUFFER_50MIN). The
-  // upgrade therefore grows the footprint by (50+10) - (30+15) = 15, NOT the 20-min service
-  // delta. currentDurationMinutes is the bucketed/clamped service tier above (30, never the
-  // raw padded block), so prepBufferMinutesForDuration keys off the tier. This keeps the
-  // requirement in the same block-based unit as availableGapMinutes, which is measured from
-  // the block-end endOn. Derived from the PREP_BUFFER_* constants, never hardcoded.
-  const currentBlockMinutes = currentDurationMinutes + prepBufferMinutesForDuration(currentDurationMinutes);
-  const targetBlockMinutes = targetDurationMinutes + prepBufferMinutesForDuration(targetDurationMinutes);
-  const requiredExtraMinutes = Math.max(0, targetBlockMinutes - currentBlockMinutes);
+  // 30->50 requires the FULL resulting-block growth. The in-place upgrade keeps the SAME
+  // service, and Boulevard keeps that service's own cleanup buffer on the line (live-proven
+  // 2026-07-16 on a real Flatiron booking: a 30-min service with a 45-min block, buffer 15,
+  // upgraded via setDurations(50) -> a 65-min block, buffer still 15). With the buffer
+  // invariant under the in-place edit, the block grows by exactly the SERVICE delta:
+  // 50 - 30 = 20 minutes. currentDurationMinutes is the bucketed tier, so for a line whose
+  // ACTUAL service duration is under 30 (bucketed up to 30) this under-requires by the
+  // difference; no worse than the prior model in any such case, and the ladder shape
+  // (a true 30-min facial) is exact. The prior tier-buffer model ((50 + PREP_BUFFER_50MIN) -
+  // (30 + PREP_BUFFER_30MIN) = 15) assumed the upgraded line adopts the 50-min tier's
+  // 10-min buffer; it does not, and the 5-min under-count let a shift-end-bounded upgrade
+  // overrun the provider's shift (live: the appointment ran to 9:05 PM against a 9:00 PM
+  // shift end). currentDurationMinutes is the bucketed/clamped service tier above (30,
+  // never the raw padded block), so the delta stays in the same block-based unit as
+  // availableGapMinutes, which is measured from the block-end endOn.
+  const requiredExtraMinutes = Math.max(0, targetDurationMinutes - currentDurationMinutes);
   const prepBufferMinutes = 0;
   const pricing = computeUpgradePricing(currentDurationMinutes, targetDurationMinutes, isMember);
   if (!pricing) return { eligible: false, reason: 'pricing_unavailable' };
@@ -3817,17 +3822,33 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     if (collisionProven) {
       staffWindowClear = false;
     } else {
-      // The upgraded appointment occupies the target BLOCK: [start, start + (targetDuration +
-      // prepBuffer(target))]. For a 30->50 that is [start, start + 60] (50 + PREP_BUFFER_50MIN=10).
-      // Anchor the window at the appointment start and span exactly the upgraded block: it is
-      // independent of endOn (a booked block shorter OR longer than its bucketed duration can no
-      // longer shrink or inflate the window) and matches the eligibility block-delta. The old
-      // endOn + service-delta span over-covered (false-aborting a block just past the upgraded
-      // block), while start + targetDuration alone stopped at the 50-min service end, short of the
-      // 60-min block; the true boundary is exactly start + the target block.
-      const targetBlockMinutes = targetDuration + prepBufferMinutesForDuration(targetDuration);
+      // The upgraded appointment occupies the FULL resulting block. The in-place edit keeps
+      // the SAME service, and Boulevard keeps that service's own cleanup buffer on the line
+      // (live-proven 2026-07-16: a 30-min line with a 45-min block, upgraded via
+      // setDurations(50), produced a 65-min block, buffer still 15). endOn embeds that real
+      // buffer (endOn = start + service + buffer), so the resulting block end is
+      // endOn + (targetDuration - currentDuration), the service delta. Exact for the
+      // ladder shape (a true 30-min line with a block-end endOn); for a line whose actual
+      // service duration is under the bucketed 30, or whose endOn omits the buffer, this
+      // still under-covers by the difference, never worse than the prior model. The prior
+      // start-anchored tier span [start, start + target + prepBuffer(target)] = start+60
+      // under-covered the real 65-min block by 5 minutes, leaving a tail where a booking
+      // or staff block was never scanned. Keep that tier span as a FLOOR (the window is
+      // never narrower than the previously gauntleted one) and take the MAX of both ends.
+      // Fail closed (null windowEndOn -> the guard refuses) when the start, the end, or the
+      // current duration cannot be derived: the full block cannot be proven scanned.
       const startMs = Date.parse(appointmentContext?.startOn);
-      const windowEndMs = Number.isFinite(startMs) ? startMs + targetBlockMinutes * 60000 : NaN;
+      const endMs = Date.parse(appointmentContext?.endOn);
+      const currentDuration = Math.round(Number(options?.currentDurationMinutes));
+      const floorEndMs = Number.isFinite(startMs)
+        ? startMs + (targetDuration + prepBufferMinutesForDuration(targetDuration)) * 60000
+        : NaN;
+      const carriedEndMs = Number.isFinite(endMs) && Number.isFinite(currentDuration) && currentDuration > 0
+        ? endMs + Math.max(0, targetDuration - currentDuration) * 60000
+        : NaN;
+      const windowEndMs = Number.isFinite(floorEndMs) && Number.isFinite(carriedEndMs)
+        ? Math.max(floorEndMs, carriedEndMs)
+        : NaN;
       staffWindowClear = await isStaffWindowClearOfOtherAppointments(apiUrl, headers, {
         appointmentId,
         providerId,

@@ -20,7 +20,7 @@ import {
 //   - On the SHIPPED code at the time of the outage (main @ 3aaa79d) there is no
 //     close/shift recovery, so this returns reason 'gap_unprovable', eligible false
 //     -> this test FAILS. That is the failing-first proof it reproduces the outage.
-//   - With the fix, the gap is bounded by close+shift (30 min to 9 PM, needs 15),
+//   - With the fix, the gap is bounded by close+shift (30 min to 9 PM, needs 20),
 //     so it returns 'eligible' -> this test PASSES.
 //
 // It imports ONLY the stable public API (evaluateUpgradeOpportunityForProfile) so it
@@ -99,7 +99,7 @@ describe('REGRESSION: 2026-06-19 zero-send outage (last-of-day 30->50 died as ga
     // -> the exact condition that dropped sends to zero for four days.
     expect(result.reason).toBe('eligible');
     expect(result.eligible).toBe(true);
-    expect(result.requiredExtraMinutes).toBe(15); // 30 -> 50
+    expect(result.requiredExtraMinutes).toBe(20); // 30 -> 50 (service delta; buffer carries over)
     expect(result.availableGapMinutes).toBe(30);   // 8:30 PM end -> 9:00 PM close/shift
   });
 });

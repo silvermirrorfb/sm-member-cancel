@@ -10,8 +10,9 @@ import {
 // appointment, location close, provider shift end). The provider's last booking
 // of the day must not be skipped as gap_unprovable when the salon is open long
 // enough after it for the added minutes to fit. Real case: Samantha Lozada's
-// last UWS booking ends 8:30 PM, UWS closes 9:00 PM, a 30->50 needs 15 min, so
-// it fits and must be ELIGIBLE.
+// last UWS booking ends 8:30 PM, UWS closes 9:00 PM, a 30->50 needs 20 min (the
+// block grows by the service delta; the buffer carries over), so it fits and must
+// be ELIGIBLE.
 
 // Real UWS shape: index 0 = Sunday. Mon-Fri 08:00-21:00, Sat 09:00-19:00, Sun 10:00-18:00.
 const HOURS_UWS = [
@@ -228,7 +229,7 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     expect(result.eligible).toBe(true);
     expect(result.reason).toBe('eligible');
     expect(result.availableGapMinutes).toBe(30);
-    expect(result.requiredExtraMinutes).toBe(15);
+    expect(result.requiredExtraMinutes).toBe(20);
   });
 
   it('PREFIXED urn staffId in the shifts response still binds (open day, both bounds) -> eligible', async () => {
@@ -273,7 +274,21 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
     expect(result.eligible).toBe(false);
     expect(result.reason).toBe('insufficient_gap');
-    expect(result.availableGapMinutes).toBe(10); // only 10 minutes to 9:00 PM close, needs 15
+    expect(result.availableGapMinutes).toBe(10); // only 10 minutes to 9:00 PM close, needs 20
+  });
+
+  it('does NOT fit a shift-end-bounded 15-minute gap: the 30->50 block grows 20 min (live-proven 2026-07-16 overrun case)', async () => {
+    // Mirrors the live probe exactly: booking ends 8:30 PM, provider shift ends 8:45 PM
+    // -> 15 free minutes, shift-end bounded. The in-place upgrade keeps the service's own
+    // 15-min buffer, so the block grows 20 min (45 -> 65) and 15 free minutes OVERRUNS the
+    // shift by 5 (live: appointment ran 8:00-9:05 vs a 9:00 shift end). Must refuse.
+    global.fetch = makeFetchMock({ appts: [SAMANTHA_APPT], location: UWS_LOCATION, shifts: [{ staffId: 'prov-1', clockOut: '20:45:00', available: true }] });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('insufficient_gap');
+    expect(result.availableGapMinutes).toBe(15);
+    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.gapBoundedBy).toBe('shift_end');
   });
 
   it('FAIL-SAFE: when the hours and shift fetches return nothing, stays gap_unprovable (never falsely eligible)', async () => {
