@@ -69,6 +69,14 @@ function buildBookingFetch(opts = {}) {
       // P1-A: the in-place duration apply now also scans staff timeblocks; no blocks here -> window clear.
       return json({ data: { timeblocks: { edges: [], pageInfo: { hasNextPage: false, endCursor: null } } } });
     }
+    if (query.includes('FetchLocationHours')) {
+      // Roomy hours so the shift-end bound (consulted on every eligibility path
+      // since the bypass fix) resolves; the commitment gap stays governing.
+      return json({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } });
+    }
+    if (query.includes('FetchStaffShifts')) {
+      return json({ data: { shifts: { shifts: [{ staffId: 'prov-1', clockOut: '23:00:00', available: true }] } } });
+    }
     if (query.includes('ScanAppointments')) {
       return json({ data: { appointments: { edges: [
         { node: { id: 'appt-1', clientId: 'client-1', providerId: 'prov-1', locationId: 'urn:blvd:Location:79afa932-b486-4fe9-8502-d805a9e48caa', startOn: '2026-06-04T14:00:00.000Z', endOn: '2026-06-04T14:30:00.000Z', status: 'BOOKED', canceledAt: null } },

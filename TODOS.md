@@ -2,16 +2,6 @@
 
 Deferred work captured during reviews. Each item has enough context to pick up cold.
 
-## Close/shift bound is bypassed when a later same-provider commitment exists
-
-**What:** The close+shift gap bounding in `evaluateUpgradeOpportunityForProfile` (src/lib/boulevard.js ~2826) runs ONLY when the reason is `gap_unprovable` (no next same-provider commitment in the scan window). When a next commitment exists, the gap is measured against it alone, and the provider shift end and location close are never consulted.
-
-**Why:** A provider whose next appointment is AFTER their shift end (for example the next morning, inside the ~30h scan window) yields a huge measured gap, so a last-of-day 30->50 upgrade is offered and committed even though it overruns the shift end or location close. Same soft-overrun class the 2026-07-16 live probe confirmed, different trigger shape. Not a double-booking risk: the apply-time collision gate still scans appointments and timeblocks over the full resulting block.
-
-**Fix direction:** When hours/shift data resolves, compute the proven gap as the MINIMUM of (next same-provider commitment, location close, provider shift end), not only as gap_unprovable recovery. Keep the existing fail-closed posture (both bounds must resolve). Add a regression test: next commitment tomorrow morning, shift ends 15 min after the block, expect insufficient_gap.
-
-**Context:** Codex [P1] from the 2026-07-16 block-math gauntlet (the fix that corrected the 15->20 delta and the +65 collision window). Deliberately kept OUT of that scope-locked fix (one fix per PR). The in-code comment at ~2819 ("when a next commitment exists it is already the tightest bound") encodes the false assumption and should be corrected by this fix.
-
 ## Verify the in-place upgrade mutation actually changed the appointment
 
 **What:** `tryApplyAppointmentUpgradeMutation` in `src/lib/boulevard.js:2546-2585` treats any returned appointment id as success. It does not re-read the appointment to confirm the service or duration actually changed.

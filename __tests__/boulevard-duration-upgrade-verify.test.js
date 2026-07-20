@@ -88,6 +88,14 @@ function buildFetch(postMutationServiceId) {
       });
     }
 
+    if (query.includes('FetchLocationHours')) {
+      // Roomy hours so the shift-end bound (consulted on every eligibility path
+      // since the bypass fix) resolves; the commitment gap stays governing.
+      return json({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } });
+    }
+    if (query.includes('FetchStaffShifts')) {
+      return json({ data: { shifts: { shifts: [{ staffId: 'prov-1', clockOut: '23:00:00', available: true }] } } });
+    }
     if (query.includes('ScanAppointments')) {
       return json({
         data: {
@@ -251,7 +259,15 @@ describe('duration upgrade read-back verification', () => {
           },
         });
       }
-      if (query.includes('ScanAppointments')) {
+      if (query.includes('FetchLocationHours')) {
+      // Roomy hours so the shift-end bound (consulted on every eligibility path
+      // since the bypass fix) resolves; the commitment gap stays governing.
+      return json({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } });
+    }
+    if (query.includes('FetchStaffShifts')) {
+      return json({ data: { shifts: { shifts: [{ staffId: 'prov-1', clockOut: '23:00:00', available: true }] } } });
+    }
+    if (query.includes('ScanAppointments')) {
         return json({
           data: {
             appointments: {

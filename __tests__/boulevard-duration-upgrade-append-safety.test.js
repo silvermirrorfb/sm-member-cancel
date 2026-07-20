@@ -125,6 +125,14 @@ describe('duration-upgrade append safety', () => {
         };
       }
 
+      if (query.includes('FetchLocationHours')) {
+        // Roomy hours so the shift-end bound (consulted on every eligibility
+        // path since the bypass fix) resolves; the commitment gap governs.
+        return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      }
+      if (query.includes('FetchStaffShifts')) {
+        return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: 'prov-1', clockOut: '23:00:00', available: true }] } } }) };
+      }
       if (query.includes('ScanAppointments')) {
         return {
           ok: true,

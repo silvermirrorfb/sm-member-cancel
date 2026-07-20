@@ -158,6 +158,16 @@ function buildFetch({
       const cursor = hasPage2 ? 'cur1' : null; // truncated-without-page2 -> null cursor -> caller fails closed
       return json({ data: { timeblocks: { edges: filt(timeblockNodes), pageInfo: { hasNextPage: hasNext, endCursor: cursor } } } });
     }
+    if (query.includes('FetchLocationHours')) {
+      // Open all week with a late close so the shift-end bound (consulted on
+      // every eligibility path since the bypass fix) resolves and stays roomy;
+      // the commitment gap remains the governing bound in this suite.
+      return json({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } });
+    }
+    if (query.includes('FetchStaffShifts')) {
+      const reqStaff = String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop();
+      return json({ data: { shifts: { shifts: [{ staffId: reqStaff, clockOut: '23:00:00', available: true }] } } });
+    }
     if (query.includes('VerifyApptDuration')) {
       const d = completed ? 50 : 30;
       return json({ data: { appointment: { id: 'appt-1', duration: d, appointmentServices: [{ id: 'aps-1', serviceId: 'svc-30', duration: d, totalDuration: d }] } } });

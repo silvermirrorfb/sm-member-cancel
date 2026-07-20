@@ -2819,8 +2819,9 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
   }
   // Last-of-day recovery: when no next same-provider commitment bounds the gap
   // (gap_unprovable), try to bound it by BOTH the location close AND the provider
-  // shift end. Only runs in the gap_unprovable case; when a next commitment exists
-  // it is already the tightest bound, so this adds no fetches on the common path.
+  // shift end. The commitment-bounded eligible path gets its own close/shift
+  // bound in the block below: a next commitment is NOT the tightest bound when
+  // it sits past the provider's shift end (for example tomorrow morning).
   // FAIL CLOSED: computeCloseShiftGapMinutes returns availableGapMinutes only when
   // BOTH bounds resolve, so any hours OR shift fetch failure (timeout, GraphQL
   // error, empty rows, no matching staff row) leaves it null and the result stays
@@ -2844,6 +2845,49 @@ async function evaluateUpgradeOpportunityForProfile(profile, options = {}) {
     } catch (err) {
       // Conservative: leave gap_unprovable untouched on any failure.
     }
+  }
+  // Shift-end bound on the commitment-bounded path (TODOS shift-end bypass;
+  // codex P1 from the 2026-07-16 gauntlet): a next same-provider commitment
+  // inside the scan window can sit past the provider's shift end (for example
+  // tomorrow morning), so the commitment gap alone never proves the provider
+  // is present for the extended block. Whenever the evaluator returned
+  // eligible off a commitment bound, ALSO resolve the close/shift bound and
+  // take the MINIMUM of the two. FAIL CLOSED: if the close/shift bound cannot
+  // be resolved (missing hours, missing or split or unparseable shift, fetch
+  // failure), the room is unprovable and the result flips ineligible. This
+  // block only ever refuses; it never grants eligibility. Results already
+  // bounded by close/shift (gapBoundedBy set by the recovery above) skip it:
+  // their shift end has been consulted.
+  if (
+    result?.eligible === true &&
+    !result.gapBoundedBy &&
+    result.endOn &&
+    isFiniteNumber(result.requiredExtraMinutes) &&
+    isFiniteNumber(result.availableGapMinutes)
+  ) {
+    let bounded = null;
+    try {
+      bounded = await resolveCloseShiftBoundedGap(auth, result);
+    } catch (err) {
+      bounded = null;
+    }
+    if (bounded) {
+      result.locationCloseMinutes = Number.isFinite(bounded.locationCloseMinutes) ? bounded.locationCloseMinutes : null;
+      result.shiftEndMinutes = Number.isFinite(bounded.shiftEndMinutes) ? bounded.shiftEndMinutes : null;
+    }
+    if (!bounded || bounded.availableGapMinutes == null) {
+      result.eligible = false;
+      result.reason = 'gap_unprovable';
+      result.availableGapMinutes = null;
+    } else if (bounded.availableGapMinutes < result.availableGapMinutes) {
+      result.availableGapMinutes = bounded.availableGapMinutes;
+      result.gapBoundedBy = bounded.gapBoundedBy;
+      const fits = bounded.availableGapMinutes >= result.requiredExtraMinutes;
+      result.eligible = fits;
+      result.reason = fits ? 'eligible' : 'insufficient_gap';
+    }
+    // When the commitment gap is the tighter bound, the evaluator already
+    // proved the fit against it; the result stands unchanged.
   }
   if (fallbackScanUsed) {
     result.locationFallbackUsed = true;
