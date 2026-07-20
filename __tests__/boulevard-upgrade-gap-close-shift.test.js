@@ -477,6 +477,9 @@ describe('shift-end bound enforced on the commitment-bounded path (bypass fix)',
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
     expect(result.eligible).toBe(false);
     expect(result.reason).toBe('gap_unprovable');
+    // The fail-closed sentinel is null (boulevard.js sets availableGapMinutes
+    // to null so no downstream reader sees the stale commitment gap).
+    expect(result.availableGapMinutes).toBeNull();
   });
 
   it('FAIL-CLOSED: missing location hours on the commitment-bounded path -> ineligible', async () => {
@@ -484,6 +487,7 @@ describe('shift-end bound enforced on the commitment-bounded path (bypass fix)',
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
     expect(result.eligible).toBe(false);
     expect(result.reason).toBe('gap_unprovable');
+    expect(result.availableGapMinutes).toBeNull();
   });
 
   it('FAIL-CLOSED: an unparseable shift clockOut on the commitment-bounded path -> ineligible', async () => {
@@ -495,5 +499,21 @@ describe('shift-end bound enforced on the commitment-bounded path (bypass fix)',
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
     expect(result.eligible).toBe(false);
     expect(result.reason).toBe('gap_unprovable');
+    expect(result.availableGapMinutes).toBeNull();
+  });
+
+  it('FAIL-CLOSED: a missing appointment locationId on the commitment-bounded path -> ineligible', async () => {
+    // The candidate carries no locationId, so the close/shift bound cannot
+    // resolve which location's hours apply. Shift data is present and roomy;
+    // the missing location is the ONLY failure cause.
+    global.fetch = makeFetchMock({
+      appts: [{ ...SAMANTHA_APPT, locationId: null }, TOMORROW_MORNING_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.availableGapMinutes).toBeNull();
   });
 });

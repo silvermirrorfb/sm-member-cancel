@@ -2,6 +2,18 @@
 
 Deferred work captured during reviews. Each item has enough context to pick up cold.
 
+## HARD GATE: add-on shift-end bypass must be fixed before any add-on flag is enabled
+
+**What:** The add-on offer gate and the add-on apply gate both treat a provider's last-of-day booking as unlimited room and never consult the shift end or location close. A 50-minute booking with no next same-provider commitment in the scan window gets `gapUnlimited: true` from the evaluator's metadata shape; `buildAddonOffer` (src/app/api/sms/automation/pre-appointment/route.js, the `!gapUnlimited` branch of the gap check) and `isAddonGapEligible` (src/lib/boulevard.js, the `gapUnlimited === true` early return) both skip the gap check entirely on that shape.
+
+**Why:** Same disease as the eligibility shift-end bypass fixed in `477b288`, add-on flavor: an add-on could be offered by SMS and applied on YES past the provider's shift end or location close. Dormant today because the add-on flags are off and the `BOULEVARD_ADDON_SERVICE_ID_*` env vars are absent in prod, but nothing in the code path itself refuses.
+
+**HARD GATE:** must be fixed before any add-on flag is enabled. No exceptions.
+
+**Fix direction:** last-of-day add-on room must be proven the same way the duration path now proves it: resolve close/shift via `resolveCloseShiftBoundedGap` and require the add-on minutes to fit within the MINIMUM of (next commitment, location close, provider shift end), failing closed when the bound cannot resolve. This item MERGES with the already-queued add-on block-math review as ONE successor PR, not two.
+
+**Context:** Found by the independent adversarial review of `477b288` (2026-07-20) while verifying the duration-path fix had no remaining bypass. Also see the two codex P2s from the same gauntlet: the QA `upgrade-check` synthetic eligibility mode calls the pure evaluator with no close/shift bound (QA-vs-prod parity drift, read-only, no mutation risk), and a live probe should confirm real scan strategies return `Appointment.locationId` before any flag flip (missing locationId now fails closed, which would silence the duration workload; the zero-send alert would fire).
+
 ## Verify the in-place upgrade mutation actually changed the appointment
 
 **What:** `tryApplyAppointmentUpgradeMutation` in `src/lib/boulevard.js:2546-2585` treats any returned appointment id as success. It does not re-read the appointment to confirm the service or duration actually changed.
