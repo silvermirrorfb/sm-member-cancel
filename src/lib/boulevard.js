@@ -3932,7 +3932,23 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
     apiUrl,
     headers,
     setDurationsQuery,
-    { input: { bookingId, bookingServiceId: baseBookingServiceId, duration: targetDuration } },
+    {
+      input: {
+        bookingId,
+        bookingServiceId: baseBookingServiceId,
+        duration: targetDuration,
+        // Pin the TARGET tier's cleanup buffer. Without this Boulevard keeps the
+        // SOURCE service's own finishDuration on the in-place edit (live-proven
+        // 2026-07-16 and again 2026-07-21: a 30-min line, buffer 15, upgraded via
+        // setDurations(50) produced a 65-min block), so an upgraded 50 blocked 5
+        // minutes longer than a natively booked 50 (block 60 = 50 + 10). Owner
+        // decision 2026-07-21: the upgraded block must match the native booking.
+        // The eligibility delta (20) and the collision window (start+65) both
+        // still assume the OLD larger footprint, so they over-require/over-cover;
+        // safe direction, retune is a separate follow-up.
+        finishDuration: prepBufferMinutesForDuration(targetDuration),
+      },
+    },
     'bookingServiceSetDurations',
   );
   const durationWarnings = toBookingWarningList(durationAttempt.payload?.bookingWarnings);

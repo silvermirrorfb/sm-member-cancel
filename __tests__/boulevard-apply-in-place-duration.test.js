@@ -41,6 +41,7 @@ let calls;
 let scanClientIds;
 let scanQueries; // window clause (startAt >= ... AND startAt < ...) of each location-scoped scan
 let timeblockQueries; // window clause of each ScanTimeblocks query (asserts the fetch window)
+let setDurationsInputs; // the exact input each bookingServiceSetDurations mutation was sent
 
 // Simulate Boulevard's server-side QueryString filter so a fetch-window bug is observable:
 // a node is returned only if it satisfies every (startAt|endAt) (>=|<) 'DATE' clause present
@@ -179,7 +180,7 @@ function buildFetch({
         bookingServices: [{ id: 'bs-base', baseBookingServiceId: null, editingAppointmentServiceId: 'aps-1', serviceId: 'svc-30', staffId: 'prov-1' }],
       }, bookingWarnings: createWarnings } } });
     }
-    if (query.includes('bookingServiceSetDurations')) return json({ data: { bookingServiceSetDurations: { booking: { id: 'bk-1' }, bookingWarnings: durationWarnings } } });
+    if (query.includes('bookingServiceSetDurations')) { setDurationsInputs.push(body?.variables?.input || null); return json({ data: { bookingServiceSetDurations: { booking: { id: 'bk-1' }, bookingWarnings: durationWarnings } } }); }
     if (query.includes('bookingServiceSetPrice')) return json({ data: { bookingServiceSetPrice: { booking: { id: 'bk-1' }, bookingWarnings: [] } } });
     if (query.includes('bookingComplete')) { completed = true; return json({ data: { bookingComplete: { booking: { id: 'bk-1' }, bookingAppointments: [{ appointmentId: 'appt-1', clientId: 'client-1' }], bookingWarnings: completeWarnings } } }); }
     return json({ data: {} });
@@ -197,7 +198,7 @@ async function runReverify() {
 }
 
 describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no cancel)', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; setDurationsInputs = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('edits the existing line in place and never adds/removes a service line or cancels', async () => {
@@ -213,6 +214,19 @@ describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no c
     expect(calls).not.toContain('cancelAppointment');
     expect(calls).not.toContain('appointmentCancel');
     expect(result.updatedAppointmentId).toBe('appt-1');
+  });
+
+  it('pins the target tier finishDuration on setDurations so the upgraded block matches a native booking (50 -> 60-min block, not 65)', async () => {
+    // Boulevard keeps the SOURCE service's own cleanup buffer on an in-place
+    // setDurations (live-proven 2026-07-16: 30-min line upgraded to 50 produced a
+    // 65-min block, buffer still the source's 15). Owner decision 2026-07-21: the
+    // upgraded block must equal a natively booked 50-min facial's 60 minutes, so
+    // the apply passes finishDuration = the TARGET tier's buffer (10) explicitly.
+    process.env = env(); global.fetch = buildFetch({ durationWarnings: [] });
+    const result = await runReverify();
+    expect(result.success).toBe(true);
+    expect(setDurationsInputs).toHaveLength(1);
+    expect(setDurationsInputs[0]).toMatchObject({ bookingId: 'bk-1', bookingServiceId: 'bs-base', duration: 50, finishDuration: 10 });
   });
 
   it('PROCEEDS past a self-overlap STAFF_DOUBLE_BOOKED when the staff window is clear (commits in place, same appt id)', async () => {
@@ -473,7 +487,7 @@ describe('hasBlockingBookingWarnings: discriminating policy + id normalization',
 // and fail closed: a non-cancelled overlapping block on the target staff is a real
 // collision; any block-fetch failure is treated as NOT clear.
 describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real collisions)', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; setDurationsInputs = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('HEADLINE: aborts before commit when the extended window overlaps a non-cancelled staff timeblock (was wrongly benign)', async () => {
@@ -633,7 +647,7 @@ describe('P1-A: timeblock-aware collision gate (staff breaks/time-off are real c
 // with unparseable times or a null/all-staff staffId was silently ignored. The mock now
 // applies Boulevard's startAt window filter, so the multi-day case is a true red.
 describe('P1-A gauntlet hardening: multi-day fetch window + fail-closed predicate', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; setDurationsInputs = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('HEADLINE: blocks a multi-day staff block that STARTED days before the appointment but overlaps the window', async () => {
@@ -700,7 +714,7 @@ describe('P1-A gauntlet hardening: multi-day fetch window + fail-closed predicat
 // every legit upgrade. Paginate (the pattern used 4x elsewhere in boulevard.js) so a clear-but-
 // large location proceeds, a block on a later page still blocks, and a runaway scan fails closed.
 describe('P1-A pagination: multi-page timeblock scan', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; setDurationsInputs = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('PROCEEDS at a busy location: a clear first page with hasNextPage is paged through, not aborted', async () => {
@@ -747,7 +761,7 @@ describe('P1-A pagination: multi-page timeblock scan', () => {
 // and Part 1 found ZERO null-staffId / location-wide closure blocks across 5000 rows at two
 // locations, so scoping the query to the target staff alone is sufficient and complete.
 describe('P1-A staff-scoped timeblock query', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; setDurationsInputs = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('scopes the timeblock query to the target staff (staffId filter), not the whole location', async () => {
@@ -787,7 +801,7 @@ describe('P1-A staff-scoped timeblock query', () => {
 // [14:00, 15:00) is a real collision; one at or after 15:00 is not. (The block-end-endOn case,
 // where the carried end 15:05 governs, is pinned in the P1-A suite above.)
 describe('block-math collision window: the tier-floor bound with a service-end endOn', () => {
-  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
+  beforeEach(() => { calls = []; scanClientIds = []; scanQueries = []; timeblockQueries = []; setDurationsInputs = []; vi.spyOn(console, 'error').mockImplementation(() => {}); });
   afterEach(() => { process.env = originalEnv; global.fetch = originalFetch; vi.restoreAllMocks(); });
 
   it('ABORTS on a staff block at start+55 (14:55), inside the 60-min block but past the 50-min service end', async () => {
