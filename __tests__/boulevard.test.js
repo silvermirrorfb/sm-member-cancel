@@ -233,6 +233,8 @@ describe('lookupMember fallback matching', () => {
       if (body.query.includes('IntrospectType')) {
         return { ok: true, json: async () => ({ data: { __type: null } }) };
       }
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return { ok: true, json: async () => ({ data: {} }) };
     });
 
@@ -300,6 +302,8 @@ describe('lookupMember fallback matching', () => {
       if (body.query.includes('IntrospectType')) {
         return { ok: true, json: async () => ({ data: { __type: null } }) };
       }
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return { ok: true, json: async () => ({ data: {} }) };
     });
 
@@ -379,6 +383,8 @@ describe('lookupMember log redaction', () => {
       if (body.query.includes('IntrospectType')) {
         return { ok: true, json: async () => ({ data: { __type: null } }) };
       }
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return { ok: true, json: async () => ({ data: {} }) };
     });
 
@@ -435,6 +441,8 @@ describe('lookupMember log redaction', () => {
       if (body.query.includes('IntrospectType')) {
         return { ok: true, json: async () => ({ data: { __type: null } }) };
       }
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return { ok: true, json: async () => ({ data: {} }) };
     });
 
@@ -699,7 +707,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.availableGapMinutes).toBe(30);
   });
 
-  it('treats exactly 20 minutes of post-prep gap as eligible for 30->50', () => {
+  it('marks 30->50 eligible when the gap exceeds the 15-min block extension', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -729,7 +737,7 @@ describe('upgrade eligibility engine', () => {
     expect(result.requiredExtraMinutes).toBe(20);
   });
 
-  it('treats less than 15 minutes after appointment end as ineligible for 30->50', () => {
+  it('treats less than 20 minutes after appointment end as ineligible for 30->50', () => {
     const appointments = [
       {
         id: 'appt-1',
@@ -1091,6 +1099,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                 fields: [
                   { name: 'id' },
                   { name: 'startOn' },
+                  { name: 'locationId' },
                   { name: 'endOn' },
                   { name: 'clientId' },
                   { name: 'providerId' },
@@ -1113,6 +1122,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-1',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'client-1',
                       providerId: 'prov-1',
                       startOn: '2026-03-08T10:00:00.000Z',
@@ -1124,6 +1134,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-2',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'other',
                       providerId: 'prov-1',
                       startOn: '2026-03-08T11:10:00.000Z',
@@ -1143,6 +1154,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -1183,6 +1196,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                 fields: [
                   { name: 'id' },
                   { name: 'startOn' },
+                  { name: 'locationId' },
                   { name: 'endOn' },
                   { name: 'clientId' },
                   { name: 'providerId' },
@@ -1205,6 +1219,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-1',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'client-1',
                       providerId: 'prov-1',
                       startOn: '2026-03-08T10:00:00.000Z',
@@ -1217,6 +1232,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                     // Bounding next commitment so the 30->50 gap (needs 20) is provable.
                     node: {
                       id: 'appt-next',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'other',
                       providerId: 'prov-1',
                       startOn: '2026-03-08T10:55:00.000Z',
@@ -1236,6 +1252,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -1276,6 +1294,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                 fields: [
                   { name: 'id' },
                   { name: 'startAt' },
+                  { name: 'locationId' },
                   { name: 'endAt' },
                   { name: 'client' },
                   { name: 'provider' },
@@ -1297,6 +1316,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-1',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       client: { id: 'client-1' },
                       provider: { id: 'prov-1' },
                       startAt: '2026-03-08T10:00:00.000Z',
@@ -1307,6 +1327,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-2',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       client: { id: 'other' },
                       provider: { id: 'prov-1' },
                       startAt: '2026-03-08T11:10:00.000Z',
@@ -1325,6 +1346,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -1374,6 +1397,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   fields: [
                     { name: 'id', type: scalarType('ID') },
                     { name: 'startAt', type: scalarType('DateTime') },
+                    { name: 'locationId', type: scalarType('ID') },
                     { name: 'endAt', type: scalarType('DateTime') },
                     { name: 'clientId', type: scalarType('ID') },
                     { name: 'appointmentServices', type: objectType('AppointmentServiceConnection') },
@@ -1436,6 +1460,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-1',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'client-1',
                       startAt: '2026-03-08T10:00:00.000Z',
                       endAt: '2026-03-08T10:30:00.000Z',
@@ -1450,6 +1475,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-2',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'other',
                       startAt: '2026-03-08T11:10:00.000Z',
                       endAt: '2026-03-08T11:40:00.000Z',
@@ -1472,6 +1498,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -1624,6 +1652,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -1778,6 +1808,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -1888,6 +1920,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   fields: [
                     { name: 'id', type: scalarType('ID') },
                     { name: 'startAt', type: scalarType('DateTime') },
+                    { name: 'locationId', type: scalarType('ID') },
                     { name: 'endAt', type: scalarType('DateTime') },
                     { name: 'clientId', type: scalarType('ID') },
                     { name: 'providerId', type: scalarType('ID') },
@@ -1931,6 +1964,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-1',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'client-1',
                       providerId: 'prov-1',
                       startAt: '2026-03-08T10:00:00.000Z',
@@ -1941,6 +1975,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-2',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'other',
                       providerId: 'prov-1',
                       startAt: '2026-03-08T11:10:00.000Z',
@@ -1956,6 +1991,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -2036,6 +2073,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return {
         ok: true,
         json: async () => ({ data: {} }),
@@ -2128,6 +2167,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   fields: [
                     { name: 'id', type: scalarType('ID') },
                     { name: 'startAt', type: scalarType('DateTime') },
+                    { name: 'locationId', type: scalarType('ID') },
                     { name: 'endAt', type: scalarType('DateTime') },
                     { name: 'clientId', type: scalarType('ID') },
                     { name: 'providerId', type: scalarType('ID') },
@@ -2154,6 +2194,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-1',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'client-1',
                       providerId: 'prov-1',
                       startAt: '2026-03-08T10:00:00.000Z',
@@ -2164,6 +2205,7 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
                   {
                     node: {
                       id: 'appt-2',
+                      locationId: 'urn:blvd:Location:24a2fac0-deef-4f7f-8bf6-52368be42d65',
                       clientId: 'other',
                       providerId: 'prov-1',
                       startAt: '2026-03-08T11:10:00.000Z',
@@ -2179,6 +2221,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return { ok: true, json: async () => ({ data: {} }) };
     });
 
@@ -2318,6 +2362,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return { ok: true, json: async () => ({ data: {} }) };
     });
 
@@ -2393,6 +2439,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
         };
       }
 
+      if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+      if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
       return { ok: true, json: async () => ({ data: {} }) };
     });
 
@@ -2547,6 +2595,8 @@ describe('upgrade opportunity Boulevard integration (mocked)', () => {
           scanFingerprints.push(strategyFingerprint(body.query));
           return scanHandler(scanFingerprints.length);
         }
+        if (body.query.includes('FetchLocationHours')) return { ok: true, json: async () => ({ data: { location: { tz: 'UTC', hours: Array.from({ length: 7 }, () => ({ open: true, start: { hour: 0, minute: 0 }, finish: { hour: 23, minute: 0 } })) } } }) };
+        if (body.query.includes('FetchStaffShifts')) return { ok: true, json: async () => ({ data: { shifts: { shifts: [{ staffId: String((body?.variables?.ids || [])[0] || 'prov-1').split(':').pop(), clockOut: '23:00:00', available: true }] } } }) };
         return { ok: true, json: async () => ({ data: {} }) };
       });
       stub.getScanCalls = () => scanFingerprints.length;

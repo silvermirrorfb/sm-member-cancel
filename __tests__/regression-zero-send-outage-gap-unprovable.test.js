@@ -99,7 +99,7 @@ describe('REGRESSION: 2026-06-19 zero-send outage (last-of-day 30->50 died as ga
     // -> the exact condition that dropped sends to zero for four days.
     expect(result.reason).toBe('eligible');
     expect(result.eligible).toBe(true);
-    expect(result.requiredExtraMinutes).toBe(20); // 30 -> 50
+    expect(result.requiredExtraMinutes).toBe(20); // 30 -> 50 (service delta; buffer carries over)
     expect(result.availableGapMinutes).toBe(30);   // 8:30 PM end -> 9:00 PM close/shift
   });
 });

@@ -10,8 +10,9 @@ import {
 // appointment, location close, provider shift end). The provider's last booking
 // of the day must not be skipped as gap_unprovable when the salon is open long
 // enough after it for the added minutes to fit. Real case: Samantha Lozada's
-// last UWS booking ends 8:30 PM, UWS closes 9:00 PM, a 30->50 needs 20 min, so
-// it fits and must be ELIGIBLE.
+// last UWS booking ends 8:30 PM, UWS closes 9:00 PM, a 30->50 needs 20 min (the
+// block grows by the service delta; the buffer carries over), so it fits and must
+// be ELIGIBLE.
 
 // Real UWS shape: index 0 = Sunday. Mon-Fri 08:00-21:00, Sat 09:00-19:00, Sun 10:00-18:00.
 const HOURS_UWS = [
@@ -276,6 +277,20 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     expect(result.availableGapMinutes).toBe(10); // only 10 minutes to 9:00 PM close, needs 20
   });
 
+  it('does NOT fit a shift-end-bounded 15-minute gap: the 30->50 block grows 20 min (live-proven 2026-07-16 overrun case)', async () => {
+    // Mirrors the live probe exactly: booking ends 8:30 PM, provider shift ends 8:45 PM
+    // -> 15 free minutes, shift-end bounded. The in-place upgrade keeps the service's own
+    // 15-min buffer, so the block grows 20 min (45 -> 65) and 15 free minutes OVERRUNS the
+    // shift by 5 (live: appointment ran 8:00-9:05 vs a 9:00 shift end). Must refuse.
+    global.fetch = makeFetchMock({ appts: [SAMANTHA_APPT], location: UWS_LOCATION, shifts: [{ staffId: 'prov-1', clockOut: '20:45:00', available: true }] });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('insufficient_gap');
+    expect(result.availableGapMinutes).toBe(15);
+    expect(result.requiredExtraMinutes).toBe(20);
+    expect(result.gapBoundedBy).toBe('shift_end');
+  });
+
   it('FAIL-SAFE: when the hours and shift fetches return nothing, stays gap_unprovable (never falsely eligible)', async () => {
     global.fetch = makeFetchMock({ appts: [SAMANTHA_APPT], hoursEmpty: true, shiftsEmpty: true });
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
@@ -360,15 +375,145 @@ describe('evaluateUpgradeOpportunityForProfile gap bounded by close/shift (mocke
     expect(result.shiftEndMinutes).toBeNull();
   });
 
-  it('UNCHANGED: a later same-provider appointment still bounds the gap, no hours/shift fetch needed', async () => {
+  it('a later same-provider appointment still bounds the gap when it is the tightest bound (shift consulted on every path now)', async () => {
     const nextAppt = { id: 'appt-2', clientId: 'other', providerId: 'urn:blvd:Staff:prov-1', startOn: '2026-06-19T20:50:00-04:00', endOn: '2026-06-19T21:20:00-04:00', locationId: 'urn:blvd:Location:loc-1', status: 'BOOKED', canceledAt: null };
-    const fetchMock = makeFetchMock({ appts: [SAMANTHA_APPT, nextAppt], location: UWS_LOCATION, shifts: [] });
+    const fetchMock = makeFetchMock({ appts: [SAMANTHA_APPT, nextAppt], location: UWS_LOCATION, shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }] });
     global.fetch = fetchMock;
     const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS);
     expect(result.eligible).toBe(true);
     expect(result.reason).toBe('eligible');
-    expect(result.availableGapMinutes).toBe(20); // bounded by the next appointment, not close
+    expect(result.availableGapMinutes).toBe(20); // commitment (20) is tighter than close/shift (30) and governs
     const askedForHours = fetchMock.mock.calls.some(([, init]) => JSON.parse(init.body).query.includes('FetchLocationHours'));
-    expect(askedForHours).toBe(false);
+    expect(askedForHours).toBe(true); // the shift-end bound is consulted on every path, including this one
+  });
+});
+
+// Shift-end bypass fix (TODOS "Close/shift bound is bypassed when a later
+// same-provider commitment exists"; codex P1 from the 2026-07-16 gauntlet):
+// eligibility must prove the extended block fits within the provider shift end
+// and location close on EVERY path, not only when no next commitment exists.
+// A next appointment tomorrow morning inside the ~30h scan window made the
+// overnight gap look enormous, the shift end was never consulted, and a
+// last-of-day upgrade could be offered past the shift. The proven gap is now
+// the MINIMUM of (next same-provider commitment, location close, provider
+// shift end); missing or unparseable close/shift data fails closed to
+// ineligible on every path. Safe direction only: this block can refuse an
+// offer, never grant one.
+describe('shift-end bound enforced on the commitment-bounded path (bypass fix)', () => {
+  const OPTS_30H = { now: '2026-06-19T22:00:00.000Z', windowHours: 30 };
+  // Same provider's next appointment is tomorrow at 9:00 AM, inside the scan
+  // window: the overnight commitment gap is ~750 minutes, so pre-fix the
+  // shift end was never consulted and the upgrade was offered.
+  const TOMORROW_MORNING_APPT = {
+    id: 'appt-tomorrow', clientId: 'other', providerId: 'urn:blvd:Staff:prov-1',
+    startOn: '2026-06-20T09:00:00-04:00', endOn: '2026-06-20T09:30:00-04:00',
+    locationId: 'urn:blvd:Location:loc-1', status: 'BOOKED', canceledAt: null,
+  };
+  const originalEnv = process.env;
+  const originalFetch = global.fetch;
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      BOULEVARD_API_KEY: 'key',
+      BOULEVARD_API_SECRET: Buffer.from('secret').toString('base64'),
+      BOULEVARD_BUSINESS_ID: 'biz-id',
+      BOULEVARD_API_URL: 'https://dashboard.boulevard.io/api/2020-01/admin',
+    };
+    __resetBoulevardCachesForTests();
+  });
+  afterEach(() => {
+    process.env = originalEnv;
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('HEADLINE: a next-morning commitment no longer bypasses the shift end (last-of-day overrun refused)', async () => {
+    // Booking ends 8:30 PM, shift ends 8:45 PM (gap 15, needs 20), next
+    // appointment tomorrow 9:00 AM. Pre-fix: eligible off the ~750-minute
+    // overnight gap. Fixed: the shift end governs and the offer is refused.
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT, TOMORROW_MORNING_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: '20:45:00', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('insufficient_gap');
+    expect(result.availableGapMinutes).toBe(15);
+    expect(result.gapBoundedBy).toBe('shift_end');
+  });
+
+  it('green guard: the same overnight shape with a roomy shift stays eligible (no over-narrowing)', async () => {
+    // Shift and close both end 9:00 PM: 30 minutes of proven room, needs 20.
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT, TOMORROW_MORNING_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(true);
+    expect(result.reason).toBe('eligible');
+    expect(result.availableGapMinutes).toBe(30); // min(overnight commitment ~750, close/shift 30)
+  });
+
+  it('regression: a tighter same-day commitment still governs exactly as before', async () => {
+    // Next same-day appointment leaves 10 minutes; shift is roomy. The
+    // commitment refusal is identical to pre-fix behavior, and a roomy shift
+    // must never rescue it (narrowing property: the fix only ever refuses).
+    const tightNext = { id: 'appt-tight', clientId: 'other', providerId: 'urn:blvd:Staff:prov-1', startOn: '2026-06-19T20:40:00-04:00', endOn: '2026-06-19T21:10:00-04:00', locationId: 'urn:blvd:Location:loc-1', status: 'BOOKED', canceledAt: null };
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT, tightNext],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('insufficient_gap');
+    expect(result.availableGapMinutes).toBe(10);
+  });
+
+  it('FAIL-CLOSED: missing shift rows on the commitment-bounded path -> ineligible', async () => {
+    global.fetch = makeFetchMock({ appts: [SAMANTHA_APPT, TOMORROW_MORNING_APPT], location: UWS_LOCATION, shiftsEmpty: true });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('gap_unprovable');
+    // The fail-closed sentinel is null (boulevard.js sets availableGapMinutes
+    // to null so no downstream reader sees the stale commitment gap).
+    expect(result.availableGapMinutes).toBeNull();
+  });
+
+  it('FAIL-CLOSED: missing location hours on the commitment-bounded path -> ineligible', async () => {
+    global.fetch = makeFetchMock({ appts: [SAMANTHA_APPT, TOMORROW_MORNING_APPT], hoursEmpty: true, shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }] });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.availableGapMinutes).toBeNull();
+  });
+
+  it('FAIL-CLOSED: an unparseable shift clockOut on the commitment-bounded path -> ineligible', async () => {
+    global.fetch = makeFetchMock({
+      appts: [SAMANTHA_APPT, TOMORROW_MORNING_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: 'bogus', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.availableGapMinutes).toBeNull();
+  });
+
+  it('FAIL-CLOSED: a missing appointment locationId on the commitment-bounded path -> ineligible', async () => {
+    // The candidate carries no locationId, so the close/shift bound cannot
+    // resolve which location's hours apply. Shift data is present and roomy;
+    // the missing location is the ONLY failure cause.
+    global.fetch = makeFetchMock({
+      appts: [{ ...SAMANTHA_APPT, locationId: null }, TOMORROW_MORNING_APPT],
+      location: UWS_LOCATION,
+      shifts: [{ staffId: 'prov-1', clockOut: '21:00:00', available: true }],
+    });
+    const result = await evaluateUpgradeOpportunityForProfile(PROFILE, OPTS_30H);
+    expect(result.eligible).toBe(false);
+    expect(result.reason).toBe('gap_unprovable');
+    expect(result.availableGapMinutes).toBeNull();
   });
 });
