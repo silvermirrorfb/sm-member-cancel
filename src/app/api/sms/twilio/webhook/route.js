@@ -37,7 +37,13 @@ import { POST as postChatMessage } from '../../../chat/message/route';
 // function alive for the background apply, which may run a slow Boulevard scan
 // plus the booking-edit apply. Give it headroom well beyond the deferred scan
 // deadline so successful background applies are never cut short.
-export const maxDuration = 60;
+// 300, not 60: the TwiML reply returns in milliseconds, but deferWork()/after()
+// only keeps the function alive until maxDuration, and the deferred YES apply
+// (reverify + close/shift bound + collision gate + staff timeblock pagination +
+// four Boulevard mutations) was killed at 60s in the 2026-07-21 live activation
+// (Vercel Runtime Timeout, POST 504, Boulevard verified untouched). 300 matches
+// the pre-appointment automation route's declared budget on this project.
+export const maxDuration = 300;
 
 // Cap on the slow O(N) phone-scan fallback. Twilio's webhook timeout is
 // 15 seconds; we reserve 3s for the rest of the handler. On deadline we
