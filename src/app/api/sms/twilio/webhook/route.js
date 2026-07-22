@@ -113,7 +113,10 @@ const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member
 // courtesy word is not consent, and it made refusals like "please stop
 // texting me" read affirmative. "yes please" still matches via "yes".
 const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|absolutely)\b/i;
-const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
+// "no problem" / "no worries" are affirmative idioms, not refusals: without
+// the lookahead, "No problem, do it" would classify as a decline now that
+// negative wins ties (codex round-8).
+const NO_KEYWORDS = /\b(no(?!\s+(?:problem|worries))|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const STOP_KEYWORDS = /^\s*(stop|unsubscribe|cancel|end|quit)\s*$/i;
 const START_KEYWORDS = /^\s*(start|unstop|subscribe|yes\s+resubscribe)\s*$/i;
 const YES_NO_PENDING_MANUAL_REPLY = 'Thanks for replying YES. We received your request and our team will confirm it before your appointment.';
@@ -159,14 +162,23 @@ function deferWork(fn) {
 // requests, codex round-6). Negated consent statements ("I don't want to
 // unsubscribe") are excluded by OPT_OUT_NEGATED below.
 const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging|sending|contacting)\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s+(?:me\s+)?out\b|\btake me off\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b|\bremove me from\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b/i;
-const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never|no)\s+(?:want\s+to\s+|wanna\s+)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
+// Up to three intervening words so "not trying to unsubscribe" and "not
+// asking to unsubscribe" negate, not only "not want to" (codex round-8).
+const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never|no)\s+(?:\w+\s+){0,3}?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
+
+// iPhone keyboards send typographic apostrophes (U+2018/U+2019): normalize
+// them to ASCII before any consent or intent matching so "Don't text me"
+// with a smart apostrophe still opts out (codex round-8).
+function normalizeApostrophes(text) {
+  return String(text || '').replace(/[‘’]/g, "'");
+}
 
 function isAffirmative(text) {
-  return YES_KEYWORDS.test(String(text || '').toLowerCase());
+  return YES_KEYWORDS.test(normalizeApostrophes(text).toLowerCase());
 }
 
 function isNegative(text) {
-  const value = String(text || '').toLowerCase();
+  const value = normalizeApostrophes(text).toLowerCase();
   // Beyond the explicit refusal keywords, only an UNAMBIGUOUS, non-negated
   // opt-out request counts as negative (codex round-7): a stray "stop" or
   // "unsubscribe" in ordinary conversation ("Can I stop by the front
@@ -776,8 +788,9 @@ export async function POST(request) {
     // suppression record anywhere (security review 2026-07-22). Leading
     // words stay excluded so ordinary sentences containing "cancel" do not
     // trigger the opt-out branch.
-    const optOutBody = body.replace(/[\s.!?]+$/, '');
-    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(body) && !OPT_OUT_NEGATED.test(body))) {
+    const consentBody = normalizeApostrophes(body);
+    const optOutBody = consentBody.replace(/[\s.!?]+$/, '');
+    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(consentBody) && !OPT_OUT_NEGATED.test(consentBody))) {
       console.log(`[sms-webhook] STOP received from ${maskPhoneDigits(from)}, opting out`);
 
       // STOP set FIRST, in its own try/catch: this is the authoritative
