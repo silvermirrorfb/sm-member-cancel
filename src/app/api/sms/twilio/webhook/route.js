@@ -179,9 +179,24 @@ const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:(?:want|wanna|trying|
 // person words: sender-owned objects like "my number" or "my phone" are the
 // sender opting out (codex round-11), so the default stays opt-out.
 const OPT_OUT_THIRD_PARTY = /\b(?:unsubscribe|opt\s+out)\s+(?:my|our|his|her|their)\s+(?:husband|wife|spouse|partner|boyfriend|girlfriend|daughter|son|kids?|child|children|mom|mother|dad|father|sister|brother|friend|grand\w+)\b|\b(?:unsubscribe|opt\s+out)\s+(?:him|her|them)\b|\b(?:my|our|his|her|their)\s+\w+\s+(?:wants?|needs?|would like|is trying)\s+to\s+(?:unsubscribe|opt\s+out)\b/i;
-// Other-channel requests ("unsubscribe me from email updates") are not an
-// SMS consent revocation; the chat bot handles them (codex round-11).
-const OPT_OUT_OTHER_CHANNEL = /\b(?:unsubscribe|opt\s+(?:me\s+)?out)\b[^.!?]{0,40}\b(?:e-?mails?|newsletters?|mailing)\b/i;
+// Other-target requests ("unsubscribe me from email updates", "unsubscribe
+// me from my membership") are not an SMS consent revocation; the chat bot
+// handles them (codex rounds 11 and 12). Membership and appointment targets
+// matter doubly here: cancellations are this bot's core job.
+const OPT_OUT_OTHER_TARGET = /\b(?:unsubscribe|opt\s+(?:me\s+)?out)\b[^.!?,;]{0,40}\b(?:e-?mails?|newsletters?|mailing|memberships?|accounts?|appointments?|waitlist)\b/i;
+
+// Phrase-level opt-outs are evaluated PER CLAUSE so an unrelated clause can
+// never veto an explicit SMS opt-out clause ("Unsubscribe me from email,
+// and stop texting me" opts out; codex round-12), and an SMS clause can
+// never bless a non-SMS one.
+function isPhraseLevelOptOut(text) {
+  return normalizeApostrophes(text)
+    .split(/[,.;!?]+/)
+    .some(clause => OPT_OUT_REQUEST.test(clause)
+      && !OPT_OUT_NEGATED.test(clause)
+      && !OPT_OUT_THIRD_PARTY.test(clause)
+      && !OPT_OUT_OTHER_TARGET.test(clause));
+}
 
 // iPhone keyboards send typographic apostrophes (U+2018/U+2019): normalize
 // them to ASCII before any consent or intent matching so "Don't text me"
@@ -196,19 +211,22 @@ function isAffirmative(text) {
 
 function isNegative(text) {
   const value = normalizeApostrophes(text).toLowerCase();
-  // Refusal keywords are tested with negated verbs stripped so "Yes, don't
-  // skip it" cannot read the raw "skip" as a refusal (codex round-11). The
-  // "not" negator is deliberately NOT stripped: "not today" is itself a
-  // refusal keyword.
-  const refusalScope = value.replace(/\b(?:do\s*n[o']?t|never)\s+\w+\b/g, ' ');
+  // Refusal keywords are tested with negated verb chains stripped so "Yes,
+  // don't skip it" and "Yes, I don't want to skip it" cannot read the raw
+  // "skip" as a refusal (codex rounds 11 and 12). The chain strip runs
+  // first (negator through a refusal word within 3 words), then bare
+  // negator plus one verb. The "not" negator is deliberately NOT stripped:
+  // "not today" is itself a refusal keyword.
+  const refusalScope = value
+    .replace(/\b(?:do\s*n[o']?t|never)\s+(?:\w+\s+){0,3}?(?:skip|pass|decline)\b/g, ' ')
+    .replace(/\b(?:do\s*n[o']?t|never)\s+\w+\b/g, ' ');
   // Beyond the explicit refusal keywords, only an UNAMBIGUOUS, non-negated,
-  // sender-directed, SMS-channel opt-out request counts as negative (codex
-  // rounds 7, 10, 11): a stray "stop" or "unsubscribe" in ordinary
+  // sender-directed, SMS-targeted opt-out clause counts as negative (codex
+  // rounds 7, 10, 11, 12): a stray "stop" or "unsubscribe" in ordinary
   // conversation ("Can I stop by the front desk?", "I don't want to
   // unsubscribe", "my husband wants to unsubscribe") must reach the chat
   // bot, not consume the pending offer as a decline.
-  return NO_KEYWORDS.test(refusalScope)
-    || (OPT_OUT_REQUEST.test(value) && !OPT_OUT_NEGATED.test(value) && !OPT_OUT_THIRD_PARTY.test(value) && !OPT_OUT_OTHER_CHANNEL.test(value));
+  return NO_KEYWORDS.test(refusalScope) || isPhraseLevelOptOut(value);
 }
 
 function isUpgradeMutationEnabled() {
@@ -816,7 +834,7 @@ export async function POST(request) {
     // Strip ALL trailing punctuation and symbols, not just [.!?]: "STOP," and
     // "STOP;" are opt-outs too (codex round-11).
     const optOutBody = consentBody.replace(/[\s\p{P}\p{S}]+$/u, '');
-    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(consentBody) && !OPT_OUT_NEGATED.test(consentBody) && !OPT_OUT_THIRD_PARTY.test(consentBody) && !OPT_OUT_OTHER_CHANNEL.test(consentBody))) {
+    if (STOP_KEYWORDS.test(optOutBody) || isPhraseLevelOptOut(consentBody)) {
       console.log(`[sms-webhook] STOP received from ${maskPhoneDigits(from)}, opting out`);
 
       // STOP set FIRST, in its own try/catch: this is the authoritative
