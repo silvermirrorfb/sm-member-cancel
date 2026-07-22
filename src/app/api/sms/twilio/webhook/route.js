@@ -172,7 +172,7 @@ const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging)(?:\s+me)?\b|\b(
 // standalone "No" is an answer, not negation: "No I want to unsubscribe" is
 // an explicit opt-out (codex round-9), while "I'm not trying to
 // unsubscribe" negates.
-const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:(?:want|wanna|trying|asking|looking|going)\s+(?:you\s+to\s+|to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
+const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:ever\s+|really\s+)?(?:(?:want|wanna|trying|asking|looking|going)\s+(?:you\s+to\s+|to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
 // Third-party mentions discuss another PERSON's consent ("unsubscribe my
 // daughter", "my husband wants to unsubscribe") and must never mutate the
 // SENDER's consent state; they go to chat (codex round-10). Bounded to
@@ -184,6 +184,11 @@ const OPT_OUT_THIRD_PARTY = /\b(?:unsubscribe|opt\s+out)\s+(?:my|our|his|her|the
 // handles them (codex rounds 11 and 12). Membership and appointment targets
 // matter doubly here: cancellations are this bot's core job.
 const OPT_OUT_OTHER_TARGET = /\b(?:unsubscribe|opt\s+(?:me\s+)?out)\b[^.!?,;]{0,40}\b(?:e-?mails?|newsletters?|mailing|memberships?|accounts?|appointments?|waitlist)\b/i;
+// A clause that names an SMS target keeps its opt-out even when it also
+// names another channel: "unsubscribe me from texts and emails" revokes SMS
+// consent (codex round-13); the other-target veto only applies to clauses
+// with NO SMS target.
+const OPT_OUT_SMS_TARGET = /\b(?:texts?|texting|messages?|messaging|sms)\b/i;
 
 // Phrase-level opt-outs are evaluated PER CLAUSE so an unrelated clause can
 // never veto an explicit SMS opt-out clause ("Unsubscribe me from email,
@@ -195,7 +200,7 @@ function isPhraseLevelOptOut(text) {
     .some(clause => OPT_OUT_REQUEST.test(clause)
       && !OPT_OUT_NEGATED.test(clause)
       && !OPT_OUT_THIRD_PARTY.test(clause)
-      && !OPT_OUT_OTHER_TARGET.test(clause));
+      && !(OPT_OUT_OTHER_TARGET.test(clause) && !OPT_OUT_SMS_TARGET.test(clause)));
 }
 
 // iPhone keyboards send typographic apostrophes (U+2018/U+2019): normalize

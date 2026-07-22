@@ -2041,6 +2041,45 @@ describe('twilio webhook route', () => {
       expect(text).toContain('we got your YES');
     });
 
+    it('honors "unsubscribe me from texts and emails" as an SMS opt-out (mixed targets, codex round-13)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'unsubscribe me from texts and emails',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+    });
+
+    it('never unsubscribes on "Please don\'t ever stop texting me" (adverb inside negation, codex round-13)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: "Please don't ever stop texting me",
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).not.toContain('unsubscribed');
+      expect(mockAddToStopSet).not.toHaveBeenCalled();
+      expect(mockUnsubscribeKlaviyoSms).not.toHaveBeenCalled();
+    });
+
     it('honors an opt-out typed with an iPhone smart apostrophe (codex round-8)', async () => {
       const session = pendingSession();
       mockGetSessionIdForPhone.mockReturnValue('sess-1');
