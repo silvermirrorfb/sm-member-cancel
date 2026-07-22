@@ -116,7 +116,7 @@ const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do
 // "no problem" / "no worries" are affirmative idioms, not refusals: without
 // the lookahead, "No problem, do it" would classify as a decline now that
 // negative wins ties (codex round-8).
-const NO_KEYWORDS = /\b(no(?!\s+(?:problem|worries))|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
+const NO_KEYWORDS = /\b(no(?!\s+(?:problem|worries))|nah|no thanks|not today|pass|i'?m good(?!\s+with)|skip|decline)\b/i;
 const STOP_KEYWORDS = /^\s*(stop|unsubscribe|cancel|end|quit)\s*$/i;
 const START_KEYWORDS = /^\s*(start|unstop|subscribe|yes\s+resubscribe)\s*$/i;
 const YES_NO_PENDING_MANUAL_REPLY = 'Thanks for replying YES. We received your request and our team will confirm it before your appointment.';
@@ -161,10 +161,16 @@ function deferWork(fn) {
 // waitlist" and "remove me from tomorrow's appointment" are service
 // requests, codex round-6). Negated consent statements ("I don't want to
 // unsubscribe") are excluded by OPT_OUT_NEGATED below.
-const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging|sending|contacting)\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s+(?:me\s+)?out\b|\btake me off\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b|\bremove me from\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b/i;
-// Up to three intervening words so "not trying to unsubscribe" and "not
-// asking to unsubscribe" negate, not only "not want to" (codex round-8).
-const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never|no)\s+(?:\w+\s+){0,3}?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
+// Stop verbs need a messaging target: "stop texting/messaging" is
+// intrinsically about texts, but "stop sending" and "stop contacting" only
+// count with an SMS object or "me", so "stop sending receipts to my old
+// email" stays a service request (codex round-9).
+const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging)(?:\s+me)?\b|\b(?:stop|quit)\s+sending\s+(?:me\s+)?(?:texts?|messages?|sms)\b|\b(?:stop|quit)\s+contacting\s+me\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s+(?:me\s+)?out\b|\btake me off\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b|\bremove me from\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b/i;
+// Negation must be verb-attached ("don't/not/never" plus an optional intent
+// verb directly before the opt-out phrase). A leading standalone "No" is an
+// answer, not negation: "No I want to unsubscribe" is an explicit opt-out
+// (codex round-9), while "I'm not trying to unsubscribe" negates.
+const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:(?:want|wanna|trying|asking|looking|going)\s+(?:to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
 
 // iPhone keyboards send typographic apostrophes (U+2018/U+2019): normalize
 // them to ASCII before any consent or intent matching so "Don't text me"

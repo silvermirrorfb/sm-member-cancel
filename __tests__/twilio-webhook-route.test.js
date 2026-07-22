@@ -1781,6 +1781,64 @@ describe('twilio webhook route', () => {
       expect(session.pendingUpgradeOffer).not.toBeNull();
     });
 
+    it('honors "No I want to unsubscribe" as a full opt-out (leading No is not negation, codex round-9)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'No I want to unsubscribe',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+    });
+
+    it('never unsubscribes on "Please stop sending receipts to my old email" (service request, codex round-9)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'Please stop sending receipts to my old email',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).not.toContain('unsubscribed');
+      expect(mockAddToStopSet).not.toHaveBeenCalled();
+      expect(mockUnsubscribeKlaviyoSms).not.toHaveBeenCalled();
+    });
+
+    it('treats "Yes, I\'m good with that" as a YES, not the I\'m-good refusal idiom (codex round-9)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: "Yes, I'm good with that",
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('we got your YES');
+    });
+
     it('honors an opt-out typed with an iPhone smart apostrophe (codex round-8)', async () => {
       const session = pendingSession();
       mockGetSessionIdForPhone.mockReturnValue('sess-1');
