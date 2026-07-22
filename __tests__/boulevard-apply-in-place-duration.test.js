@@ -216,17 +216,28 @@ describe('Fix A: in-place duration upgrade (no service swap, no add/remove, no c
     expect(result.updatedAppointmentId).toBe('appt-1');
   });
 
-  it('pins the target tier finishDuration on setDurations so the upgraded block matches a native booking (50 -> 60-min block, not 65)', async () => {
-    // Boulevard keeps the SOURCE service's own cleanup buffer on an in-place
-    // setDurations (live-proven 2026-07-16: 30-min line upgraded to 50 produced a
-    // 65-min block, buffer still the source's 15). Owner decision 2026-07-21: the
-    // upgraded block must equal a natively booked 50-min facial's 60 minutes, so
-    // the apply passes finishDuration = the TARGET tier's buffer (10) explicitly.
+  it('pins the NATIVE 50-min segment shape on setDurations (postStaffDuration 10, finishDuration 0) so the upgraded block is 60, not 65 or 75', async () => {
+    // The source tier's cleanup buffer lives in postStaffDuration, NOT
+    // finishDuration (live-proven 2026-07-22: every native line at Flatiron
+    // carries finishDuration 0 with the buffer in postStaffDuration; a native
+    // 30 is 30+15=45, a native 50 is 50+10=60). The prior finishDuration:10
+    // pin left the source's postStaffDuration 15 in place and ADDED a second
+    // buffer segment: 50+15+10 = a 75-min block (live-proven on appointment
+    // 7693741a). The apply must reproduce the native 50-min shape exactly:
+    // duration 50, postStaffDuration 10 (target tier buffer), finishDuration 0,
+    // postClientDuration 0.
     process.env = env(); global.fetch = buildFetch({ durationWarnings: [] });
     const result = await runReverify();
     expect(result.success).toBe(true);
     expect(setDurationsInputs).toHaveLength(1);
-    expect(setDurationsInputs[0]).toMatchObject({ bookingId: 'bk-1', bookingServiceId: 'bs-base', duration: 50, finishDuration: 10 });
+    expect(setDurationsInputs[0]).toMatchObject({
+      bookingId: 'bk-1',
+      bookingServiceId: 'bs-base',
+      duration: 50,
+      finishDuration: 0,
+      postStaffDuration: 10,
+      postClientDuration: 0,
+    });
   });
 
   it('PROCEEDS past a self-overlap STAFF_DOUBLE_BOOKED when the staff window is clear (commits in place, same appt id)', async () => {

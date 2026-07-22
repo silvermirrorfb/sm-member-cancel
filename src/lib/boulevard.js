@@ -3937,16 +3937,23 @@ async function applyDurationUpgradeViaBooking(apiUrl, headers, appointmentContex
         bookingId,
         bookingServiceId: baseBookingServiceId,
         duration: targetDuration,
-        // Pin the TARGET tier's cleanup buffer. Without this Boulevard keeps the
-        // SOURCE service's own finishDuration on the in-place edit (live-proven
-        // 2026-07-16 and again 2026-07-21: a 30-min line, buffer 15, upgraded via
-        // setDurations(50) produced a 65-min block), so an upgraded 50 blocked 5
-        // minutes longer than a natively booked 50 (block 60 = 50 + 10). Owner
-        // decision 2026-07-21: the upgraded block must match the native booking.
+        // Reproduce the NATIVE target-tier segment shape exactly. The source
+        // tier's cleanup buffer lives in postStaffDuration, NOT finishDuration:
+        // live-proven 2026-07-22 at Flatiron, every native line has
+        // finishDuration 0 with the buffer in postStaffDuration (native 30 =
+        // 30+15=45 block, native 50 = 50+10=60 block). Boulevard preserves any
+        // segment this input omits, so the prior finishDuration-only pin left
+        // the source's postStaffDuration 15 in place and ADDED a second buffer
+        // segment (live-proven 2026-07-22 on appointment 7693741a: 50+15+10 =
+        // a 75-min block; the 2026-07-21 no-pin run kept the 15 for 65). Owner
+        // decision 2026-07-21 stands: the upgraded block must equal a natively
+        // booked target line, so set ALL buffer segments explicitly.
         // The eligibility delta (20) and the collision window (start+65) both
         // still assume the OLD larger footprint, so they over-require/over-cover;
         // safe direction, retune is a separate follow-up.
-        finishDuration: prepBufferMinutesForDuration(targetDuration),
+        postStaffDuration: prepBufferMinutesForDuration(targetDuration),
+        finishDuration: 0,
+        postClientDuration: 0,
       },
     },
     'bookingServiceSetDurations',
