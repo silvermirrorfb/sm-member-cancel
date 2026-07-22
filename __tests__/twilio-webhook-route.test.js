@@ -1711,6 +1711,52 @@ describe('twilio webhook route', () => {
       expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
     });
 
+    it('never unsubscribes on appointment-context or negated phrasings (codex round-6)', async () => {
+      // "Remove me from tomorrow's appointment" and "Take me off the
+      // waitlist" are service requests, and "I don't want to unsubscribe" is
+      // the opposite of an opt-out. None may touch consent state.
+      const phrasings = [
+        "Remove me from tomorrow's appointment",
+        'Take me off the waitlist',
+        "I don't want to unsubscribe",
+      ];
+      for (const bodyText of phrasings) {
+        vi.clearAllMocks();
+        mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0, limit: 120, remaining: 119, backend: 'memory' });
+        mockBuildRateLimitHeaders.mockReturnValue({});
+        mockGetClientIP.mockReturnValue('127.0.0.1');
+        mockSaveSession.mockImplementation(async (s) => s);
+        mockGetReplyForMessageSid.mockReturnValue(null);
+        mockIsValidTwilioSignature.mockReturnValue(true);
+        mockNormalizePhone.mockImplementation(value => String(value || ''));
+        mockBuildTwimlMessage.mockImplementation(t => `<Response><Message>${t}</Message></Response>`);
+        mockGetAllActiveSessions.mockResolvedValue([]);
+        mockPostChatMessage.mockResolvedValue(
+          new Response(JSON.stringify({ message: 'Handled in chat' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+        mockParseTwilioFormBody.mockReturnValue({
+          From: '+12134401333',
+          Body: bodyText,
+          MessageSid: 'SM-intent-1',
+        });
+        const session = pendingSession();
+        mockGetSessionIdForPhone.mockReturnValue('sess-1');
+        mockGetSession.mockReturnValue(session);
+
+        const res = await POST(requestWith());
+        const text = await res.text();
+        await flushDeferred();
+
+        expect(res.status).toBe(200);
+        expect(text).not.toContain('unsubscribed');
+        expect(mockAddToStopSet).not.toHaveBeenCalled();
+        expect(mockUnsubscribeKlaviyoSms).not.toHaveBeenCalled();
+      }
+    });
+
     it('treats an ambiguous bare "please stop" as a decline, not an unsubscribe', async () => {
       // Without an object ("texting", "messaging") the intent is ambiguous,
       // so it declines the offer and leaves consent state alone; the member

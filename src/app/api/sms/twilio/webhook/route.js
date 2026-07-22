@@ -155,8 +155,13 @@ const OPT_OUT_PHRASES = /\b(stop|unsubscribe|do not text|don'?t text)\b/i;
 // (codex round-5 P1: an explicit revocation must be honored in any reasonable
 // phrasing). Deliberately tighter than OPT_OUT_PHRASES: a bare "stop" inside
 // a sentence ("stop by the front desk") must never unsubscribe anyone, so a
-// stop verb only counts here with a messaging object.
-const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging|sending|contacting)\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s*out\b|\btake me off\b|\bremove me\b/i;
+// stop verb only counts with a messaging object, and take-off/remove
+// phrasings only count with a list or text object ("take me off the
+// waitlist" and "remove me from tomorrow's appointment" are service
+// requests, codex round-6). Negated consent statements ("I don't want to
+// unsubscribe") are excluded by OPT_OUT_NEGATED below.
+const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging|sending|contacting)\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s+(?:me\s+)?out\b|\btake me off\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b|\bremove me from\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b/i;
+const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never|no)\s+(?:want\s+to\s+|wanna\s+)?(?:unsubscribe|opt\s+(?:me\s+)?out)\b/i;
 
 function isAffirmative(text) {
   return YES_KEYWORDS.test(String(text || '').toLowerCase());
@@ -769,7 +774,7 @@ export async function POST(request) {
     // words stay excluded so ordinary sentences containing "cancel" do not
     // trigger the opt-out branch.
     const optOutBody = body.replace(/[\s.!?]+$/, '');
-    if (STOP_KEYWORDS.test(optOutBody) || OPT_OUT_REQUEST.test(body)) {
+    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(body) && !OPT_OUT_NEGATED.test(body))) {
       console.log(`[sms-webhook] STOP received from ${maskPhoneDigits(from)}, opting out`);
 
       // STOP set FIRST, in its own try/catch: this is the authoritative
