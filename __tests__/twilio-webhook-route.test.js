@@ -22,6 +22,7 @@ const mockReverifyAndApplyUpgradeForProfile = vi.fn();
 const mockLogSupportIncident = vi.fn();
 const mockNotifyUpgradeIncidentOnce = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
+const mockSendTwilioSms = vi.fn();
 const originalEnv = process.env;
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -50,6 +51,8 @@ vi.mock('../src/lib/twilio.js', () => ({
   buildTwimlMessage: (...args) => mockBuildTwimlMessage(...args),
   isValidTwilioSignature: (...args) => mockIsValidTwilioSignature(...args),
   parseTwilioFormBody: (...args) => mockParseTwilioFormBody(...args),
+  sendTwilioSms: (...args) => mockSendTwilioSms(...args),
+  trimSmsBodyShort: (text) => text,
 }));
 
 vi.mock('../src/app/api/chat/message/route.js', () => ({
@@ -125,6 +128,7 @@ describe('twilio webhook route', () => {
     });
     mockNotifyUpgradeIncidentOnce.mockReset().mockResolvedValue({ sent: true, deduped: false });
     mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
+    mockSendTwilioSms.mockResolvedValue({ sid: 'SM-followup-1' });
   });
 
   afterEach(() => {
@@ -422,19 +426,21 @@ describe('twilio webhook route', () => {
     await flushDeferred();
 
     expect(res.status).toBe(200);
-    // PR-B: the immediate reply is the deterministic manual-confirm; an apply
-    // success is conveyed by a follow-up SMS once the booking-edit apply is on.
+    // The immediate reply stays the deterministic manual-confirm; the apply
+    // success is conveyed by the result-specific follow-up SMS (2026-07-22),
+    // logged as a second outbound row.
     expect(text).toContain('team will confirm');
     expect(text).not.toContain("You're all set");
     const outboundCalls = mockLogSmsChatMessages.mock.calls
       .flatMap(call => call[0])
       .filter(row => row && row.direction === 'outbound');
-    expect(outboundCalls).toHaveLength(1);
+    expect(outboundCalls).toHaveLength(2);
     expect(outboundCalls[0]).toMatchObject({
       direction: 'outbound',
       outcome: 'upgrade_confirmed',
     });
     expect(outboundCalls[0].content).toContain('team will confirm');
+    expect(outboundCalls[1].content).toContain("You're all set");
   });
 
   it('does not claim success and queues follow-up when the upgrade cannot be verified', async () => {
@@ -572,15 +578,17 @@ describe('twilio webhook route', () => {
     await flushDeferred();
 
     expect(res.status).toBe(200);
-    // PR-B: the immediate reply is the deterministic manual-confirm; an apply
-    // success is conveyed by a follow-up SMS once the booking-edit apply is on.
+    // The immediate reply stays the deterministic manual-confirm; the apply
+    // success is conveyed by the result-specific follow-up SMS (2026-07-22),
+    // logged as a second outbound row.
     expect(text).toContain('team will confirm');
     expect(text).not.toContain("You're all set");
     const outboundCalls = mockLogSmsChatMessages.mock.calls
       .flatMap(call => call[0])
       .filter(row => row && row.direction === 'outbound');
-    expect(outboundCalls).toHaveLength(1);
+    expect(outboundCalls).toHaveLength(2);
     expect(outboundCalls[0]).toMatchObject({ direction: 'outbound', outcome: 'upgrade_confirmed' });
+    expect(outboundCalls[1].content).toContain("You're all set");
   });
 
   it('returns approved manual confirmation copy when YES has no eligible opportunity', async () => {
@@ -1401,5 +1409,210 @@ describe('twilio webhook route', () => {
     expect(text).toContain('keep your appointment as-is');
     expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
     expect(session.pendingUpgradeOffer).toBeNull();
+  });
+
+  // Outcome-truth follow-up: the instant TwiML reply goes out before the deferred
+  // apply, so a COMPLETED apply (bookingComplete success) must be announced by a
+  // result-specific follow-up SMS from the deferred worker. A non-applied YES
+  // keeps the manual-confirm string as the last word and sends NOTHING else.
+  describe('applied-outcome follow-up SMS', () => {
+    function yesRequest() {
+      return new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+        method: 'POST',
+        headers: { 'x-twilio-signature': 'sig' },
+        body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+      });
+    }
+    function sessionWith(offer) {
+      return {
+        id: 'sess-1',
+        status: 'active',
+        smsInboundCount: 0,
+        memberProfile: { phone: '+12134401333', name: 'Matt Maroone', clientId: 'client-1' },
+        pendingUpgradeOffer: { expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), ...offer },
+      };
+    }
+
+    it('sends the duration success copy AFTER the apply reports success, instant reply stays manual-confirm', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      // The instant reply cannot know the outcome and stays the manual-confirm ack.
+      expect(text).toContain('Our team will confirm before your appointment.');
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      expect(mockSendTwilioSms.mock.calls[0][0]).toMatchObject({
+        to: '+12134401333',
+        body: "You're all set, your facial is now 50 minutes, $169 total. See you soon.",
+      });
+    });
+
+    it('sends the add-on success copy with the MEMBER price for a known member', async () => {
+      const session = sessionWith({
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Neck Firming',
+        isMember: true,
+        pricing: { memberPrice: 20, walkinPrice: 25 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied_addon_booking_from_appointment' });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      expect(mockSendTwilioSms.mock.calls[0][0]).toMatchObject({
+        to: '+12134401333',
+        body: "You're all set, Neck Firming is added to today's facial, $20 total. See you soon.",
+      });
+    });
+
+    it('sends the add-on success copy with the WALK-IN price for a known non-member', async () => {
+      const session = sessionWith({
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Neck Firming',
+        isMember: false,
+        pricing: { memberPrice: 20, walkinPrice: 25 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied_addon_booking_from_appointment' });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      expect(mockSendTwilioSms.mock.calls[0][0].body).toBe("You're all set, Neck Firming is added to today's facial, $25 total. See you soon.");
+    });
+
+    it('sends NO follow-up when the apply fails: the manual-confirm stays the last word', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'duration_booking_set_durations_warning_block' });
+
+      const res = await POST(yesRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(text).toContain('Our team will confirm before your appointment.');
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
+    it('sends NO follow-up when the mutation kill switch is off', async () => {
+      process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
+      const session = sessionWith({
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Neck Firming',
+        isMember: false,
+        pricing: { memberPrice: 20, walkinPrice: 25 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+
+      const res = await POST(yesRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(text).toContain('Our team will confirm before your appointment.');
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
+    it('sends NO follow-up when the member cannot be resolved after YES', async () => {
+      const session = {
+        id: 'sess-1',
+        status: 'active',
+        smsInboundCount: 0,
+        pendingUpgradeOffer: {
+          offerKind: 'duration',
+          appointmentId: 'appt-1',
+          targetDurationMinutes: 50,
+          totalDollars: 169,
+          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        },
+      };
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockLookupMember.mockResolvedValue(null);
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
+    it('never says "your facial is now 50 minutes" on any path where the apply did not succeed', async () => {
+      const failures = [
+        { success: false, reason: 'no_longer_available' },
+        { success: false, reason: 'upgrade_booking_failed' },
+        { success: false, reason: 'duration_booking_staff_window_not_clear' },
+      ];
+      for (const result of failures) {
+        vi.clearAllMocks();
+        mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0, limit: 120, remaining: 119, backend: 'memory' });
+        mockBuildRateLimitHeaders.mockReturnValue({});
+        mockGetClientIP.mockReturnValue('127.0.0.1');
+        mockSaveSession.mockImplementation(async (s) => s);
+        mockGetReplyForMessageSid.mockReturnValue(null);
+        mockIsValidTwilioSignature.mockReturnValue(true);
+        mockNormalizePhone.mockImplementation(value => String(value || ''));
+        mockBuildTwimlMessage.mockImplementation(t => `<Response><Message>${t}</Message></Response>`);
+        mockParseTwilioFormBody.mockReturnValue({ From: '+12134401333', Body: 'Yes', MessageSid: 'SM-in-1' });
+        mockLogSupportIncident.mockResolvedValue({ email: { sent: true }, sheet: { logged: true } });
+        mockNotifyUpgradeIncidentOnce.mockResolvedValue({ sent: true, deduped: false });
+        mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
+        mockSendTwilioSms.mockResolvedValue({ sid: 'SM-followup-1' });
+        mockGetAllActiveSessions.mockResolvedValue([]);
+        const session = sessionWith({
+          offerKind: 'duration',
+          appointmentId: 'appt-1',
+          targetDurationMinutes: 50,
+          totalDollars: 169,
+        });
+        mockGetSessionIdForPhone.mockReturnValue('sess-1');
+        mockGetSession.mockReturnValue(session);
+        mockReverifyAndApplyUpgradeForProfile.mockResolvedValue(result);
+
+        const res = await POST(yesRequest());
+        const text = await res.text();
+        await flushDeferred();
+
+        expect(text).not.toContain('your facial is now 50 minutes');
+        const sentBodies = mockSendTwilioSms.mock.calls.map(call => String(call[0]?.body || ''));
+        expect(sentBodies.join(' ')).not.toContain('your facial is now 50 minutes');
+        expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      }
+    });
   });
 });

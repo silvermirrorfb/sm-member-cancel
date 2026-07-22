@@ -17,6 +17,8 @@ import {
   buildTwimlMessage,
   isValidTwilioSignature,
   parseTwilioFormBody,
+  sendTwilioSms,
+  trimSmsBodyShort,
 } from '../../../../../lib/twilio';
 import {
   buildSmsUpgradePendingReply,
@@ -242,6 +244,46 @@ function buildPendingOfferFinalizeReply(offer) {
     return `Thanks, we got your YES. ${pricingText} Our team will confirm before your appointment.`;
   }
   return 'Thanks for replying YES. We received your upgrade request and our team will confirm it before your appointment.';
+}
+
+// Result-specific follow-up for a COMPLETED apply (reverifyAndApplyUpgradeForProfile
+// returns success only after bookingComplete plus verification). Sent from the
+// deferred worker because the instant TwiML reply goes out before the outcome
+// exists (Twilio's reply window is seconds, the apply can take minutes). Price is
+// pulled from the SAME offer context the apply used, honoring the member rules:
+// a KNOWN member gets the member figure, a KNOWN non-member the walk-in figure,
+// unknown membership the figure that was quoted at offer time. When no figure is
+// resolvable the price clause is omitted, never guessed.
+function buildAppliedFollowupSms(offer) {
+  const offerKind = String(offer?.offerKind || 'duration').toLowerCase();
+  if (offerKind === 'addon') {
+    const addOnName = getAllowedAddonDisplayName(offer?.addOnName) || 'your add-on';
+    const memberPrice = Number(offer?.pricing?.memberPrice);
+    const walkinPrice = Number(offer?.pricing?.walkinPrice);
+    const offeredPrice = Number(offer?.pricing?.offeredPrice);
+    let price = null;
+    if (offer?.isMember === true && Number.isFinite(memberPrice) && memberPrice > 0) {
+      price = memberPrice;
+    } else if (offer?.isMember === false && Number.isFinite(walkinPrice) && walkinPrice > 0) {
+      price = walkinPrice;
+    } else if (Number.isFinite(offeredPrice) && offeredPrice > 0) {
+      price = offeredPrice;
+    } else if (Number.isFinite(walkinPrice) && walkinPrice > 0) {
+      price = walkinPrice;
+    }
+    if (price != null) {
+      return `You're all set, ${addOnName} is added to today's facial, $${price} total. See you soon.`;
+    }
+    return `You're all set, ${addOnName} is added to today's facial. See you soon.`;
+  }
+  const minutes = Number(offer?.targetDurationMinutes) > 0 ? Number(offer.targetDurationMinutes) : 50;
+  // totalDollars was resolved member-aware at offer time (resolveUpgradePrice) and
+  // is the exact figure the apply wrote to the booking line.
+  const total = Number(offer?.totalDollars ?? offer?.pricing?.offeredTotal ?? offer?.pricing?.walkinTotal);
+  if (Number.isFinite(total) && total > 0) {
+    return `You're all set, your facial is now ${minutes} minutes, $${total} total. See you soon.`;
+  }
+  return `You're all set, your facial is now ${minutes} minutes. See you soon.`;
 }
 
 function buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer = null) {
@@ -547,6 +589,26 @@ async function runDeferredIntentWork({
       upgradeResult,
     }));
   }
+
+  // Outcome truth (owner call 2026-07-22): a COMPLETED apply is announced with a
+  // result-specific follow-up SMS so the member is not left believing a human
+  // still has to finish it. STRICTLY success-gated: every non-applied path
+  // (mutation disabled, member unresolvable, reverify refusal, warning block,
+  // mutation failure) returns earlier or lands here with success false and sends
+  // nothing, leaving the manual-confirm ack as the last word. A failed follow-up
+  // send is swallowed: the member still holds the safe manual-confirm, and the
+  // booking itself is already correct.
+  let followupText = null;
+  if (upgradeResult?.success === true) {
+    followupText = buildAppliedFollowupSms(offerForLog);
+    try {
+      await sendTwilioSms({ to: from, body: followupText, trimBody: trimSmsBodyShort });
+    } catch (err) {
+      console.error('[sms-webhook] applied follow-up send failed:', err?.message || err);
+      followupText = null;
+    }
+  }
+
   await logUpgradeReplyOutbound({
     sessionId,
     from,
@@ -555,6 +617,16 @@ async function runDeferredIntentWork({
     upgradeResult,
     content: sentReplyText,
   });
+  if (followupText) {
+    await logUpgradeReplyOutbound({
+      sessionId,
+      from,
+      activeSession,
+      offer: offerForLog,
+      upgradeResult,
+      content: followupText,
+    });
+  }
 }
 
 export async function POST(request) {
