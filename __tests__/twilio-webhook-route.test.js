@@ -1501,9 +1501,7 @@ describe('twilio webhook route', () => {
 
     it('records the STOP set even when the registry scan hangs (write is not queued behind it)', async () => {
       // A scan that never settles must not delay the authoritative STOP
-      // write. The handler is still awaiting the hung scan here, so the POST
-      // promise is deliberately left unsettled; the assertion is that the
-      // STOP write already landed before the scan.
+      // write: the write lands before the scan starts.
       let scanStarted = false;
       mockRemoveMemberByPhone.mockImplementation(() => new Promise(() => { scanStarted = true; }));
 
@@ -1512,6 +1510,81 @@ describe('twilio webhook route', () => {
 
       expect(scanStarted).toBe(true);
       expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+    });
+
+    it('returns the unsubscribe TwiML even when the registry scan hangs (scan is off the reply path)', async () => {
+      // Gauntlet 2026-07-22 (codex adversarial P1 + performance review): the
+      // O(N) registry scan must not be awaited on the synchronous reply path,
+      // or a slow Redis holds the unsubscribe confirmation past Twilio's
+      // reply window and Twilio retries the whole webhook.
+      mockRemoveMemberByPhone.mockImplementation(() => new Promise(() => {}));
+
+      const res = await POST(stopRequest());
+      const text = await res.text();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+    });
+
+    it('queues a support incident when the STOP write cannot be confirmed (no silent unrecorded opt-out)', async () => {
+      // addToStopSet swallows Redis errors internally and returns false. The
+      // member is still told they are unsubscribed, so an unconfirmed write
+      // must become human-visible instead of a warn line.
+      mockAddToStopSet.mockResolvedValue(false);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(stopRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+        issue_type: 'sms_stop_record_failed',
+        phone: '+12134401333',
+      });
+      errorSpy.mockRestore();
+    });
+
+    it('queues a support incident when the STOP write throws', async () => {
+      mockAddToStopSet.mockRejectedValue(new Error('redis down'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const res = await POST(stopRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(mockLogSupportIncident.mock.calls[0][0]).toMatchObject({
+        issue_type: 'sms_stop_record_failed',
+      });
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('treats STOP with trailing punctuation as an opt-out (never falls through to the chat bot)', async () => {
+      // Security review 2026-07-22: "STOP." previously missed the exact-match
+      // keyword regex, fell through to the Claude chat route, and left the
+      // member with no suppression record anywhere.
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'STOP.',
+        MessageSid: 'SM-stop-2',
+      });
+
+      const res = await POST(stopRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+      expect(mockPostChatMessage).not.toHaveBeenCalled();
     });
   });
 

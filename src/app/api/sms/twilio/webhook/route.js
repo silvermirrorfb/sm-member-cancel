@@ -754,33 +754,60 @@ export async function POST(request) {
       );
     }
 
-    if (STOP_KEYWORDS.test(body)) {
+    // Trailing punctuation tolerance: "STOP." or "Stop!" is an opt-out
+    // attempt and must never fall through to the chat bot with no
+    // suppression record anywhere (security review 2026-07-22). Leading
+    // words stay excluded so ordinary sentences containing "cancel" do not
+    // trigger the opt-out branch.
+    const optOutBody = body.replace(/[\s.!?]+$/, '');
+    if (STOP_KEYWORDS.test(optOutBody)) {
       console.log(`[sms-webhook] STOP received from ${from} — opting out`);
 
       // STOP set FIRST, in its own try/catch: this is the authoritative
       // suppression write that blocks outbound sends immediately regardless
       // of Klaviyo propagation timing, and it must land even if the slow O(N)
-      // registry scan below throws or hangs.
+      // registry scan below throws or hangs. The write is confirmation
+      // checked: addToStopSet swallows Redis errors internally and returns
+      // false, and the member is about to be told they are unsubscribed, so
+      // an unconfirmed write queues a support incident instead of dying as a
+      // warn line (no silent unrecorded opt-out).
+      let stopRecorded = false;
       try {
         const registry = await import('../../../../../lib/sms-member-registry');
         if (typeof registry.addToStopSet === 'function') {
-          await registry.addToStopSet(from);
+          stopRecorded = (await registry.addToStopSet(from)) === true;
         }
       } catch (e) {
         console.warn('[sms-webhook] Could not add to stop-set:', e.message);
       }
+      if (!stopRecorded) {
+        console.error('[sms-webhook] STOP write could not be confirmed, queueing incident for manual suppression');
+        try {
+          await logSupportIncident({
+            date: new Date().toISOString(),
+            session_id: `stop-${Date.now()}`,
+            issue_type: 'sms_stop_record_failed',
+            phone: from,
+            user_message: 'Inbound STOP could not be recorded in the Redis stop-set. Manually verify suppression for this member in Klaviyo and Twilio before any further sends.',
+            reason: 'stop_set_write_unconfirmed',
+          });
+        } catch (e) {
+          console.error('[sms-webhook] STOP incident logging also failed:', e?.message || e);
+        }
+      }
 
-      // Registry cleanup SECOND, isolated: removing the member keeps the
-      // pre-appointment scan from re-queueing them, but it is best-effort
-      // hygiene and a failure here must never cost the STOP write above.
-      try {
+      // Registry cleanup DEFERRED and off the reply path: removing the member
+      // keeps the pre-appointment scan from re-queueing them, but it is
+      // best-effort hygiene over an O(N) Redis scan, and a slow or hung scan
+      // must never hold the unsubscribe confirmation past Twilio's reply
+      // window (gauntlet 2026-07-22: codex adversarial and performance review
+      // both flagged the inline await).
+      deferWork(async () => {
         const registry = await import('../../../../../lib/sms-member-registry');
         if (typeof registry.removeMemberByPhone === 'function') {
           await registry.removeMemberByPhone(from);
         }
-      } catch (e) {
-        console.warn('[sms-webhook] Could not remove from registry:', e.message);
-      }
+      });
 
       // Propagate unsubscribe to Klaviyo so pre-appointment Klaviyo gate
       // will also block future outbound sends. Without this, a STOP only
@@ -816,7 +843,7 @@ export async function POST(request) {
       });
     }
 
-    if (START_KEYWORDS.test(body)) {
+    if (START_KEYWORDS.test(optOutBody)) {
       console.log(`[sms-webhook] START received from ${from}, removing from stop set`);
       try {
         const { removeFromStopSet } = await import('../../../../../lib/sms-member-registry');
