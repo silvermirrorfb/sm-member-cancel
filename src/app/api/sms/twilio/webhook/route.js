@@ -31,7 +31,7 @@ import {
   reverifyAndApplyUpgradeForProfile,
   summarizeBoulevardApplyError,
 } from '../../../../../lib/boulevard';
-import { checkStopSetStrict, claimAppliedFollowupSend, lookupClientIdByPhoneFromIndex, maskPhoneDigits, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
+import { APPLY_INFLIGHT_CEILING_SECONDS, buildApplyClaimKey, checkStopSetStrict, claimAppliedFollowupSend, claimApplyMutation, inspectApplyClaim, lookupClientIdByPhoneFromIndex, maskPhoneDigits, normalizePhoneForIndex, settleApplyClaim } from '../../../../../lib/sms-member-registry';
 import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
@@ -238,6 +238,7 @@ function isNegative(text) {
 function isUpgradeMutationEnabled() {
   return process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION === 'true';
 }
+
 
 function isPendingOfferExpired(offer) {
   if (!offer?.expiresAt) return true;
@@ -641,11 +642,11 @@ async function runDeferredIntentWork({
   }
 
   // Apply against the exact pending offer when we have one; otherwise re-derive.
-  let upgradeResult;
   let offerForLog;
+  let offerForApply;
   if (hasPendingOffer) {
-    upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, pendingOffer);
     offerForLog = pendingOffer;
+    offerForApply = pendingOffer;
   } else {
     const opportunity = await evaluateUpgradeOpportunityForProfile(profile);
     if (!opportunity?.eligible || !isSmsDurationOfferAllowed(opportunity)) {
@@ -662,11 +663,110 @@ async function runDeferredIntentWork({
       }));
       return;
     }
-    upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, {
+    offerForLog = opportunity;
+    offerForApply = {
       appointmentId: opportunity.appointmentId || null,
       targetDurationMinutes: opportunity.targetDurationMinutes || null,
-    });
-    offerForLog = opportunity;
+    };
+  }
+
+  // Durable apply claim BEFORE the Boulevard write (gauntlet 2026-07-22,
+  // codex adversarial P1): two racing YES deliveries can both reach this
+  // point holding the same offer (separate instances, each with its own
+  // session copy loaded before the other's pending-offer clear), and the SMS
+  // follow-up claim below fires only AFTER the mutation. Whoever claims the
+  // (appointment, target change) key first performs the write. A held claim
+  // means another delivery already owns this exact change, so this one skips
+  // silently: the member already holds the safe ack, and the owning delivery
+  // produces the outcome, incident, and follow-up. An unavailable claim
+  // (Redis down) must NOT write either, because a concurrent duplicate
+  // cannot be ruled out; it queues a support incident so a human applies the
+  // change instead, keeping the "our team will confirm" promise honest.
+  const applyClaimKey = buildApplyClaimKey(offerForLog, from);
+  let applyClaim = 'unavailable';
+  try {
+    applyClaim = await claimApplyMutation(applyClaimKey);
+  } catch (err) {
+    console.error('[sms-webhook] apply claim threw, apply withheld:', maskPhoneDigits(err?.message || err));
+  }
+  if (applyClaim === 'held') {
+    // Held only proves the claim EXISTS, not that its owner survived to
+    // produce an outcome (a worker can die between SET NX and the Boulevard
+    // call). Inspect the claim state: settled, or pending inside the 300s
+    // maxDuration in-flight window, means the owning delivery finished or is
+    // still running, so skip silently. A pending claim OLDER than any
+    // possible in-flight apply is abandoned, and an unreadable state cannot
+    // rule that out: do not re-apply (Boulevard state unknown), escalate to
+    // a human instead.
+    let claimState = { state: 'unknown', ageSeconds: null };
+    try {
+      claimState = await inspectApplyClaim(applyClaimKey);
+    } catch (err) {
+      console.error('[sms-webhook] apply claim inspect threw:', maskPhoneDigits(err?.message || err));
+    }
+    const ownerAlive = claimState.state === 'settled'
+      || (claimState.state === 'pending'
+        && Number.isFinite(claimState.ageSeconds)
+        && claimState.ageSeconds <= APPLY_INFLIGHT_CEILING_SECONDS);
+    if (ownerAlive) {
+      console.log('[sms-webhook] apply skipped: this change is already claimed by another delivery');
+      await logUpgradeReplyOutbound({ sessionId, from, activeSession, offer: offerForLog, upgradeResult: null, content: sentReplyText });
+      return;
+    }
+    console.error('[sms-webhook] apply claim held but abandoned or unverifiable, incident queued');
+    await queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile,
+      pendingOffer,
+      opportunity: hasPendingOffer ? null : offerForLog,
+      upgradeResult: { success: false, reason: 'apply_claim_abandoned' },
+    }));
+    await logUpgradeReplyOutbound({ sessionId, from, activeSession, offer: offerForLog, upgradeResult: null, content: sentReplyText });
+    return;
+  }
+  if (applyClaim !== 'claimed') {
+    console.error('[sms-webhook] apply claim unavailable, apply withheld and incident queued');
+    await queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile,
+      pendingOffer,
+      opportunity: hasPendingOffer ? null : offerForLog,
+      upgradeResult: { success: false, reason: 'apply_claim_unavailable' },
+    }));
+    await logUpgradeReplyOutbound({ sessionId, from, activeSession, offer: offerForLog, upgradeResult: null, content: sentReplyText });
+    return;
+  }
+
+  // The apply itself is guarded: a throw after the claim would otherwise die
+  // in deferWork's backstop with the claim still pending, no incident, and
+  // any retry inside the TTL silently skipped as held. Catch it, queue the
+  // incident, settle the claim, and stop (testing review on this commit).
+  let upgradeResult;
+  try {
+    upgradeResult = await reverifyAndApplyUpgradeForProfile(profile, offerForApply);
+  } catch (err) {
+    // Incident FIRST, settle SECOND (codex crash-window P2): a worker dying
+    // after settle but before the incident write would leave a redelivery
+    // reading settled, skipping as a duplicate, and no human ever told.
+    console.error('[sms-webhook] apply threw after claim, incident queued:', maskPhoneDigits(err?.message || err));
+    await queueSupportIncident(buildUpgradeSupportIncident({
+      sessionId,
+      from,
+      incomingText: intentText,
+      profile,
+      pendingOffer,
+      opportunity: hasPendingOffer ? null : offerForLog,
+      upgradeResult: { success: false, reason: 'apply_threw_after_claim' },
+    }));
+    try {
+      await settleApplyClaim(applyClaimKey);
+    } catch {}
+    await logUpgradeReplyOutbound({ sessionId, from, activeSession, offer: offerForLog, upgradeResult: null, content: sentReplyText });
+    return;
   }
 
   if (shouldQueueUpgradeFollowupIncident(upgradeResult)) {
@@ -679,6 +779,16 @@ async function runDeferredIntentWork({
       opportunity: upgradeResult?.opportunity || null,
       upgradeResult,
     }));
+  }
+
+  // Mark the claim settled only AFTER the outcome's escalation is durably
+  // queued (codex crash-window P2): settling first would let a worker death
+  // in the gap hide a failed apply behind a settled claim with no incident.
+  // Settle failure is non-fatal; the fallback is one extra incident later.
+  try {
+    await settleApplyClaim(applyClaimKey);
+  } catch (err) {
+    console.warn('[sms-webhook] apply claim settle failed:', maskPhoneDigits(err?.message || err));
   }
 
   // Audit row FIRST (round-2 fix): the ack row is written before any Twilio

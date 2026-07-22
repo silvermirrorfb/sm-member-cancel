@@ -51,6 +51,20 @@ vi.mock('../src/lib/upgrade-pricing.js', () => ({
   resolveUpgradePrice: (...args) => mockResolveUpgradePrice(...args),
 }));
 
+// Passthrough registry mock: the chat route now takes the durable apply
+// claim before the inline Boulevard write; these flow tests own the claim so
+// the guarded apply proceeds (its own behavior is pinned in
+// chat-message-route.test.js).
+vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    claimApplyMutation: vi.fn(async () => 'claimed'),
+    inspectApplyClaim: vi.fn(async () => ({ state: 'pending', ageSeconds: 1 })),
+    settleApplyClaim: vi.fn(async () => true),
+  };
+});
+
 vi.mock('../src/lib/notify.js', () => ({
   logChatMessages: vi.fn(async () => ({ logged: true })),
   logSupportIncident: vi.fn(async () => ({ logged: true })),

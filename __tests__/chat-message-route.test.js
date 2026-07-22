@@ -13,7 +13,25 @@ const mockSendMessage = vi.fn();
 const mockLogChatMessages = vi.fn();
 const mockEvaluateUpgradeOpportunityForProfile = vi.fn();
 const mockResolveUpgradePrice = vi.fn();
+const mockChatReverify = vi.fn();
+const mockChatLogSupportIncident = vi.fn();
+const mockChatClaimApplyMutation = vi.fn();
+const mockChatInspectApplyClaim = vi.fn();
+const mockChatSettleApplyClaim = vi.fn();
 const originalEnv = process.env;
+
+// Passthrough registry mock: only the apply-claim trio is overridden so the
+// chat route's Boulevard-write guard is controllable; buildApplyClaimKey and
+// maskPhoneDigits stay real.
+vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    claimApplyMutation: (...args) => mockChatClaimApplyMutation(...args),
+    inspectApplyClaim: (...args) => mockChatInspectApplyClaim(...args),
+    settleApplyClaim: (...args) => mockChatSettleApplyClaim(...args),
+  };
+});
 
 vi.mock('../src/lib/sessions.js', () => ({
   getSession: (...args) => mockGetSession(...args),
@@ -46,7 +64,7 @@ vi.mock('../src/lib/boulevard.js', () => ({
   formatProfileForPrompt: vi.fn(),
   verifyMemberIdentity: vi.fn(),
   evaluateUpgradeOpportunityForProfile: (...args) => mockEvaluateUpgradeOpportunityForProfile(...args),
-  reverifyAndApplyUpgradeForProfile: vi.fn(),
+  reverifyAndApplyUpgradeForProfile: (...args) => mockChatReverify(...args),
 }));
 
 vi.mock('../src/lib/upgrade-pricing.js', () => ({
@@ -55,7 +73,7 @@ vi.mock('../src/lib/upgrade-pricing.js', () => ({
 
 vi.mock('../src/lib/notify.js', () => ({
   logChatMessages: (...args) => mockLogChatMessages(...args),
-  logSupportIncident: vi.fn(),
+  logSupportIncident: (...args) => mockChatLogSupportIncident(...args),
 }));
 
 vi.mock('../src/lib/sms-sessions.js', () => ({
@@ -495,5 +513,182 @@ describe('chat message route rate-limit headers', () => {
     expect(res.status).toBe(200);
     expect(body.pendingUpgradeOffer).toBeUndefined();
     expect(session.pendingUpgradeOffer).toBeNull();
+  });
+});
+
+describe('chat apply site: durable claim on the Boulevard write (gauntlet 2026-07-22)', () => {
+  function armedSession() {
+    return {
+      id: 'sess-c1',
+      status: 'active',
+      createdAt: new Date('2026-07-22T00:00:00.000Z').toISOString(),
+      messages: [],
+      systemPrompt: 'Base system prompt.',
+      memberProfile: {
+        phone: '+12134401333',
+        fullName: 'Matt Maroone',
+        email: 'matt@example.com',
+      },
+      pendingUpgradeOffer: {
+        offerKind: 'duration',
+        appointmentId: 'appt-9',
+        targetDurationMinutes: 50,
+        deltaDollars: 50,
+        pricing: { walkinDelta: 50 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+  }
+  function yesReq() {
+    return new Request('http://localhost/api/chat/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'sess-c1', message: 'Yes', channel: 'sms' }),
+    });
+  }
+
+  beforeEach(() => {
+    process.env = { ...originalEnv, SMS_UPGRADE_STATUS: 'live' };
+    vi.clearAllMocks();
+    mockGetClientIP.mockReturnValue('203.0.113.21');
+    mockCheckRateLimit.mockResolvedValue({ allowed: true, limit: 30, remaining: 29, backend: 'memory', retryAfterMs: 0 });
+    mockBuildRateLimitHeaders.mockReturnValue({});
+    mockGetSystemPrompt.mockReturnValue('Base system prompt.');
+    mockSaveSession.mockImplementation(async (session) => session);
+    mockLogChatMessages.mockResolvedValue({ logged: true, count: 1 });
+    mockAddMessage.mockResolvedValue(undefined);
+    mockChatLogSupportIncident.mockResolvedValue({ email: { sent: true }, sheet: { logged: true } });
+    mockChatClaimApplyMutation.mockResolvedValue('claimed');
+    mockChatInspectApplyClaim.mockResolvedValue({ state: 'pending', ageSeconds: 1 });
+    mockChatSettleApplyClaim.mockResolvedValue(true);
+    mockChatReverify.mockResolvedValue({ success: true, reason: 'applied' });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    process.env = originalEnv;
+  });
+
+  it('takes the SAME durable claim BEFORE the inline Boulevard write, and settles after', async () => {
+    const session = armedSession();
+    mockGetSession.mockReturnValue(session);
+
+    const res = await POST(yesReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.upgradeHandled).toBe(true);
+    expect(mockChatClaimApplyMutation).toHaveBeenCalledWith('appt:appt-9:duration:50');
+    expect(mockChatClaimApplyMutation.mock.invocationCallOrder[0])
+      .toBeLessThan(mockChatReverify.mock.invocationCallOrder[0]);
+    expect(mockChatReverify.mock.invocationCallOrder[0])
+      .toBeLessThan(mockChatSettleApplyClaim.mock.invocationCallOrder[0]);
+  });
+
+  it('held claim with a live owner: NO mutation, manual-confirm reply, no incident', async () => {
+    const session = armedSession();
+    mockGetSession.mockReturnValue(session);
+    mockChatClaimApplyMutation.mockResolvedValue('held');
+    mockChatInspectApplyClaim.mockResolvedValue({ state: 'pending', ageSeconds: 5 });
+
+    const res = await POST(yesReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockChatReverify).not.toHaveBeenCalled();
+    expect(String(body.message)).toContain('team will confirm');
+    expect(mockChatLogSupportIncident).not.toHaveBeenCalled();
+    expect(session.pendingUpgradeOffer).toBeNull();
+  });
+
+  it('held claim ABANDONED: no mutation, incident queued, manual-confirm reply', async () => {
+    const session = armedSession();
+    mockGetSession.mockReturnValue(session);
+    mockChatClaimApplyMutation.mockResolvedValue('held');
+    mockChatInspectApplyClaim.mockResolvedValue({ state: 'pending', ageSeconds: 400 });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await POST(yesReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockChatReverify).not.toHaveBeenCalled();
+    expect(mockChatLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockChatLogSupportIncident.mock.calls[0][0]).toMatchObject({ reason: 'apply_claim_abandoned' });
+    expect(String(body.message)).toContain('team will confirm');
+    errorSpy.mockRestore();
+  });
+
+  it('apply THROWS after the claim: incident queued, claim settled, manual-confirm reply, phone masked (codex on this commit)', async () => {
+    const session = armedSession();
+    mockGetSession.mockReturnValue(session);
+    mockChatReverify.mockRejectedValue(new Error('boulevard 500 for +12134401333'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await POST(yesReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(String(body.message)).toContain('team will confirm');
+    expect(body.upgradeResult).toMatchObject({ success: false, reason: 'apply_threw_after_claim' });
+    expect(mockChatSettleApplyClaim).toHaveBeenCalledWith('appt:appt-9:duration:50');
+    expect(mockChatLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockChatLogSupportIncident.mock.calls[0][0]).toMatchObject({ reason: 'apply_threw_after_claim' });
+    const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+    expect(logged).not.toContain('12134401333');
+    errorSpy.mockRestore();
+  });
+
+  it('on a THROWN chat apply, queues the incident BEFORE settling the claim (codex crash-window P2)', async () => {
+    const session = armedSession();
+    mockGetSession.mockReturnValue(session);
+    mockChatReverify.mockRejectedValue(new Error('boulevard 500'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await POST(yesReq());
+    await res.json();
+
+    expect(mockChatLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockChatSettleApplyClaim).toHaveBeenCalledTimes(1);
+    expect(mockChatLogSupportIncident.mock.invocationCallOrder[0])
+      .toBeLessThan(mockChatSettleApplyClaim.mock.invocationCallOrder[0]);
+    errorSpy.mockRestore();
+  });
+
+  it('on a FAILED (non-throw) chat apply, queues an incident BEFORE settling (closure review)', async () => {
+    // The chat unavailable copy promises "our team will confirm", and the
+    // settle-on-failure now blocks a webhook self-heal retry behind the
+    // settled claim, so the failure must reach a human.
+    const session = armedSession();
+    mockGetSession.mockReturnValue(session);
+    mockChatReverify.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+
+    const res = await POST(yesReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.upgradeHandled).toBe(true);
+    expect(mockChatLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockChatLogSupportIncident.mock.calls[0][0]).toMatchObject({ reason: 'no_longer_available' });
+    expect(mockChatSettleApplyClaim).toHaveBeenCalledTimes(1);
+    expect(mockChatLogSupportIncident.mock.invocationCallOrder[0])
+      .toBeLessThan(mockChatSettleApplyClaim.mock.invocationCallOrder[0]);
+  });
+
+  it("claim 'unavailable': no mutation, incident queued, manual-confirm reply", async () => {
+    const session = armedSession();
+    mockGetSession.mockReturnValue(session);
+    mockChatClaimApplyMutation.mockResolvedValue('unavailable');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await POST(yesReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(mockChatReverify).not.toHaveBeenCalled();
+    expect(mockChatLogSupportIncident).toHaveBeenCalledTimes(1);
+    expect(mockChatLogSupportIncident.mock.calls[0][0]).toMatchObject({ reason: 'apply_claim_unavailable' });
+    expect(String(body.message)).toContain('team will confirm');
+    errorSpy.mockRestore();
   });
 });

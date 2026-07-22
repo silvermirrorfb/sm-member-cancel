@@ -27,6 +27,9 @@ const mockCheckStopSetStrict = vi.fn();
 const mockAddToStopSet = vi.fn();
 const mockRemoveMemberByPhone = vi.fn();
 const mockClaimAppliedFollowupSend = vi.fn();
+const mockClaimApplyMutation = vi.fn();
+const mockSettleApplyClaim = vi.fn();
+const mockInspectApplyClaim = vi.fn();
 const mockCheckKlaviyoSmsOptIn = vi.fn();
 const mockUnsubscribeKlaviyoSms = vi.fn();
 const originalEnv = process.env;
@@ -54,6 +57,9 @@ vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
     addToStopSet: (...args) => mockAddToStopSet(...args),
     removeMemberByPhone: (...args) => mockRemoveMemberByPhone(...args),
     claimAppliedFollowupSend: (...args) => mockClaimAppliedFollowupSend(...args),
+    claimApplyMutation: (...args) => mockClaimApplyMutation(...args),
+    settleApplyClaim: (...args) => mockSettleApplyClaim(...args),
+    inspectApplyClaim: (...args) => mockInspectApplyClaim(...args),
   };
 });
 
@@ -167,6 +173,9 @@ describe('twilio webhook route', () => {
     mockAddToStopSet.mockResolvedValue(true);
     mockRemoveMemberByPhone.mockResolvedValue(true);
     mockClaimAppliedFollowupSend.mockResolvedValue(true);
+    mockClaimApplyMutation.mockResolvedValue('claimed');
+    mockSettleApplyClaim.mockResolvedValue(true);
+    mockInspectApplyClaim.mockResolvedValue({ state: 'pending', ageSeconds: 1 });
   });
 
   afterEach(() => {
@@ -3062,6 +3071,341 @@ describe('twilio webhook route', () => {
         expect(sentBodies.join(' ')).not.toContain('your facial is now 50 minutes');
         expect(mockSendTwilioSms).not.toHaveBeenCalled();
       }
+    });
+  });
+
+  describe('apply-mutation claim (durable guard on the Boulevard write itself)', () => {
+    function yesReq() {
+      return new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+        method: 'POST',
+        headers: { 'x-twilio-signature': 'sig' },
+        body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+      });
+    }
+    function freshDurationSession() {
+      return {
+        id: 'sess-1',
+        status: 'active',
+        smsInboundCount: 0,
+        memberProfile: { phone: '+12134401333', name: 'Matt Maroone', clientId: 'client-1' },
+        pendingUpgradeOffer: {
+          offerKind: 'duration',
+          appointmentId: 'appt-1',
+          targetDurationMinutes: 50,
+          isMember: false,
+          deltaDollars: 50,
+          pricing: { walkinDelta: 50, walkinTotal: 169 },
+          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        },
+      };
+    }
+    function nxClaimFake() {
+      const held = new Set();
+      return async (key) => {
+        if (held.has(key)) return 'held';
+        held.add(key);
+        return 'claimed';
+      };
+    }
+
+    it('RACE: same YES on two instances -> exactly ONE Boulevard mutation, one confirmation (codex adversarial)', async () => {
+      // Each instance loads its own copy of the session, so both see the
+      // pending offer before either clears it. The apply is slow enough that
+      // both deferred workers overlap. Only the durable claim, taken BEFORE
+      // bookingComplete runs, can serialize them.
+      mockGetSession.mockImplementation(() => freshDurationSession());
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockClaimApplyMutation.mockImplementation(nxClaimFake());
+      mockReverifyAndApplyUpgradeForProfile.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 30));
+        return { success: true, reason: 'applied' };
+      });
+
+      const [res1, res2] = await Promise.all([POST(yesReq()), POST(yesReq())]);
+      await res1.text();
+      await res2.text();
+      // Deterministic drain: wait for the winning worker's confirmation to
+      // land instead of sleeping a fixed interval (CI-saturation safe).
+      const deadline = Date.now() + 5000;
+      while (mockSendTwilioSms.mock.calls.length < 1 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+      expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalledTimes(1);
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes the apply claim BEFORE the Boulevard write', async () => {
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockClaimApplyMutation).toHaveBeenCalledWith('appt:appt-1:duration:50');
+      expect(mockClaimApplyMutation.mock.invocationCallOrder[0])
+        .toBeLessThan(mockReverifyAndApplyUpgradeForProfile.mock.invocationCallOrder[0]);
+    });
+
+    it('second delivery with the claim held: NO mutation, safe ack, no error, no incident', async () => {
+      mockGetSession.mockImplementation(() => freshDurationSession());
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockClaimApplyMutation.mockImplementation(nxClaimFake());
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res1 = await POST(yesReq());
+      await res1.text();
+      await flushDeferred();
+      const res2 = await POST(yesReq());
+      const text2 = await res2.text();
+      await flushDeferred();
+
+      expect(res2.status).toBe(200);
+      expect(text2).toContain('Our team will confirm before your appointment.');
+      expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalledTimes(1);
+      expect(mockLogSupportIncident).not.toHaveBeenCalled();
+    });
+
+    it('a different change to the same appointment uses a different key and still applies', async () => {
+      mockClaimApplyMutation.mockImplementation(nxClaimFake());
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied_addon_booking_from_appointment' });
+      const addonSession = {
+        id: 'sess-1',
+        status: 'active',
+        smsInboundCount: 0,
+        memberProfile: { phone: '+12134401333', name: 'Matt Maroone', clientId: 'client-1' },
+        pendingUpgradeOffer: {
+          offerKind: 'addon',
+          appointmentId: 'appt-1',
+          addOnName: 'Neck Firming',
+          isMember: true,
+          pricing: { memberPrice: 20, walkinPrice: 25 },
+          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        },
+      };
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(addonSession);
+
+      const res1 = await POST(yesReq());
+      await res1.text();
+      await flushDeferred();
+
+      // Later: a duration YES on the SAME appointment.
+      const durationSession = freshDurationSession();
+      mockGetSession.mockReturnValue(durationSession);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res2 = await POST(yesReq());
+      await res2.text();
+      await flushDeferred();
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+      expect(mockReverifyAndApplyUpgradeForProfile).toHaveBeenCalledTimes(2);
+      expect(mockClaimApplyMutation).toHaveBeenCalledWith('appt:appt-1:addon:neck-firming');
+      expect(mockClaimApplyMutation).toHaveBeenCalledWith('appt:appt-1:duration:50');
+    });
+
+    it('settles the claim AFTER the apply produces an outcome', async () => {
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockSettleApplyClaim).toHaveBeenCalledWith('appt:appt-1:duration:50');
+      expect(mockReverifyAndApplyUpgradeForProfile.mock.invocationCallOrder[0])
+        .toBeLessThan(mockSettleApplyClaim.mock.invocationCallOrder[0]);
+    });
+
+    it('on a FAILED apply, queues the incident BEFORE settling the claim (codex crash-window P2)', async () => {
+      // If the worker dies between settle and the incident write, a
+      // redelivery sees settled and skips as a duplicate, leaving the
+      // unchanged booking with no escalation. The incident must be durably
+      // queued first; settle marks completion of the whole outcome.
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(mockSettleApplyClaim).toHaveBeenCalledTimes(1);
+      expect(mockLogSupportIncident.mock.invocationCallOrder[0])
+        .toBeLessThan(mockSettleApplyClaim.mock.invocationCallOrder[0]);
+    });
+
+    it('on a THROWN apply, queues the incident BEFORE settling the claim', async () => {
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockRejectedValue(new Error('boulevard 500'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(mockSettleApplyClaim).toHaveBeenCalledTimes(1);
+      expect(mockLogSupportIncident.mock.invocationCallOrder[0])
+        .toBeLessThan(mockSettleApplyClaim.mock.invocationCallOrder[0]);
+      errorSpy.mockRestore();
+    });
+
+    it('held claim ABANDONED (pending past the in-flight ceiling): no re-apply, incident queued (codex crash-window P1)', async () => {
+      // The claim owner died between SET NX and the Boulevard call. The
+      // racing delivery must not re-apply (Boulevard state unknown) and must
+      // not skip silently either: a human gets the incident.
+      mockClaimApplyMutation.mockResolvedValue('held');
+      mockInspectApplyClaim.mockResolvedValue({ state: 'pending', ageSeconds: 400 });
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(String(mockLogSupportIncident.mock.calls[0][0].user_message)).toContain('apply_claim_abandoned');
+      errorSpy.mockRestore();
+    });
+
+    it('held claim SETTLED: pure duplicate, silent skip, no incident', async () => {
+      mockClaimApplyMutation.mockResolvedValue('held');
+      mockInspectApplyClaim.mockResolvedValue({ state: 'settled', ageSeconds: 20 });
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(mockLogSupportIncident).not.toHaveBeenCalled();
+      logSpy.mockRestore();
+    });
+
+    it("claim 'unavailable' (Redis down): NO mutation, incident queued so a human applies", async () => {
+      mockClaimApplyMutation.mockResolvedValue('unavailable');
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesReq());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('Our team will confirm before your appointment.');
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(String(mockLogSupportIncident.mock.calls[0][0].user_message)).toContain('apply_claim_unavailable');
+      errorSpy.mockRestore();
+    });
+
+    it('claim REJECTS (route backstop): no mutation, incident queued, phone masked in logs', async () => {
+      mockClaimApplyMutation.mockRejectedValue(new Error('claim blew up for +12134401333'));
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(String(mockLogSupportIncident.mock.calls[0][0].user_message)).toContain('apply_claim_unavailable');
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).not.toContain('12134401333');
+      errorSpy.mockRestore();
+    });
+
+    it('apply THROWS after the claim: incident queued, claim settled, no follow-up, phone masked (testing review)', async () => {
+      const session = freshDurationSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockRejectedValue(new Error('boulevard 500 for +12134401333'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      expect(mockLogSupportIncident).toHaveBeenCalledTimes(1);
+      expect(String(mockLogSupportIncident.mock.calls[0][0].user_message)).toContain('apply_threw_after_claim');
+      expect(mockSettleApplyClaim).toHaveBeenCalledWith('appt:appt-1:duration:50');
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).not.toContain('12134401333');
+      errorSpy.mockRestore();
+    });
+
+    it('falls back to a phone-scoped key when the offer has no appointment id', async () => {
+      const session = freshDurationSession();
+      session.pendingUpgradeOffer.appointmentId = null;
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockClaimApplyMutation).toHaveBeenCalledWith('phone:2134401333:duration:50');
+    });
+
+    it('guards the no-pending re-derive path with the claim too, key from the opportunity', async () => {
+      const session = {
+        id: 'sess-1',
+        status: 'active',
+        smsInboundCount: 0,
+        memberProfile: { phone: '+12134401333', name: 'Matt Maroone', clientId: 'client-1' },
+      };
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+        eligible: true,
+        appointmentId: 'appt-2',
+        currentDurationMinutes: 30,
+        targetDurationMinutes: 50,
+        pricing: { walkinDelta: 50 },
+      });
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesReq());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockClaimApplyMutation).toHaveBeenCalledWith('appt:appt-2:duration:50');
+      expect(mockClaimApplyMutation.mock.invocationCallOrder[0])
+        .toBeLessThan(mockReverifyAndApplyUpgradeForProfile.mock.invocationCallOrder[0]);
     });
   });
 });

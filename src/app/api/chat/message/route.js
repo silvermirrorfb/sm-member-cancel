@@ -17,6 +17,7 @@ import {
     reverifyAndApplyUpgradeForProfile,
 } from '../../../../lib/boulevard';
 import { logChatMessages, logSupportIncident } from '../../../../lib/notify';
+import { APPLY_INFLIGHT_CEILING_SECONDS, buildApplyClaimKey, claimApplyMutation, inspectApplyClaim, maskPhoneDigits, settleApplyClaim } from '../../../../lib/sms-member-registry';
 import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, resolveClientRateLimitKey } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
@@ -905,10 +906,156 @@ export async function POST(request) {
                   }
                   const appointmentId = session.pendingUpgradeOffer?.appointmentId || null;
                   const profilePhone = session.memberProfile?.phone || null;
-                  const upgradeResult = await reverifyAndApplyUpgradeForProfile(
-                    session.memberProfile,
-                    session.pendingUpgradeOffer,
-                  );
+                  // Durable apply claim, SAME key as the SMS webhook's guard
+                  // (gauntlet 2026-07-22): this inline apply can race the
+                  // webhook's deferred apply on the same offer (an
+                  // affirmative that falls through to chat while a YES is
+                  // mid-apply, a Twilio retry of a slow inline apply, or a
+                  // web YES racing an SMS YES on a shared session). Whoever
+                  // claims the (appointment, target change) key first
+                  // performs the Boulevard write; every other delivery
+                  // answers with the manual-confirm ack and does NOT mutate.
+                  const applyClaimKey = buildApplyClaimKey(session.pendingUpgradeOffer, profilePhone);
+                  let applyClaim = 'unavailable';
+                  try {
+                        applyClaim = await claimApplyMutation(applyClaimKey);
+                  } catch (err) {
+                        console.error('[chat] apply claim threw, apply withheld:', maskPhoneDigits(err?.message || err));
+                  }
+                  if (applyClaim !== 'claimed') {
+                        // held with a live owner is a duplicate; anything
+                        // else cannot rule out a duplicate, so never mutate
+                        // here. Abandoned or unavailable claims escalate to
+                        // a human so the manual-confirm promise stays honest.
+                        let escalateReason = applyClaim === 'held' ? null : 'apply_claim_unavailable';
+                        if (applyClaim === 'held') {
+                              let claimState = { state: 'unknown', ageSeconds: null };
+                              try {
+                                    claimState = await inspectApplyClaim(applyClaimKey);
+                              } catch (err) {
+                                    console.error('[chat] apply claim inspect threw:', maskPhoneDigits(err?.message || err));
+                              }
+                              const ownerAlive = claimState.state === 'settled'
+                                || (claimState.state === 'pending'
+                                  && Number.isFinite(claimState.ageSeconds)
+                                  && claimState.ageSeconds <= APPLY_INFLIGHT_CEILING_SECONDS);
+                              if (!ownerAlive) escalateReason = 'apply_claim_abandoned';
+                        }
+                        if (escalateReason) {
+                              try {
+                                    await logSupportIncident({
+                                          date: new Date().toISOString(),
+                                          session_id: sessionId,
+                                          issue_type: 'sms_upgrade_manual_followup',
+                                          name: session.memberProfile?.fullName || null,
+                                          email: session.memberProfile?.email || null,
+                                          phone: profilePhone,
+                                          appointment_id: appointmentId,
+                                          user_message: `Chat YES could not be safely applied. reason=${escalateReason}`,
+                                          reason: escalateReason,
+                                    });
+                              } catch (err) {
+                                    console.error('[chat] apply claim incident failed:', maskPhoneDigits(err?.message || err));
+                              }
+                        }
+                        const manualReply = 'Thanks, we got your YES. We received your upgrade request and our team will confirm it before your appointment.';
+                        await addMessage(sessionId, 'assistant', manualReply);
+                        pendingTranscriptEntries.push({ role: 'assistant', content: manualReply });
+                        await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'upgrade claim withheld reply');
+                        session.lastUpgradeOfferAppointmentId = appointmentId;
+                        session.pendingUpgradeOffer = null;
+                        await saveSession(session);
+                        return NextResponse.json({
+                              message: manualReply,
+                              sessionId,
+                              upgradeHandled: true,
+                              upgradeResult: { success: false, reason: escalateReason || 'apply_claim_held' },
+                        }, {
+                              headers: buildRateLimitHeaders(rateLimit),
+                        });
+                  }
+                  // The apply is guarded like the webhook's: a throw after
+                  // the claim would otherwise jump to the outer 500 handler
+                  // with the claim still pending and no incident, and a
+                  // member retry inside the in-flight ceiling would then
+                  // clear the offer behind a manual-confirm promise nobody
+                  // was told about. Catch it: settle, escalate, safe reply.
+                  let upgradeResult;
+                  try {
+                        upgradeResult = await reverifyAndApplyUpgradeForProfile(
+                          session.memberProfile,
+                          session.pendingUpgradeOffer,
+                        );
+                  } catch (err) {
+                        // Incident FIRST, settle SECOND (codex crash-window
+                        // P2): dying after settle but before the incident
+                        // would hide the failure behind a settled claim.
+                        console.error('[chat] apply threw after claim, incident queued:', maskPhoneDigits(err?.message || err));
+                        try {
+                              await logSupportIncident({
+                                    date: new Date().toISOString(),
+                                    session_id: sessionId,
+                                    issue_type: 'sms_upgrade_manual_followup',
+                                    name: session.memberProfile?.fullName || null,
+                                    email: session.memberProfile?.email || null,
+                                    phone: profilePhone,
+                                    appointment_id: appointmentId,
+                                    user_message: 'Chat YES apply threw after the claim. reason=apply_threw_after_claim',
+                                    reason: 'apply_threw_after_claim',
+                              });
+                        } catch (incidentErr) {
+                              console.error('[chat] apply-throw incident failed:', maskPhoneDigits(incidentErr?.message || incidentErr));
+                        }
+                        try {
+                              await settleApplyClaim(applyClaimKey);
+                        } catch {}
+                        const manualReply = 'Thanks, we got your YES. We received your upgrade request and our team will confirm it before your appointment.';
+                        await addMessage(sessionId, 'assistant', manualReply);
+                        pendingTranscriptEntries.push({ role: 'assistant', content: manualReply });
+                        await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'upgrade apply threw reply');
+                        session.lastUpgradeOfferAppointmentId = appointmentId;
+                        session.pendingUpgradeOffer = null;
+                        await saveSession(session);
+                        return NextResponse.json({
+                              message: manualReply,
+                              sessionId,
+                              upgradeHandled: true,
+                              upgradeResult: { success: false, reason: 'apply_threw_after_claim' },
+                        }, {
+                              headers: buildRateLimitHeaders(rateLimit),
+                        });
+                  }
+                  // A non-throw FAILED apply must reach a human before the
+                  // claim settles (closure review): the unavailable copy
+                  // promises team follow-up, and settling first would both
+                  // hide a crash-window failure and block a webhook self-heal
+                  // retry behind the settled claim. Mirrors the webhook's
+                  // shouldQueueUpgradeFollowupIncident posture.
+                  if (upgradeResult?.success !== true) {
+                        try {
+                              await logSupportIncident({
+                                    date: new Date().toISOString(),
+                                    session_id: sessionId,
+                                    issue_type: 'sms_upgrade_manual_followup',
+                                    name: session.memberProfile?.fullName || null,
+                                    email: session.memberProfile?.email || null,
+                                    phone: profilePhone,
+                                    appointment_id: appointmentId,
+                                    user_message: `Chat YES apply did not complete. reason=${String(upgradeResult?.reason || 'unknown')}`,
+                                    reason: String(upgradeResult?.reason || 'chat_apply_failed'),
+                              });
+                        } catch (incidentErr) {
+                              console.error('[chat] apply-failure incident failed:', maskPhoneDigits(incidentErr?.message || incidentErr));
+                        }
+                  }
+                  // Settled once the outcome and its escalation are durably
+                  // recorded, so a later duplicate can tell a finished claim
+                  // from an abandoned one.
+                  try {
+                        await settleApplyClaim(applyClaimKey);
+                  } catch (err) {
+                        console.warn('[chat] apply claim settle failed:', maskPhoneDigits(err?.message || err));
+                  }
                   const pendingOffer = session.pendingUpgradeOffer || null;
                   if (profilePhone && appointmentId) {
                         markUpgradeOfferEvent(

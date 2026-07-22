@@ -319,6 +319,118 @@ async function claimAppliedFollowupSend(claimKey) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Apply-mutation claim: a durable once-only guard on the Boulevard WRITE
+// itself (SET NX + TTL). Two racing YES deliveries (Twilio redelivery or a
+// double YES landing on separate serverless instances before either sees the
+// other's pending-offer clear) must not both mutate the same appointment.
+// Distinct changes (duration vs add-on, different targets) use distinct keys.
+// -----------------------------------------------------------------------------
+
+const APPLY_CLAIM_PREFIX = 'sms-apply-claim:';
+// The webhook's maxDuration (300s) is the hard ceiling on any in-flight
+// apply; the TTL covers that window with 2x margin so a claim can never
+// expire while its apply is still running.
+const APPLY_CLAIM_TTL_SECONDS = 600;
+// A pending claim older than this cannot still be in flight: 300s maxDuration
+// plus margin for clock skew between instances. Shared by every held-claim
+// reader (webhook and chat) so the ceiling cannot drift per surface.
+const APPLY_INFLIGHT_CEILING_SECONDS = 330;
+
+// One apply-claim key per (appointment, target change), shared by EVERY
+// apply call site (the SMS webhook's deferred worker and the chat route's
+// inline apply) so racing deliveries across surfaces serialize on the same
+// key. Duration upgrades carry their target minutes, add-ons their add-on
+// slug, so a genuine second, DIFFERENT change to the same appointment still
+// applies while a duplicate of the same change cannot. Segments are
+// sanitized so key-space integrity never depends on field provenance.
+function buildApplyClaimKey(offer, phone) {
+  const offerKind = String(offer?.offerKind || 'duration').toLowerCase();
+  const target = offerKind === 'addon'
+    ? (String(offer?.addOnName || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'addon')
+    : String(Number(offer?.targetDurationMinutes) > 0 ? Number(offer.targetDurationMinutes) : 50);
+  const appointmentKey = String(offer?.appointmentId || '').trim().replace(/[^A-Za-z0-9_+/=.-]/g, '');
+  const scope = appointmentKey
+    ? `appt:${appointmentKey}`
+    : `phone:${normalizePhoneForIndex(phone) || String(phone || '').trim()}`;
+  return `${scope}:${offerKind}:${target}`;
+}
+
+// Claim values carry STATE so a later delivery can tell a finished owner
+// from one that died between the claim and the Boulevard call: 'pending:'
+// at claim time, flipped to 'settled:' once the apply produced an outcome.
+const APPLY_CLAIM_PENDING = 'pending:';
+const APPLY_CLAIM_SETTLED = 'settled:';
+
+// Tri-state so the caller can tell a duplicate from an outage:
+// 'claimed' = this call owns the write and proceeds;
+// 'held' = another delivery already owns this exact change (inspect the
+// claim state before deciding whether that owner is alive or abandoned);
+// 'unavailable' = no Redis client, empty key, or a Redis error. The caller
+// must NOT write on 'unavailable' (a concurrent duplicate cannot be ruled
+// out) and escalates to a human instead.
+async function claimApplyMutation(claimKey) {
+  const redis = getRedis();
+  if (!redis) return 'unavailable';
+  const key = String(claimKey || '').trim();
+  if (!key) return 'unavailable';
+  try {
+    const result = await redis.set(`${APPLY_CLAIM_PREFIX}${key}`, `${APPLY_CLAIM_PENDING}${new Date().toISOString()}`, {
+      nx: true,
+      ex: APPLY_CLAIM_TTL_SECONDS,
+    });
+    return result === 'OK' ? 'claimed' : 'held';
+  } catch (e) {
+    console.warn('[apply-claim] Failed to claim:', maskPhoneDigits(e.message));
+    return 'unavailable';
+  }
+}
+
+// Called by the claim OWNER once the apply produced an outcome (success or
+// failure both continue into the route's incident and audit handling). XX +
+// keepTtl: only an existing claim is flipped, and the original TTL stands.
+async function settleApplyClaim(claimKey) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const key = String(claimKey || '').trim();
+  if (!key) return false;
+  try {
+    const result = await redis.set(`${APPLY_CLAIM_PREFIX}${key}`, `${APPLY_CLAIM_SETTLED}${new Date().toISOString()}`, {
+      xx: true,
+      keepTtl: true,
+    });
+    return result === 'OK';
+  } catch (e) {
+    console.warn('[apply-claim] Failed to settle:', maskPhoneDigits(e.message));
+    return false;
+  }
+}
+
+// Read the claim state for a held key: {state: 'settled'|'pending'|'unknown',
+// ageSeconds}. 'unknown' covers no Redis, a missing key (expired between the
+// NX and this read), an unparseable value, or a read error; callers treat it
+// like an abandoned owner (fail loud, never silently skip).
+async function inspectApplyClaim(claimKey) {
+  const redis = getRedis();
+  if (!redis) return { state: 'unknown', ageSeconds: null };
+  const key = String(claimKey || '').trim();
+  if (!key) return { state: 'unknown', ageSeconds: null };
+  try {
+    const raw = await redis.get(`${APPLY_CLAIM_PREFIX}${key}`);
+    const value = String(raw || '');
+    const state = value.startsWith(APPLY_CLAIM_SETTLED)
+      ? 'settled'
+      : value.startsWith(APPLY_CLAIM_PENDING) ? 'pending' : 'unknown';
+    let ageSeconds = null;
+    const stampedAt = new Date(value.slice(value.indexOf(':') + 1)).getTime();
+    if (Number.isFinite(stampedAt)) ageSeconds = Math.max(0, (Date.now() - stampedAt) / 1000);
+    return { state, ageSeconds };
+  } catch (e) {
+    console.warn('[apply-claim] Failed to inspect:', maskPhoneDigits(e.message));
+    return { state: 'unknown', ageSeconds: null };
+  }
+}
+
 export {
   getRegisteredMembers,
   registerMember,
@@ -331,6 +443,11 @@ export {
   checkStopSetStrict,
   removeFromStopSet,
   claimAppliedFollowupSend,
+  claimApplyMutation,
+  buildApplyClaimKey,
+  settleApplyClaim,
+  inspectApplyClaim,
+  APPLY_INFLIGHT_CEILING_SECONDS,
   maskPhoneDigits,
   STOP_SET_KEY,
   PHONE_INDEX_KEY,
