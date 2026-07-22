@@ -145,12 +145,19 @@ function deferWork(fn) {
   }
 }
 
+// Opt-out language inside a longer sentence ("please stop texting me") never
+// reaches the bare-keyword STOP handler, and YES_KEYWORDS matches courtesy
+// words like "please" and "ok", so opt-out phrasing must count as negative or
+// a refusal enqueues a REAL paid apply (red team 2026-07-22).
+const OPT_OUT_PHRASES = /\b(stop|unsubscribe|do not text|don'?t text)\b/i;
+
 function isAffirmative(text) {
   return YES_KEYWORDS.test(String(text || '').toLowerCase());
 }
 
 function isNegative(text) {
-  return NO_KEYWORDS.test(String(text || '').toLowerCase());
+  const value = String(text || '').toLowerCase();
+  return NO_KEYWORDS.test(value) || OPT_OUT_PHRASES.test(value);
 }
 
 function isUpgradeMutationEnabled() {
@@ -1003,7 +1010,10 @@ export async function POST(request) {
 
     const intentText = String(body || '').trim();
     if (isAffirmative(intentText) || isNegative(intentText)) {
-      const affirmative = isAffirmative(intentText);
+      // Negative and opt-out language WINS a mixed message: "No thanks,
+      // please stop texting me" is a refusal even though it contains a YES
+      // keyword, and a wrong YES here mutates a real booking.
+      const affirmative = isAffirmative(intentText) && !isNegative(intentText);
       const pendingOffer = activeSession?.pendingUpgradeOffer || null;
       const pendingOfferBlocked =
         pendingOffer?.offerKind === 'duration' &&

@@ -1640,6 +1640,92 @@ describe('twilio webhook route', () => {
     });
   });
 
+  describe('intent classification safety (negative and opt-out language beats affirmative)', () => {
+    function requestWith(bodyText) {
+      return new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+        method: 'POST',
+        headers: { 'x-twilio-signature': 'sig' },
+        body: 'From=%2B12134401333&Body=x&MessageSid=SM-intent-1',
+      });
+    }
+    function pendingSession() {
+      return {
+        id: 'sess-1',
+        status: 'active',
+        smsInboundCount: 0,
+        memberProfile: { phone: '+12134401333', name: 'Matt Maroone', clientId: 'client-1' },
+        pendingUpgradeOffer: {
+          offerKind: 'duration',
+          appointmentId: 'appt-1',
+          targetDurationMinutes: 50,
+          deltaDollars: 50,
+          pricing: { walkinDelta: 50 },
+          expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        },
+      };
+    }
+
+    it('treats "No thanks, please stop texting me" as a decline, never a YES (red team 2026-07-22)', async () => {
+      // YES_KEYWORDS matches the courtesy word "please" and affirmative used
+      // to win ties, so a polite refusal enqueued a REAL paid Boulevard apply.
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'No thanks, please stop texting me',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('No problem');
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
+    it('treats "please stop texting me" as non-affirmative even without a NO keyword', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'please stop texting me',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).not.toContain('we got your YES');
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    });
+
+    it('still treats a bare "ok" as a YES on a live pending offer', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'ok',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('we got your YES');
+    });
+  });
+
   describe('applied-outcome follow-up SMS', () => {
     function yesRequest() {
       return new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
