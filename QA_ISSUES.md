@@ -273,6 +273,17 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 
 ---
 
+### outbound-sms #16
+**Status:** FIXED IN CODE 2026-07-22 (branch `fix/carveout-followup-hardening`, awaiting Matt's merge)
+**Severity:** customer-annoyance / trust (duplicate "You're all set" texts)
+**Discovered:** 2026-07-22 (deferred follow-up from the #86 review round)
+
+**Symptom:** The applied-outcome follow-up SMS had no durable idempotency. The MessageSid replay cache is in-memory and per-instance, so a Twilio webhook redelivery (or a double YES) landing on a different serverless instance could re-run the deferred apply path and send the follow-up twice.
+
+**Fix:** New `claimAppliedFollowupSend` in `src/lib/sms-member-registry.js`: a durable Redis SET NX claim with a 24h TTL, keyed `appt:<appointmentId>` (falling back to `phone:<last10>` when no appointment id survived). The webhook takes the claim AFTER the send-time STOP gate (a suppressed pass never consumes it) and BEFORE the Twilio send; anything but a fresh claim withholds the send (fail closed, at-most-once). Tests: `__tests__/sms-followup-claim.test.js` (NX semantics, TTL, fail-closed paths) plus route-level double-delivery, claim-not-burned-on-STOP, and claim-refused tests in `__tests__/twilio-webhook-route.test.js`.
+
+---
+
 ## Cancel bot issues
 
 ### cancel-bot #1

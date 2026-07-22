@@ -31,7 +31,7 @@ import {
   reverifyAndApplyUpgradeForProfile,
   summarizeBoulevardApplyError,
 } from '../../../../../lib/boulevard';
-import { checkStopSetStrict, lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
+import { checkStopSetStrict, claimAppliedFollowupSend, lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
 import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
@@ -639,6 +639,31 @@ async function runDeferredIntentWork({
     } catch (err) {
       console.error('[sms-webhook] stop-set check threw, follow-up suppressed:', err?.message || err);
       followupText = null;
+    }
+    // Durable once-only send claim (Redis SET NX), taken AFTER the STOP gate
+    // so a suppressed pass never consumes it, and BEFORE the send so a double
+    // YES or a Twilio webhook redelivery (possibly on another instance, where
+    // the in-memory MessageSid replay cache is empty) can never send this
+    // follow-up twice. Keyed to the appointment the apply targeted; falls back
+    // to the phone when no appointment id survived. Fail closed: anything but
+    // a fresh claim withholds the send, and a claim consumed by a send that
+    // then fails stays consumed (at-most-once is the contract; the member
+    // still holds the manual-confirm ack).
+    if (followupText) {
+      const appointmentKey = String(offerForLog?.appointmentId || '').trim();
+      const claimKey = appointmentKey
+        ? `appt:${appointmentKey}`
+        : `phone:${normalizePhoneForIndex(from) || String(from || '').trim()}`;
+      let claimed = false;
+      try {
+        claimed = (await claimAppliedFollowupSend(claimKey)) === true;
+      } catch (err) {
+        console.error('[sms-webhook] follow-up send claim threw, follow-up suppressed:', err?.message || err);
+      }
+      if (!claimed) {
+        console.log('[sms-webhook] applied follow-up suppressed: send claim not acquired (duplicate delivery or claim unavailable)');
+        followupText = null;
+      }
     }
     if (followupText) {
       try {

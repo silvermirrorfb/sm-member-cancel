@@ -26,6 +26,7 @@ const mockSendTwilioSms = vi.fn();
 const mockCheckStopSetStrict = vi.fn();
 const mockAddToStopSet = vi.fn();
 const mockRemoveMemberByPhone = vi.fn();
+const mockClaimAppliedFollowupSend = vi.fn();
 const mockCheckKlaviyoSmsOptIn = vi.fn();
 const mockUnsubscribeKlaviyoSms = vi.fn();
 const originalEnv = process.env;
@@ -52,6 +53,7 @@ vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
     checkStopSetStrict: (...args) => mockCheckStopSetStrict(...args),
     addToStopSet: (...args) => mockAddToStopSet(...args),
     removeMemberByPhone: (...args) => mockRemoveMemberByPhone(...args),
+    claimAppliedFollowupSend: (...args) => mockClaimAppliedFollowupSend(...args),
   };
 });
 
@@ -164,6 +166,7 @@ describe('twilio webhook route', () => {
     mockUnsubscribeKlaviyoSms.mockResolvedValue({ ok: true });
     mockAddToStopSet.mockResolvedValue(true);
     mockRemoveMemberByPhone.mockResolvedValue(true);
+    mockClaimAppliedFollowupSend.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -1841,6 +1844,104 @@ describe('twilio webhook route', () => {
       const body = String(mockSendTwilioSms.mock.calls[0][0].body);
       expect(body).toContain('your facial is now 50 minutes');
       expect(body).not.toContain('$');
+    });
+
+    it('sends exactly ONE follow-up when the same YES is delivered twice (durable send claim)', async () => {
+      // Twilio can redeliver a webhook, and the redelivery can land on a
+      // fresh serverless instance where in-memory replay state is empty.
+      // The durable Redis claim is the only defense; simulate its NX
+      // semantics: the first claim wins, every later claim is refused.
+      const claimedKeys = new Set();
+      mockClaimAppliedFollowupSend.mockImplementation(async (key) => {
+        if (claimedKeys.has(key)) return false;
+        claimedKeys.add(key);
+        return true;
+      });
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      // The first delivery clears the pending offer, so the redelivery walks
+      // the no-pending re-derive path, finds the SAME appointment, and the
+      // apply reports success again. Without the claim this sends twice.
+      mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+        eligible: true,
+        appointmentId: 'appt-1',
+        currentDurationMinutes: 30,
+        targetDurationMinutes: 50,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+
+      const res1 = await POST(yesRequest());
+      await res1.text();
+      await flushDeferred();
+      const res2 = await POST(yesRequest());
+      await res2.text();
+      await flushDeferred();
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not burn the send claim when the STOP gate already suppressed the follow-up', async () => {
+      // A member on the STOP set gets no follow-up AND no claim consumed:
+      // the claim exists only to dedupe real sends, and consuming it on a
+      // suppressed pass could mask a later legitimate one.
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockCheckStopSetStrict.mockResolvedValue('on');
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      expect(mockClaimAppliedFollowupSend).not.toHaveBeenCalled();
+      logSpy.mockRestore();
+    });
+
+    it('suppresses the follow-up when the durable send claim cannot be verified (fail closed)', async () => {
+      mockClaimAppliedFollowupSend.mockResolvedValue(false);
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      logSpy.mockRestore();
     });
 
     it('writes the ack audit row BEFORE the Twilio send so a hung send cannot eat the audit trail', async () => {

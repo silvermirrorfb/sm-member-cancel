@@ -272,6 +272,38 @@ async function checkStopSetStrict(phone) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Applied-outcome follow-up send claim: a durable once-only latch (Redis SET
+// NX + TTL) so a double YES or a Twilio webhook redelivery, possibly handled
+// by a different serverless instance where in-memory replay state is empty,
+// can never send the courtesy follow-up twice.
+// -----------------------------------------------------------------------------
+
+const FOLLOWUP_CLAIM_PREFIX = 'sms-followup-claim:';
+const FOLLOWUP_CLAIM_TTL_SECONDS = 24 * 60 * 60;
+
+// Returns true ONLY when this call newly claimed the key. false means already
+// claimed, no Redis client, an empty key, or a Redis error; the caller treats
+// every non-true as already-sent and does not send. Fail closed on doubt,
+// matching the checkStopSetStrict posture: a courtesy confirmation is never
+// worth a possible double send.
+async function claimAppliedFollowupSend(claimKey) {
+  const redis = getRedis();
+  if (!redis) return false;
+  const key = String(claimKey || '').trim();
+  if (!key) return false;
+  try {
+    const result = await redis.set(`${FOLLOWUP_CLAIM_PREFIX}${key}`, new Date().toISOString(), {
+      nx: true,
+      ex: FOLLOWUP_CLAIM_TTL_SECONDS,
+    });
+    return result === 'OK';
+  } catch (e) {
+    console.warn('[followup-claim] Failed to claim:', e.message);
+    return false;
+  }
+}
+
 export {
   getRegisteredMembers,
   registerMember,
@@ -283,6 +315,7 @@ export {
   isOnStopSet,
   checkStopSetStrict,
   removeFromStopSet,
+  claimAppliedFollowupSend,
   STOP_SET_KEY,
   PHONE_INDEX_KEY,
   normalizePhoneForIndex,
