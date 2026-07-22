@@ -171,6 +171,10 @@ const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging)(?:\s+me)?\b|\b(
 // answer, not negation: "No I want to unsubscribe" is an explicit opt-out
 // (codex round-9), while "I'm not trying to unsubscribe" negates.
 const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:(?:want|wanna|trying|asking|looking|going)\s+(?:to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
+// Third-party mentions discuss someone ELSE's consent ("unsubscribe my
+// daughter", "my husband wants to unsubscribe") and must never mutate the
+// SENDER's consent state; they go to chat (codex round-10).
+const OPT_OUT_THIRD_PARTY = /\b(?:unsubscribe|opt\s+out)\s+(?:my|our|his|her|their|him|them)\b|\b(?:my|our|his|her|their)\s+\w+\s+(?:wants?|needs?|would like|is trying)\s+to\s+(?:unsubscribe|opt\s+out)\b/i;
 
 // iPhone keyboards send typographic apostrophes (U+2018/U+2019): normalize
 // them to ASCII before any consent or intent matching so "Don't text me"
@@ -185,12 +189,14 @@ function isAffirmative(text) {
 
 function isNegative(text) {
   const value = normalizeApostrophes(text).toLowerCase();
-  // Beyond the explicit refusal keywords, only an UNAMBIGUOUS, non-negated
-  // opt-out request counts as negative (codex round-7): a stray "stop" or
-  // "unsubscribe" in ordinary conversation ("Can I stop by the front
-  // desk?", "I don't want to unsubscribe") must reach the chat bot, not
-  // consume the pending offer as a decline.
-  return NO_KEYWORDS.test(value) || (OPT_OUT_REQUEST.test(value) && !OPT_OUT_NEGATED.test(value));
+  // Beyond the explicit refusal keywords, only an UNAMBIGUOUS, non-negated,
+  // sender-directed opt-out request counts as negative (codex rounds 7 and
+  // 10): a stray "stop" or "unsubscribe" in ordinary conversation ("Can I
+  // stop by the front desk?", "I don't want to unsubscribe", "my husband
+  // wants to unsubscribe") must reach the chat bot, not consume the pending
+  // offer as a decline.
+  return NO_KEYWORDS.test(value)
+    || (OPT_OUT_REQUEST.test(value) && !OPT_OUT_NEGATED.test(value) && !OPT_OUT_THIRD_PARTY.test(value));
 }
 
 function isUpgradeMutationEnabled() {
@@ -796,7 +802,7 @@ export async function POST(request) {
     // trigger the opt-out branch.
     const consentBody = normalizeApostrophes(body);
     const optOutBody = consentBody.replace(/[\s.!?]+$/, '');
-    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(consentBody) && !OPT_OUT_NEGATED.test(consentBody))) {
+    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(consentBody) && !OPT_OUT_NEGATED.test(consentBody) && !OPT_OUT_THIRD_PARTY.test(consentBody))) {
       console.log(`[sms-webhook] STOP received from ${maskPhoneDigits(from)}, opting out`);
 
       // STOP set FIRST, in its own try/catch: this is the authoritative
