@@ -1567,6 +1567,22 @@ describe('twilio webhook route', () => {
       warnSpy.mockRestore();
     });
 
+    it('still propagates the unsubscribe to Klaviyo, even when the deferred registry scan fails', async () => {
+      // Pins the TCPA cross-channel propagation across the handler reorder: a
+      // registry failure must never cost the Klaviyo unsubscribe.
+      mockRemoveMemberByPhone.mockRejectedValue(new Error('redis scan blew up'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(stopRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockUnsubscribeKlaviyoSms).toHaveBeenCalledWith({ phone: '+12134401333' });
+      errorSpy.mockRestore();
+    });
+
     it('masks the phone when the deferred registry scan fails with the number in the error text', async () => {
       // The scan now fails inside deferWork's backstop catch, which must be
       // as PII-lean as the send-path catches.
@@ -2191,6 +2207,54 @@ describe('twilio webhook route', () => {
       expect(outboundRows).toHaveLength(1);
       expect(outboundRows[0].content).toContain('team will confirm');
       expect(outboundRows.map(r => r.content).join(' ')).not.toContain("You're all set");
+    });
+
+    it('suppresses the follow-up and masks the number when the stop-set RECHECK throws after the claim', async () => {
+      // Pins the fail-closed error branch of the post-claim STOP re-check,
+      // the one send-path catch the 2026-07-22 testing review found untested.
+      mockCheckStopSetStrict
+        .mockResolvedValueOnce('off')
+        .mockRejectedValueOnce(new Error('recheck failed for +12134401333'));
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        totalDollars: 169,
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).toContain('stop-set recheck threw');
+      expect(logged).not.toContain('12134401333');
+      errorSpy.mockRestore();
+    });
+
+    it('falls back to a phone-keyed claim when no appointment id survived the apply', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        targetDurationMinutes: 50,
+        totalDollars: 169,
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockClaimAppliedFollowupSend).toHaveBeenCalledWith('phone:2134401333:duration');
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
     });
 
     it('logs NO full phone number when the follow-up send fails (PII masked to last 4)', async () => {
