@@ -1665,9 +1665,11 @@ describe('twilio webhook route', () => {
       };
     }
 
-    it('treats "No thanks, please stop texting me" as a decline, never a YES (red team 2026-07-22)', async () => {
+    it('honors "No thanks, please stop texting me" as a FULL opt-out, never a YES (red team + codex round-5)', async () => {
       // YES_KEYWORDS matches the courtesy word "please" and affirmative used
-      // to win ties, so a polite refusal enqueued a REAL paid Boulevard apply.
+      // to win ties, so a polite refusal enqueued a REAL paid Boulevard
+      // apply. And an explicit stop-texting request must not stop at a
+      // decline: it feeds the suppression set like a bare STOP.
       const session = pendingSession();
       mockGetSessionIdForPhone.mockReturnValue('sess-1');
       mockGetSession.mockReturnValue(session);
@@ -1682,12 +1684,14 @@ describe('twilio webhook route', () => {
       await flushDeferred();
 
       expect(res.status).toBe(200);
-      expect(text).toContain('No problem');
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+      expect(mockUnsubscribeKlaviyoSms).toHaveBeenCalledWith({ phone: '+12134401333' });
       expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
       expect(mockSendTwilioSms).not.toHaveBeenCalled();
     });
 
-    it('treats "please stop texting me" as non-affirmative even without a NO keyword', async () => {
+    it('honors "please stop texting me" as a full opt-out even without a NO keyword', async () => {
       const session = pendingSession();
       mockGetSessionIdForPhone.mockReturnValue('sess-1');
       mockGetSession.mockReturnValue(session);
@@ -1702,7 +1706,31 @@ describe('twilio webhook route', () => {
       await flushDeferred();
 
       expect(res.status).toBe(200);
-      expect(text).not.toContain('we got your YES');
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    });
+
+    it('treats an ambiguous bare "please stop" as a decline, not an unsubscribe', async () => {
+      // Without an object ("texting", "messaging") the intent is ambiguous,
+      // so it declines the offer and leaves consent state alone; the member
+      // can always send STOP.
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'please stop',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('No problem');
+      expect(mockAddToStopSet).not.toHaveBeenCalled();
       expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
     });
 

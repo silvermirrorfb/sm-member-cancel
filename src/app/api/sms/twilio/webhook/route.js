@@ -150,6 +150,13 @@ function deferWork(fn) {
 // words like "please" and "ok", so opt-out phrasing must count as negative or
 // a refusal enqueues a REAL paid apply (red team 2026-07-22).
 const OPT_OUT_PHRASES = /\b(stop|unsubscribe|do not text|don'?t text)\b/i;
+// UNAMBIGUOUS phrase-level opt-out REQUESTS get the full STOP treatment
+// (suppression set + Klaviyo + unsubscribe confirmation), not just a decline
+// (codex round-5 P1: an explicit revocation must be honored in any reasonable
+// phrasing). Deliberately tighter than OPT_OUT_PHRASES: a bare "stop" inside
+// a sentence ("stop by the front desk") must never unsubscribe anyone, so a
+// stop verb only counts here with a messaging object.
+const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging|sending|contacting)\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s*out\b|\btake me off\b|\bremove me\b/i;
 
 function isAffirmative(text) {
   return YES_KEYWORDS.test(String(text || '').toLowerCase());
@@ -762,7 +769,7 @@ export async function POST(request) {
     // words stay excluded so ordinary sentences containing "cancel" do not
     // trigger the opt-out branch.
     const optOutBody = body.replace(/[\s.!?]+$/, '');
-    if (STOP_KEYWORDS.test(optOutBody)) {
+    if (STOP_KEYWORDS.test(optOutBody) || OPT_OUT_REQUEST.test(body)) {
       console.log(`[sms-webhook] STOP received from ${maskPhoneDigits(from)}, opting out`);
 
       // STOP set FIRST, in its own try/catch: this is the authoritative
