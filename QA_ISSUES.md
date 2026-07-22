@@ -291,7 +291,7 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 
 **Symptom:** Error logs on the applied follow-up send path echoed raw E.164 phone numbers: Twilio failure text includes the To number, and stop-set or claim errors can embed the number too. Vercel log drains and Sentry then hold member phone numbers in plain text.
 
-**Fix:** `maskPhoneDigits` in the webhook route masks anything phone-shaped (8+ digits) down to `***` plus the last 4 before logging, applied to all three send-path error catches (stop-set check threw, send claim threw, Twilio send failed). Tests force each error with a full E.164 embedded and assert no full number reaches the logs. Related pre-existing gap, NOT addressed here: `docs/MONITORING_SUMMARY_sms-path1.md` item 3 notes the SMS Sheet logs the outbound phone unmasked by design; that is a Sheet-scope decision, not an error-log leak.
+**Fix:** `maskPhoneDigits` in the webhook route masks anything phone-shaped (8+ digits) down to `***` plus the last 4 before logging, applied to all four send-path error catches (stop-set check threw, send claim threw, stop-set recheck threw, Twilio send failed). Gauntlet follow-up (Codex P2): `claimAppliedFollowupSend` in the registry also masks long digit runs in its own failure log, since the phone-fallback claim key embeds the member's last 10 digits and a Redis error can echo the key. Tests force each error with a full E.164 embedded and assert no full number reaches the logs. Related pre-existing gap, NOT addressed here: `docs/MONITORING_SUMMARY_sms-path1.md` item 3 notes the SMS Sheet logs the outbound phone unmasked by design; that is a Sheet-scope decision, not an error-log leak.
 
 ---
 

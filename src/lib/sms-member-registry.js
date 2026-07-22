@@ -282,6 +282,13 @@ async function checkStopSetStrict(phone) {
 const FOLLOWUP_CLAIM_PREFIX = 'sms-followup-claim:';
 const FOLLOWUP_CLAIM_TTL_SECONDS = 24 * 60 * 60;
 
+// The phone-fallback claim key embeds the member's last 10 digits, and a Redis
+// client error can echo the full command including the key, so the claim's
+// failure log masks long digit runs down to the last 4 before writing.
+function maskDigitRunsForLog(value) {
+  return String(value ?? '').replace(/\d{8,}/g, run => `***${run.slice(-4)}`);
+}
+
 // Returns true ONLY when this call newly claimed the key. false means already
 // claimed, no Redis client, an empty key, or a Redis error; the caller treats
 // every non-true as already-sent and does not send. Fail closed on doubt,
@@ -299,7 +306,7 @@ async function claimAppliedFollowupSend(claimKey) {
     });
     return result === 'OK';
   } catch (e) {
-    console.warn('[followup-claim] Failed to claim:', e.message);
+    console.warn('[followup-claim] Failed to claim:', maskDigitRunsForLog(e.message));
     return false;
   }
 }

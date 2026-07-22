@@ -71,6 +71,18 @@ describe('claimAppliedFollowupSend (durable once-only follow-up send claim)', ()
     warnSpy.mockRestore();
   });
 
+  it('masks phone digits in the claim failure log (no full number reaches error logs)', async () => {
+    // Codex P2 (2026-07-22 gauntlet): the phone-fallback claim key embeds the
+    // member's last 10 digits, and a Redis client error can echo the key.
+    mockSet.mockRejectedValue(new Error('WRONGTYPE operation against key sms-followup-claim:phone:2134401333'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await claimAppliedFollowupSend('phone:2134401333')).toBe(false);
+    const logged = warnSpy.mock.calls.flat().map(String).join(' ');
+    expect(logged).not.toContain('2134401333');
+    expect(logged).toContain('1333');
+    warnSpy.mockRestore();
+  });
+
   it('fails closed (false) on an empty or missing key', async () => {
     expect(await claimAppliedFollowupSend('')).toBe(false);
     expect(await claimAppliedFollowupSend(null)).toBe(false);
