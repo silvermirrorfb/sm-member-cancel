@@ -167,14 +167,21 @@ function deferWork(fn) {
 // email" stays a service request (codex round-9).
 const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging)(?:\s+me)?\b|\b(?:stop|quit)\s+sending\s+(?:me\s+)?(?:texts?|messages?|sms)\b|\b(?:stop|quit)\s+contacting\s+me\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s+(?:me\s+)?out\b|\btake me off\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b|\bremove me from\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b/i;
 // Negation must be verb-attached ("don't/not/never" plus an optional intent
-// verb directly before the opt-out phrase). A leading standalone "No" is an
-// answer, not negation: "No I want to unsubscribe" is an explicit opt-out
-// (codex round-9), while "I'm not trying to unsubscribe" negates.
-const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:(?:want|wanna|trying|asking|looking|going)\s+(?:to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
-// Third-party mentions discuss someone ELSE's consent ("unsubscribe my
+// verb directly before the opt-out phrase, optionally bridging "you to" so
+// "I don't want you to stop texting me" negates, codex round-11). A leading
+// standalone "No" is an answer, not negation: "No I want to unsubscribe" is
+// an explicit opt-out (codex round-9), while "I'm not trying to
+// unsubscribe" negates.
+const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:(?:want|wanna|trying|asking|looking|going)\s+(?:you\s+to\s+|to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
+// Third-party mentions discuss another PERSON's consent ("unsubscribe my
 // daughter", "my husband wants to unsubscribe") and must never mutate the
-// SENDER's consent state; they go to chat (codex round-10).
-const OPT_OUT_THIRD_PARTY = /\b(?:unsubscribe|opt\s+out)\s+(?:my|our|his|her|their|him|them)\b|\b(?:my|our|his|her|their)\s+\w+\s+(?:wants?|needs?|would like|is trying)\s+to\s+(?:unsubscribe|opt\s+out)\b/i;
+// SENDER's consent state; they go to chat (codex round-10). Bounded to
+// person words: sender-owned objects like "my number" or "my phone" are the
+// sender opting out (codex round-11), so the default stays opt-out.
+const OPT_OUT_THIRD_PARTY = /\b(?:unsubscribe|opt\s+out)\s+(?:my|our|his|her|their)\s+(?:husband|wife|spouse|partner|boyfriend|girlfriend|daughter|son|kids?|child|children|mom|mother|dad|father|sister|brother|friend|grand\w+)\b|\b(?:unsubscribe|opt\s+out)\s+(?:him|her|them)\b|\b(?:my|our|his|her|their)\s+\w+\s+(?:wants?|needs?|would like|is trying)\s+to\s+(?:unsubscribe|opt\s+out)\b/i;
+// Other-channel requests ("unsubscribe me from email updates") are not an
+// SMS consent revocation; the chat bot handles them (codex round-11).
+const OPT_OUT_OTHER_CHANNEL = /\b(?:unsubscribe|opt\s+(?:me\s+)?out)\b[^.!?]{0,40}\b(?:e-?mails?|newsletters?|mailing)\b/i;
 
 // iPhone keyboards send typographic apostrophes (U+2018/U+2019): normalize
 // them to ASCII before any consent or intent matching so "Don't text me"
@@ -189,14 +196,19 @@ function isAffirmative(text) {
 
 function isNegative(text) {
   const value = normalizeApostrophes(text).toLowerCase();
+  // Refusal keywords are tested with negated verbs stripped so "Yes, don't
+  // skip it" cannot read the raw "skip" as a refusal (codex round-11). The
+  // "not" negator is deliberately NOT stripped: "not today" is itself a
+  // refusal keyword.
+  const refusalScope = value.replace(/\b(?:do\s*n[o']?t|never)\s+\w+\b/g, ' ');
   // Beyond the explicit refusal keywords, only an UNAMBIGUOUS, non-negated,
-  // sender-directed opt-out request counts as negative (codex rounds 7 and
-  // 10): a stray "stop" or "unsubscribe" in ordinary conversation ("Can I
-  // stop by the front desk?", "I don't want to unsubscribe", "my husband
-  // wants to unsubscribe") must reach the chat bot, not consume the pending
-  // offer as a decline.
-  return NO_KEYWORDS.test(value)
-    || (OPT_OUT_REQUEST.test(value) && !OPT_OUT_NEGATED.test(value) && !OPT_OUT_THIRD_PARTY.test(value));
+  // sender-directed, SMS-channel opt-out request counts as negative (codex
+  // rounds 7, 10, 11): a stray "stop" or "unsubscribe" in ordinary
+  // conversation ("Can I stop by the front desk?", "I don't want to
+  // unsubscribe", "my husband wants to unsubscribe") must reach the chat
+  // bot, not consume the pending offer as a decline.
+  return NO_KEYWORDS.test(refusalScope)
+    || (OPT_OUT_REQUEST.test(value) && !OPT_OUT_NEGATED.test(value) && !OPT_OUT_THIRD_PARTY.test(value) && !OPT_OUT_OTHER_CHANNEL.test(value));
 }
 
 function isUpgradeMutationEnabled() {
@@ -801,8 +813,10 @@ export async function POST(request) {
     // words stay excluded so ordinary sentences containing "cancel" do not
     // trigger the opt-out branch.
     const consentBody = normalizeApostrophes(body);
-    const optOutBody = consentBody.replace(/[\s.!?]+$/, '');
-    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(consentBody) && !OPT_OUT_NEGATED.test(consentBody) && !OPT_OUT_THIRD_PARTY.test(consentBody))) {
+    // Strip ALL trailing punctuation and symbols, not just [.!?]: "STOP," and
+    // "STOP;" are opt-outs too (codex round-11).
+    const optOutBody = consentBody.replace(/[\s\p{P}\p{S}]+$/u, '');
+    if (STOP_KEYWORDS.test(optOutBody) || (OPT_OUT_REQUEST.test(consentBody) && !OPT_OUT_NEGATED.test(consentBody) && !OPT_OUT_THIRD_PARTY.test(consentBody) && !OPT_OUT_OTHER_CHANNEL.test(consentBody))) {
       console.log(`[sms-webhook] STOP received from ${maskPhoneDigits(from)}, opting out`);
 
       // STOP set FIRST, in its own try/catch: this is the authoritative

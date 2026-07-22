@@ -1839,6 +1839,103 @@ describe('twilio webhook route', () => {
       expect(text).toContain('we got your YES');
     });
 
+    it('honors "Please unsubscribe my number" as the sender opting out (codex round-11)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'Please unsubscribe my number',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+    });
+
+    it('honors "STOP," with a trailing comma as an opt-out (codex round-11)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'STOP,',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+    });
+
+    it('never unsubscribes on "I don\'t want you to stop texting me" (negation across recipient, codex round-11)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: "I don't want you to stop texting me",
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).not.toContain('unsubscribed');
+      expect(mockAddToStopSet).not.toHaveBeenCalled();
+      expect(mockUnsubscribeKlaviyoSms).not.toHaveBeenCalled();
+    });
+
+    it('routes "Please unsubscribe me from email updates" to chat, not the SMS STOP branch (codex round-11)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'Please unsubscribe me from email updates',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).not.toContain('unsubscribed');
+      expect(mockAddToStopSet).not.toHaveBeenCalled();
+      expect(mockPostChatMessage).toHaveBeenCalled();
+    });
+
+    it('treats "Yes, don\'t skip it" as a YES (negated refusal word cannot override, codex round-11)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: "Yes, don't skip it",
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('we got your YES');
+    });
+
     it('never opts the SENDER out for third-party unsubscribe questions (codex round-10)', async () => {
       // "How do I unsubscribe my daughter?" and "My husband wants to
       // unsubscribe" discuss someone else's consent; they go to chat, and
