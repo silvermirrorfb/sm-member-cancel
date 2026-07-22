@@ -5,16 +5,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // process state is empty. These tests mock the Upstash client at the module
 // boundary and drive real NX semantics through a stateful store.
 const mockSet = vi.fn();
+const mockSismember = vi.fn();
+const mockSadd = vi.fn();
 
 vi.mock('@upstash/redis', () => ({
   Redis: class {
     constructor() {
       this.set = (...args) => mockSet(...args);
+      this.sismember = (...args) => mockSismember(...args);
+      this.sadd = (...args) => mockSadd(...args);
     }
   },
 }));
 
-import { claimAppliedFollowupSend } from '../src/lib/sms-member-registry.js';
+import { addToStopSet, checkStopSetStrict, claimAppliedFollowupSend } from '../src/lib/sms-member-registry.js';
 
 describe('claimAppliedFollowupSend (durable once-only follow-up send claim)', () => {
   const originalEnv = { ...process.env };
@@ -88,5 +92,49 @@ describe('claimAppliedFollowupSend (durable once-only follow-up send claim)', ()
     expect(await claimAppliedFollowupSend(null)).toBe(false);
     expect(await claimAppliedFollowupSend(undefined)).toBe(false);
     expect(mockSet).not.toHaveBeenCalled();
+  });
+});
+
+describe('stop-set log masking (Redis errors can echo the phone-bearing command)', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test_token';
+    mockSet.mockReset();
+    mockSismember.mockReset();
+    mockSadd.mockReset();
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('checkStopSetStrict masks the phone in its failure log and still returns unknown', async () => {
+    mockSismember.mockRejectedValue(new Error('SISMEMBER sms-stop-set 2134401333 failed'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    expect(await checkStopSetStrict('+12134401333')).toBe('unknown');
+    const logged = warnSpy.mock.calls.flat().map(String).join(' ');
+    expect(logged).not.toContain('2134401333');
+    expect(logged).toContain('1333');
+    warnSpy.mockRestore();
+  });
+
+  it('addToStopSet masks the phone in both its failure log and its success log', async () => {
+    mockSadd.mockRejectedValue(new Error('SADD sms-stop-set 12134401333 failed'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await addToStopSet('+12134401333')).toBe(false);
+    const warned = warnSpy.mock.calls.flat().map(String).join(' ');
+    expect(warned).not.toContain('2134401333');
+    warnSpy.mockRestore();
+
+    mockSadd.mockReset().mockResolvedValue(1);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await addToStopSet('+12134401333')).toBe(true);
+    const logged = logSpy.mock.calls.flat().map(String).join(' ');
+    expect(logged).not.toContain('2134401333');
+    expect(logged).toContain('1333');
+    logSpy.mockRestore();
   });
 });

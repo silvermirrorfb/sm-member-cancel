@@ -1567,6 +1567,24 @@ describe('twilio webhook route', () => {
       warnSpy.mockRestore();
     });
 
+    it('masks the phone when the deferred registry scan fails with the number in the error text', async () => {
+      // The scan now fails inside deferWork's backstop catch, which must be
+      // as PII-lean as the send-path catches.
+      mockRemoveMemberByPhone.mockRejectedValue(new Error('SCAN failed for member +12134401333'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const res = await POST(stopRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      const logged = [...errorSpy.mock.calls, ...warnSpy.mock.calls].flat().map(String).join(' ');
+      expect(logged).not.toContain('12134401333');
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
     it('treats STOP with trailing punctuation as an opt-out (never falls through to the chat bot)', async () => {
       // Security review 2026-07-22: "STOP." previously missed the exact-match
       // keyword regex, fell through to the Claude chat route, and left the

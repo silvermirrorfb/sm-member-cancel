@@ -1,5 +1,19 @@
 import { Redis } from '@upstash/redis';
 
+// Shared PII-lean log masker: anything phone-shaped (8+ digits, with or
+// without separators) is masked down to its last 4 before it reaches a log
+// line. Used by every catch in this module (a Redis client error can echo the
+// full command, which carries the member's number) and imported by the
+// webhook route for its send-path and STOP-handler logs. One definition so
+// the threshold and format cannot drift.
+function maskPhoneDigits(value) {
+  return String(value ?? '').replace(/\+?\d[\d\s().-]{6,}\d/g, match => {
+    const digits = match.replace(/\D/g, '');
+    if (digits.length < 8) return match;
+    return `***${digits.slice(-4)}`;
+  });
+}
+
 const REGISTRY_PREFIX = 'sms-registry:loc:';
 const REGISTRY_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 const PHONE_INDEX_KEY = 'sms-registry:phone-index';
@@ -58,7 +72,7 @@ async function registerMember(canonicalLocationId, member) {
     await redis.expire(key, REGISTRY_TTL_SECONDS);
     return true;
   } catch (e) {
-    console.error('[sms-registry] registerMember failed:', e.message);
+    console.error('[sms-registry] registerMember failed:', maskPhoneDigits(e.message));
     return false;
   }
 }
@@ -103,7 +117,7 @@ async function removeMemberByPhone(phone) {
   // find a stale entry for a number that was just opted out.
   await deletePhoneIndexEntry(phone);
 
-  console.log(`[sms-registry] Removed ${removed} entries for phone ${normalizedPhone}`);
+  console.log(`[sms-registry] Removed ${removed} entries for phone ***${normalizedPhone.slice(-4)}`);
   return removed > 0;
 }
 
@@ -127,7 +141,7 @@ async function setPhoneIndexEntry(phone, clientId, canonicalLocationId) {
     await redis.hset(PHONE_INDEX_KEY, { [key]: value });
     return true;
   } catch (e) {
-    console.error('[sms-registry] setPhoneIndexEntry failed:', e.message);
+    console.error('[sms-registry] setPhoneIndexEntry failed:', maskPhoneDigits(e.message));
     return false;
   }
 }
@@ -144,7 +158,7 @@ async function lookupClientIdByPhoneFromIndex(phone) {
     if (!parsed?.clientId) return null;
     return parsed;
   } catch (e) {
-    console.warn('[sms-registry] lookupClientIdByPhoneFromIndex error:', e.message);
+    console.warn('[sms-registry] lookupClientIdByPhoneFromIndex error:', maskPhoneDigits(e.message));
     return null; // fail-open so caller falls through
   }
 }
@@ -203,10 +217,10 @@ async function addToStopSet(phone) {
     for (const e of entries) {
       await redis.sadd(STOP_SET_KEY, e);
     }
-    console.log(`[stop-set] Added ${norm.slice(-10)} to suppression set`);
+    console.log(`[stop-set] Added ***${norm.slice(-4)} to suppression set`);
     return true;
   } catch (e) {
-    console.warn('[stop-set] Failed to add:', e.message);
+    console.warn('[stop-set] Failed to add:', maskPhoneDigits(e.message));
     return false;
   }
 }
@@ -224,10 +238,11 @@ async function isOnStopSet(phone) {
     }
     return false;
   } catch (e) {
-    console.warn('[stop-set] Failed to check:', e.message);
-    // Fail closed: on Redis error, treat as NOT on stop set (sender will
-    // still have the Klaviyo check as backup). Returning true here would
-    // block legitimate sends if Redis flaps.
+    console.warn('[stop-set] Failed to check:', maskPhoneDigits(e.message));
+    // Fail OPEN: on Redis error, treat as NOT on stop set (sender still has
+    // the Klaviyo check as backup). Returning true here would block
+    // legitimate sends if Redis flaps. Callers that must fail closed use
+    // checkStopSetStrict below.
     return false;
   }
 }
@@ -267,7 +282,7 @@ async function checkStopSetStrict(phone) {
     }
     return 'off';
   } catch (e) {
-    console.warn('[stop-set] Strict check failed:', e.message);
+    console.warn('[stop-set] Strict check failed:', maskPhoneDigits(e.message));
     return 'unknown';
   }
 }
@@ -281,13 +296,6 @@ async function checkStopSetStrict(phone) {
 
 const FOLLOWUP_CLAIM_PREFIX = 'sms-followup-claim:';
 const FOLLOWUP_CLAIM_TTL_SECONDS = 24 * 60 * 60;
-
-// The phone-fallback claim key embeds the member's last 10 digits, and a Redis
-// client error can echo the full command including the key, so the claim's
-// failure log masks long digit runs down to the last 4 before writing.
-function maskDigitRunsForLog(value) {
-  return String(value ?? '').replace(/\d{8,}/g, run => `***${run.slice(-4)}`);
-}
 
 // Returns true ONLY when this call newly claimed the key. false means already
 // claimed, no Redis client, an empty key, or a Redis error; the caller treats
@@ -306,7 +314,7 @@ async function claimAppliedFollowupSend(claimKey) {
     });
     return result === 'OK';
   } catch (e) {
-    console.warn('[followup-claim] Failed to claim:', maskDigitRunsForLog(e.message));
+    console.warn('[followup-claim] Failed to claim:', maskPhoneDigits(e.message));
     return false;
   }
 }
@@ -323,6 +331,7 @@ export {
   checkStopSetStrict,
   removeFromStopSet,
   claimAppliedFollowupSend,
+  maskPhoneDigits,
   STOP_SET_KEY,
   PHONE_INDEX_KEY,
   normalizePhoneForIndex,
