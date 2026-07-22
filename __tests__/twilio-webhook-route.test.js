@@ -1548,6 +1548,24 @@ describe('twilio webhook route', () => {
       errorSpy.mockRestore();
     });
 
+    it('does not block the STOP reply or the Klaviyo fallback on the incident write', async () => {
+      // Codex round-3 P1: when the STOP write fails, Klaviyo is the remaining
+      // suppression fallback, and the incident write does SMTP + Sheets I/O
+      // with no deadline. A hung incident backend must not hold the TwiML
+      // reply or the Klaviyo unsubscribe.
+      mockAddToStopSet.mockResolvedValue(false);
+      mockLogSupportIncident.mockImplementation(() => new Promise(() => {}));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(stopRequest());
+      const text = await res.text();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockUnsubscribeKlaviyoSms).toHaveBeenCalledWith({ phone: '+12134401333' });
+      errorSpy.mockRestore();
+    });
+
     it('queues a support incident when the STOP write throws', async () => {
       mockAddToStopSet.mockRejectedValue(new Error('redis down'));
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

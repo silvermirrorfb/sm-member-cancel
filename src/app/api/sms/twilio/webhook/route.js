@@ -777,18 +777,18 @@ export async function POST(request) {
       }
       if (!stopRecorded) {
         console.error('[sms-webhook] STOP write could not be confirmed, queueing incident for manual suppression');
-        try {
-          await logSupportIncident({
-            date: new Date().toISOString(),
-            session_id: `stop-${Date.now()}`,
-            issue_type: 'sms_stop_record_failed',
-            phone: from,
-            user_message: 'Inbound STOP could not be recorded in the Redis stop-set. Manually verify suppression for this member in Klaviyo and Twilio before any further sends.',
-            reason: 'stop_set_write_unconfirmed',
-          });
-        } catch (e) {
-          console.error('[sms-webhook] STOP incident logging also failed:', maskPhoneDigits(e?.message || e));
-        }
+        // DEFERRED (codex round-3 P1): the incident write does SMTP + Sheets
+        // I/O with no route-level deadline, and in exactly this failure mode
+        // (Redis down) the Klaviyo unsubscribe below is the remaining
+        // suppression fallback, so nothing may block it or the TwiML reply.
+        deferWork(() => logSupportIncident({
+          date: new Date().toISOString(),
+          session_id: `stop-${Date.now()}`,
+          issue_type: 'sms_stop_record_failed',
+          phone: from,
+          user_message: 'Inbound STOP could not be recorded in the Redis stop-set. Manually verify suppression for this member in Klaviyo and Twilio before any further sends.',
+          reason: 'stop_set_write_unconfirmed',
+        }));
       }
 
       // Registry cleanup DEFERRED and off the reply path: removing the member
