@@ -1892,6 +1892,37 @@ describe('twilio webhook route', () => {
       expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
     });
 
+    it('re-checks the STOP set AFTER the durable claim and suppresses when STOP landed during the claim await', async () => {
+      // Codex P1 (2026-07-22 gauntlet): the claim is itself a network await
+      // sitting between the STOP check and the Twilio send. A STOP recorded
+      // in exactly that window must still win: the send path re-checks the
+      // strict gate after the claim and sends only on a second affirmative
+      // 'off'.
+      mockCheckStopSetStrict.mockResolvedValueOnce('off').mockResolvedValueOnce('on');
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      expect(mockCheckStopSetStrict).toHaveBeenCalledTimes(2);
+      logSpy.mockRestore();
+    });
+
     it('does not burn the send claim when the STOP gate already suppressed the follow-up', async () => {
       // A member on the STOP set gets no follow-up AND no claim consumed:
       // the claim exists only to dedupe real sends, and consuming it on a

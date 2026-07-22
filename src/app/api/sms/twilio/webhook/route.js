@@ -676,6 +676,22 @@ async function runDeferredIntentWork({
         followupText = null;
       }
     }
+    // STOP re-check AFTER the claim (Codex P1, 2026-07-22 gauntlet): the claim
+    // above is itself a network await sitting between the first STOP check and
+    // the send, and a STOP recorded in exactly that window must still win.
+    // Same strict tri-state gate: only a second affirmative 'off' sends.
+    if (followupText) {
+      try {
+        const stopVerdictAtSend = await checkStopSetStrict(from);
+        if (stopVerdictAtSend !== 'off') {
+          console.log(`[sms-webhook] applied follow-up suppressed: stop-set verdict '${stopVerdictAtSend}' after send claim`);
+          followupText = null;
+        }
+      } catch (err) {
+        console.error('[sms-webhook] stop-set recheck threw, follow-up suppressed:', maskPhoneDigits(err?.message || err));
+        followupText = null;
+      }
+    }
     if (followupText) {
       try {
         await sendTwilioSms({ to: from, body: followupText, trimBody: trimSmsBodyShort });
