@@ -1757,10 +1757,10 @@ describe('twilio webhook route', () => {
       }
     });
 
-    it('treats an ambiguous bare "please stop" as a decline, not an unsubscribe', async () => {
-      // Without an object ("texting", "messaging") the intent is ambiguous,
-      // so it declines the offer and leaves consent state alone; the member
-      // can always send STOP.
+    it('routes an ambiguous bare "please stop" to chat, touching neither consent nor the offer', async () => {
+      // Without an object ("texting", "messaging") the intent is ambiguous:
+      // the chat bot can ask what the member means. Consent state and the
+      // pending offer stay untouched; the member can always send STOP.
       const session = pendingSession();
       mockGetSessionIdForPhone.mockReturnValue('sess-1');
       mockGetSession.mockReturnValue(session);
@@ -1771,13 +1771,55 @@ describe('twilio webhook route', () => {
       });
 
       const res = await POST(requestWith());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockPostChatMessage).toHaveBeenCalled();
+      expect(mockAddToStopSet).not.toHaveBeenCalled();
+      expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+      expect(session.pendingUpgradeOffer).not.toBeNull();
+    });
+
+    it('never unsubscribes on "Please don\'t stop texting me" (negated stop request, codex round-7)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: "Please don't stop texting me",
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
       const text = await res.text();
       await flushDeferred();
 
       expect(res.status).toBe(200);
-      expect(text).toContain('No problem');
+      expect(text).not.toContain('unsubscribed');
       expect(mockAddToStopSet).not.toHaveBeenCalled();
+      expect(mockUnsubscribeKlaviyoSms).not.toHaveBeenCalled();
       expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
+    });
+
+    it('routes "Can I stop by the front desk?" to chat without consuming the pending offer (codex round-7)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'Can I stop by the front desk?',
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockPostChatMessage).toHaveBeenCalled();
+      expect(mockAddToStopSet).not.toHaveBeenCalled();
+      expect(session.pendingUpgradeOffer).not.toBeNull();
     });
 
     it('still treats a bare "ok" as a YES on a live pending offer', async () => {

@@ -109,7 +109,10 @@ async function lookupProfileWithDeadline(from, scanFn, deadlineMs = PHONE_SCAN_D
 const GENERIC_FAILURE_REPLY = "I'm sorry, something went wrong on our side. Please call (888) 677-0055 for immediate help.";
 const SMS_WEB_HANDOFF_LIMIT = Math.max(Number(process.env.SMS_WEB_HANDOFF_MESSAGE_LIMIT || 10), 1);
 const SMS_WEB_APP_URL = String(process.env.SMS_WEB_APP_URL || 'https://sm-member-cancel.vercel.app/widget').trim();
-const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|please|absolutely)\b/i;
+// "please" is deliberately NOT a YES keyword (red team 2026-07-22): a bare
+// courtesy word is not consent, and it made refusals like "please stop
+// texting me" read affirmative. "yes please" still matches via "yes".
+const YES_KEYWORDS = /\b(yes|yeah|yep|sure|ok|okay|do it|add it|upgrade|let's do it|sounds good|absolutely)\b/i;
 const NO_KEYWORDS = /\b(no|nah|no thanks|not today|pass|i'?m good|skip|decline)\b/i;
 const STOP_KEYWORDS = /^\s*(stop|unsubscribe|cancel|end|quit)\s*$/i;
 const START_KEYWORDS = /^\s*(start|unstop|subscribe|yes\s+resubscribe)\s*$/i;
@@ -145,11 +148,6 @@ function deferWork(fn) {
   }
 }
 
-// Opt-out language inside a longer sentence ("please stop texting me") never
-// reaches the bare-keyword STOP handler, and YES_KEYWORDS matches courtesy
-// words like "please" and "ok", so opt-out phrasing must count as negative or
-// a refusal enqueues a REAL paid apply (red team 2026-07-22).
-const OPT_OUT_PHRASES = /\b(stop|unsubscribe|do not text|don'?t text)\b/i;
 // UNAMBIGUOUS phrase-level opt-out REQUESTS get the full STOP treatment
 // (suppression set + Klaviyo + unsubscribe confirmation), not just a decline
 // (codex round-5 P1: an explicit revocation must be honored in any reasonable
@@ -161,7 +159,7 @@ const OPT_OUT_PHRASES = /\b(stop|unsubscribe|do not text|don'?t text)\b/i;
 // requests, codex round-6). Negated consent statements ("I don't want to
 // unsubscribe") are excluded by OPT_OUT_NEGATED below.
 const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging|sending|contacting)\b|\bdo\s*n[o']?t\s+(?:text|message)\s+me\b|\bunsubscribe\b|\bopt\s+(?:me\s+)?out\b|\btake me off\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b|\bremove me from\s+(?:your\s+|the\s+|this\s+)?(?:list|texts?|messages?|messaging)\b/i;
-const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never|no)\s+(?:want\s+to\s+|wanna\s+)?(?:unsubscribe|opt\s+(?:me\s+)?out)\b/i;
+const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never|no)\s+(?:want\s+to\s+|wanna\s+)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
 
 function isAffirmative(text) {
   return YES_KEYWORDS.test(String(text || '').toLowerCase());
@@ -169,7 +167,12 @@ function isAffirmative(text) {
 
 function isNegative(text) {
   const value = String(text || '').toLowerCase();
-  return NO_KEYWORDS.test(value) || OPT_OUT_PHRASES.test(value);
+  // Beyond the explicit refusal keywords, only an UNAMBIGUOUS, non-negated
+  // opt-out request counts as negative (codex round-7): a stray "stop" or
+  // "unsubscribe" in ordinary conversation ("Can I stop by the front
+  // desk?", "I don't want to unsubscribe") must reach the chat bot, not
+  // consume the pending offer as a decline.
+  return NO_KEYWORDS.test(value) || (OPT_OUT_REQUEST.test(value) && !OPT_OUT_NEGATED.test(value));
 }
 
 function isUpgradeMutationEnabled() {
