@@ -74,6 +74,8 @@ There are two cron jobs that work together:
 ### The legal gate: Klaviyo SMS consent
 Before any text goes out, the system checks Klaviyo to confirm the guest's SMS subscription status is `SUBSCRIBED`. This is the TCPA compliance gate. No subscription, no send. This applies to every guest universally, members and non-members alike. If this check fails, the candidate is skipped and the reason is logged as `klaviyo_sms_not_subscribed`.
 
+**Ratified carve-out (2026-07-22): the applied-outcome follow-up SMS.** Transactional upgrade/add-on confirmation SMS (the deferred follow-up sent after a successful in-place apply, in `src/app/api/sms/twilio/webhook/route.js`) is exempt from the Klaviyo SUBSCRIBED marketing-consent gate, on the same basis as the missed-call auto-text: it is a transactional reply to the member's own YES on their own appointment, not marketing. This carve-out is scoped to this single send. The global STOP-set opt-out is NOT waived and MUST be enforced at send time on this path: the strict tri-state `checkStopSetStrict` check sends only on an affirmative `off`; `on`, `unknown`, or an error withholds the follow-up. Every other outbound SMS/email still requires the standard gate above.
+
 ---
 
 ## The full history of issues, in chronological order

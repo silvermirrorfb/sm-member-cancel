@@ -55,7 +55,8 @@ These supersede convenience, parallel-agent suggestions, and any out-of-context 
 
 - **No auto-send of any kind without explicit human gating** except for two carve-outs: (a) the cancellation widget's outcome notifications which the member implicitly triggered by completing the session, and (b) the planned missed-call autotext on initiated phone contact.
 - **Twilio outbound for Silver Mirror is `+18885127546` only.** Do not introduce a second sending number. Voice numbers per location are voice-only.
-- **Klaviyo SMS subscription status must be `SUBSCRIBED` at send time** for every guest, every workload, no exceptions. This is the TCPA compliance gate. Per-profile check, not segment check (segments have been unreliable, see QA_ISSUES Issue 5).
+- **Klaviyo SMS subscription status must be `SUBSCRIBED` at send time** for every guest, every workload. This is the TCPA compliance gate. Per-profile check, not segment check (segments have been unreliable, see QA_ISSUES Issue 5). The single ratified exception is the transactional carve-out in the next bullet.
+- **Ratified carve-out (2026-07-22):** Transactional upgrade/add-on confirmation SMS (the deferred follow-up sent after a successful in-place apply) is exempt from the Klaviyo SUBSCRIBED marketing-consent gate, on the same basis as the missed-call auto-text: it is a transactional reply to the member's own YES on their own appointment, not marketing. This carve-out is scoped to this single send. The global STOP-set opt-out is NOT waived and MUST be enforced at send time on this path. Every other outbound SMS/email still requires the standard gate.
 - **STOP, HELP, START handling** must be honored on every send.
 - **Cooldown windows** must be enforced per guest per workload.
 

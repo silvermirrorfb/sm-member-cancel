@@ -24,7 +24,19 @@ const mockNotifyUpgradeIncidentOnce = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 const mockSendTwilioSms = vi.fn();
 const mockCheckStopSetStrict = vi.fn();
+const mockCheckKlaviyoSmsOptIn = vi.fn();
+const mockUnsubscribeKlaviyoSms = vi.fn();
 const originalEnv = process.env;
+
+// Ratified carve-out (2026-07-22): the applied-outcome follow-up is a
+// transactional reply to the member's own YES and is exempt from the Klaviyo
+// SUBSCRIBED marketing gate. Klaviyo is mocked so the suite can PROVE the
+// webhook YES path never consults it; only the STOP handler's unsubscribe
+// propagation may touch this module.
+vi.mock('../src/lib/klaviyo.js', () => ({
+  checkKlaviyoSmsOptIn: (...args) => mockCheckKlaviyoSmsOptIn(...args),
+  unsubscribeKlaviyoSms: (...args) => mockUnsubscribeKlaviyoSms(...args),
+}));
 
 // Passthrough mock: only the strict tri-state stop-set check is overridden so
 // the applied-outcome follow-up's send-time STOP gate is controllable; every
@@ -140,6 +152,8 @@ describe('twilio webhook route', () => {
     mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
     mockSendTwilioSms.mockResolvedValue({ sid: 'SM-followup-1' });
     mockCheckStopSetStrict.mockResolvedValue('off');
+    mockCheckKlaviyoSmsOptIn.mockResolvedValue({ subscribed: false, consent: 'UNSUBSCRIBED' });
+    mockUnsubscribeKlaviyoSms.mockResolvedValue({ ok: true });
   });
 
   afterEach(() => {
@@ -1581,6 +1595,36 @@ describe('twilio webhook route', () => {
 
       expect(mockReverifyAndApplyUpgradeForProfile).not.toHaveBeenCalled();
       expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
+    it('CARVE-OUT: sends the follow-up to a member who is NOT Klaviyo-subscribed and not on the STOP set (transactional send, marketing gate does not apply)', async () => {
+      // Ratified 2026-07-22: this send is a transactional reply to the
+      // member's own YES on their own appointment. Klaviyo SUBSCRIBED status
+      // must NOT gate it; only the STOP set does. The default beforeEach
+      // already reports the member as NOT subscribed, so this test proves the
+      // follow-up sends anyway and that Klaviyo is never even consulted.
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockCheckStopSetStrict.mockResolvedValue('off');
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      expect(mockSendTwilioSms.mock.calls[0][0]).toMatchObject({ to: '+12134401333' });
+      expect(mockCheckKlaviyoSmsOptIn).not.toHaveBeenCalled();
     });
 
     it('SUPPRESSES the follow-up when the member is on the STOP set at send time (apply stands, courtesy withheld)', async () => {
