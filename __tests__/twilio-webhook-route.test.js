@@ -2014,6 +2014,75 @@ describe('twilio webhook route', () => {
       logSpy.mockRestore();
     });
 
+    it('keys the send claim by appointment AND offer kind', async () => {
+      // Gauntlet 2026-07-22 (codex adversarial P2 + Claude adversarial 3): an
+      // appointment can legitimately receive two different applied changes
+      // (duration upgrade and add-on) inside the 24h claim TTL. An
+      // appointment-only key would silently swallow the second confirmation
+      // while the booking really changed, defeating outcome truth.
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockClaimAppliedFollowupSend).toHaveBeenCalledWith('appt:appt-1:duration');
+    });
+
+    it('sends BOTH follow-ups when the same appointment gets an add-on and a duration upgrade (distinct claim keys)', async () => {
+      const claimedKeys = new Set();
+      mockClaimAppliedFollowupSend.mockImplementation(async (key) => {
+        if (claimedKeys.has(key)) return false;
+        claimedKeys.add(key);
+        return true;
+      });
+      const session = sessionWith({
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Neck Firming',
+        isMember: true,
+        pricing: { memberPrice: 20, walkinPrice: 25 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied_addon_booking_from_appointment' });
+
+      const res1 = await POST(yesRequest());
+      await res1.text();
+      await flushDeferred();
+
+      // Later the same day: a duration offer on the SAME appointment gets a YES.
+      session.pendingUpgradeOffer = {
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: true,
+        deltaDollars: 50,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      };
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res2 = await POST(yesRequest());
+      await res2.text();
+      await flushDeferred();
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(2);
+    });
+
     it('does not burn the send claim when the STOP gate already suppressed the follow-up', async () => {
       // A member on the STOP set gets no follow-up AND no claim consumed:
       // the claim exists only to dedupe real sends, and consuming it on a

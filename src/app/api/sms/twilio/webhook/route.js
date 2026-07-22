@@ -651,10 +651,15 @@ async function runDeferredIntentWork({
     // then fails stays consumed (at-most-once is the contract; the member
     // still holds the manual-confirm ack).
     if (followupText) {
+      // Key includes the offer kind (gauntlet 2026-07-22): the same
+      // appointment can legitimately receive a duration upgrade AND an
+      // add-on inside the 24h TTL, and each real change gets its own
+      // confirmation; only a same-kind repeat is a duplicate.
       const appointmentKey = String(offerForLog?.appointmentId || '').trim();
+      const offerKindForClaim = String(offerForLog?.offerKind || 'duration').toLowerCase();
       const claimKey = appointmentKey
-        ? `appt:${appointmentKey}`
-        : `phone:${normalizePhoneForIndex(from) || String(from || '').trim()}`;
+        ? `appt:${appointmentKey}:${offerKindForClaim}`
+        : `phone:${normalizePhoneForIndex(from) || String(from || '').trim()}:${offerKindForClaim}`;
       let claimed = false;
       try {
         claimed = (await claimAppliedFollowupSend(claimKey)) === true;
