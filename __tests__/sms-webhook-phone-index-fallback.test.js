@@ -50,6 +50,11 @@ vi.mock('../src/lib/twilio.js', () => ({
   buildTwimlMessage: (...args) => mockBuildTwimlMessage(...args),
   isValidTwilioSignature: (...args) => mockIsValidTwilioSignature(...args),
   parseTwilioFormBody: (...args) => mockParseTwilioFormBody(...args),
+  // The route also imports the follow-up send surface (2026-07-22); stub them so
+  // a future success-path test here fails loudly instead of a missing-export
+  // error being swallowed by the route's send try/catch.
+  sendTwilioSms: async () => ({ sid: 'SM-stub' }),
+  trimSmsBodyShort: (text) => text,
 }));
 
 vi.mock('../src/app/api/chat/message/route.js', () => ({

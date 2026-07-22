@@ -59,3 +59,12 @@ Deferred work captured during reviews. Each item has enough context to pick up c
 **Pros:** Pure deletion. **Cons:** None.
 
 **Context:** Pre-existing, surfaced by the maintainability specialist during the PR #53 gauntlet (2026-06-10). Best folded into the named follow-up PR that makes `unsubscribeKlaviyoSms` revoke EVERY profile on the phone on STOP (cited in the PR #53 body).
+
+## Applied-outcome follow-up SMS: deferred hardening (round-2 gauntlet, 2026-07-22)
+
+**What:** Three items deliberately deferred from the fix/sms-yes-outcome-followup round-2 commit (one concern per PR):
+1. Durable idempotency key for the YES apply + follow-up (Redis SETNX per appointment) so double-YES / cross-instance Twilio redelivery cannot double-apply or double-text; the in-memory MessageSid replay cache is per-instance.
+2. PII-lean logging: keep raw Twilio error messages (which can embed the destination phone) out of Vercel logs; log error code/status or last-4 only.
+3. Remove the dead buildUpgradeApplyReply in the webhook route (never called; superseded by buildAppliedFollowupSms).
+
+**Context:** Flagged by the 2026-07-22 /codex + /review + /cso gauntlet on the follow-up SMS PR; the merge-blocking items (send-time STOP gate, undisclosed-price confirmation, price-guess fallbacks, audit-row ordering) were fixed in that round-2 commit.

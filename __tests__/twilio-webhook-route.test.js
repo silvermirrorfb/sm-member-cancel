@@ -23,7 +23,17 @@ const mockLogSupportIncident = vi.fn();
 const mockNotifyUpgradeIncidentOnce = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 const mockSendTwilioSms = vi.fn();
+const mockIsOnStopSet = vi.fn();
 const originalEnv = process.env;
+
+// Passthrough mock: only isOnStopSet is overridden so the applied-outcome
+// follow-up's send-time STOP gate is controllable; every other registry export
+// (STOP/START handlers use addToStopSet/removeFromStopSet via dynamic import)
+// keeps its real no-Redis no-op behavior.
+vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, isOnStopSet: (...args) => mockIsOnStopSet(...args) };
+});
 
 vi.mock('../src/lib/rate-limit.js', () => ({
   checkRateLimit: (...args) => mockCheckRateLimit(...args),
@@ -129,6 +139,7 @@ describe('twilio webhook route', () => {
     mockNotifyUpgradeIncidentOnce.mockReset().mockResolvedValue({ sent: true, deduped: false });
     mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
     mockSendTwilioSms.mockResolvedValue({ sid: 'SM-followup-1' });
+    mockIsOnStopSet.mockResolvedValue(false);
   });
 
   afterEach(() => {
@@ -1572,6 +1583,206 @@ describe('twilio webhook route', () => {
       expect(mockSendTwilioSms).not.toHaveBeenCalled();
     });
 
+    it('SUPPRESSES the follow-up when the member is on the STOP set at send time (apply stands, courtesy withheld)', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockIsOnStopSet.mockResolvedValue(true);
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      // The suppression is logged, and no follow-up outbound row is written.
+      expect(logSpy.mock.calls.flat().join(' ')).toContain('suppressed');
+      const outboundRows = mockLogSmsChatMessages.mock.calls
+        .flatMap(call => call[0])
+        .filter(row => row && row.direction === 'outbound');
+      expect(outboundRows.map(r => r.content).join(' ')).not.toContain("You're all set");
+    });
+
+    it('SUPPRESSES the follow-up when the stop-set check itself throws (never send on doubt)', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        totalDollars: 169,
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockIsOnStopSet.mockRejectedValue(new Error('redis down'));
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
+    it('sends OUTCOME-ONLY copy (no dollar figure) on the no-pending-offer re-derive path: never state a price the member was not quoted', async () => {
+      const session = {
+        id: 'sess-1',
+        status: 'active',
+        smsInboundCount: 0,
+        memberProfile: { phone: '+12134401333', name: 'Matt Maroone', clientId: 'client-1' },
+      };
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockEvaluateUpgradeOpportunityForProfile.mockResolvedValue({
+        eligible: true,
+        appointmentId: 'appt-rederive-1',
+        currentDurationMinutes: 30,
+        targetDurationMinutes: 50,
+        pricing: { walkinDelta: 50, walkinTotal: 169, offeredTotal: 169 },
+      });
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      const body = String(mockSendTwilioSms.mock.calls[0][0].body);
+      expect(body).toContain("You're all set, your facial is now 50 minutes");
+      expect(body).not.toContain('$');
+    });
+
+    it('omits the price when a KNOWN member has no resolvable member price (never falls through to walk-in)', async () => {
+      const session = sessionWith({
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Neck Firming',
+        isMember: true,
+        pricing: { walkinPrice: 25 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied_addon_booking_from_appointment' });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      const body = String(mockSendTwilioSms.mock.calls[0][0].body);
+      expect(body).toContain("Neck Firming is added to today's facial");
+      expect(body).not.toContain('$');
+    });
+
+    it('omits the price when a duration offer has no persisted totalDollars (never guesses from walk-in tables)', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: true,
+        pricing: { walkinTotal: 169, offeredTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      const body = String(mockSendTwilioSms.mock.calls[0][0].body);
+      expect(body).toContain('your facial is now 50 minutes');
+      expect(body).not.toContain('$');
+    });
+
+    it('writes the ack audit row BEFORE the Twilio send so a hung send cannot eat the audit trail', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      let rowsLoggedAtSendTime = -1;
+      mockSendTwilioSms.mockImplementation(async () => {
+        rowsLoggedAtSendTime = mockLogSmsChatMessages.mock.calls
+          .flatMap(call => call[0])
+          .filter(row => row && row.direction === 'outbound').length;
+        return { sid: 'SM-followup-1' };
+      });
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
+      expect(rowsLoggedAtSendTime).toBeGreaterThanOrEqual(1);
+    });
+
+    it('logs exactly one outbound row and no success copy when the follow-up send itself fails', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockSendTwilioSms.mockRejectedValue(new Error('twilio down'));
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      const outboundRows = mockLogSmsChatMessages.mock.calls
+        .flatMap(call => call[0])
+        .filter(row => row && row.direction === 'outbound');
+      expect(outboundRows).toHaveLength(1);
+      expect(outboundRows[0].content).toContain('team will confirm');
+      expect(outboundRows.map(r => r.content).join(' ')).not.toContain("You're all set");
+    });
+
+    it('sends NO follow-up when the deferred apply itself throws', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        totalDollars: 169,
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockRejectedValue(new Error('boulevard 500'));
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
     it('never says "your facial is now 50 minutes" on any path where the apply did not succeed', async () => {
       const failures = [
         { success: false, reason: 'no_longer_available' },
@@ -1593,6 +1804,7 @@ describe('twilio webhook route', () => {
         mockNotifyUpgradeIncidentOnce.mockResolvedValue({ sent: true, deduped: false });
         mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
         mockSendTwilioSms.mockResolvedValue({ sid: 'SM-followup-1' });
+        mockIsOnStopSet.mockResolvedValue(false);
         mockGetAllActiveSessions.mockResolvedValue([]);
         const session = sessionWith({
           offerKind: 'duration',
