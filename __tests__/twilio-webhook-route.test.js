@@ -2080,6 +2080,74 @@ describe('twilio webhook route', () => {
       expect(mockUnsubscribeKlaviyoSms).not.toHaveBeenCalled();
     });
 
+    it('round-14 batch: negated contractions, third-party stop-texting, email messages, wont-skip', async () => {
+      // Four codex round-14 P1s, one loop. Cases that must NOT mutate the
+      // sender's consent: "I won't unsubscribe", "I'm not ready to
+      // unsubscribe", "Please stop texting my daughter", "unsubscribe me
+      // from email messages".
+      const noConsentMutation = [
+        "I won't unsubscribe",
+        "I'm not ready to unsubscribe",
+        'Please stop texting my daughter',
+        'unsubscribe me from email messages',
+      ];
+      for (const bodyText of noConsentMutation) {
+        vi.clearAllMocks();
+        mockCheckRateLimit.mockReturnValue({ allowed: true, retryAfterMs: 0, limit: 120, remaining: 119, backend: 'memory' });
+        mockBuildRateLimitHeaders.mockReturnValue({});
+        mockGetClientIP.mockReturnValue('127.0.0.1');
+        mockSaveSession.mockImplementation(async (s) => s);
+        mockGetReplyForMessageSid.mockReturnValue(null);
+        mockIsValidTwilioSignature.mockReturnValue(true);
+        mockNormalizePhone.mockImplementation(value => String(value || ''));
+        mockBuildTwimlMessage.mockImplementation(t => `<Response><Message>${t}</Message></Response>`);
+        mockGetAllActiveSessions.mockResolvedValue([]);
+        mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
+        mockPostChatMessage.mockResolvedValue(
+          new Response(JSON.stringify({ message: 'Handled in chat' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+        mockParseTwilioFormBody.mockReturnValue({
+          From: '+12134401333',
+          Body: bodyText,
+          MessageSid: 'SM-intent-1',
+        });
+        const session = pendingSession();
+        mockGetSessionIdForPhone.mockReturnValue('sess-1');
+        mockGetSession.mockReturnValue(session);
+
+        const res = await POST(requestWith());
+        const text = await res.text();
+        await flushDeferred();
+
+        expect(res.status, bodyText).toBe(200);
+        expect(text, bodyText).not.toContain('unsubscribed');
+        expect(mockAddToStopSet, bodyText).not.toHaveBeenCalled();
+        expect(mockUnsubscribeKlaviyoSms, bodyText).not.toHaveBeenCalled();
+      }
+    });
+
+    it('treats "Yes, I won\'t skip it" as a YES (wont contraction, codex round-14)', async () => {
+      const session = pendingSession();
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: false, reason: 'no_longer_available' });
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: "Yes, I won't skip it",
+        MessageSid: 'SM-intent-1',
+      });
+
+      const res = await POST(requestWith());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('we got your YES');
+    });
+
     it('honors an opt-out typed with an iPhone smart apostrophe (codex round-8)', async () => {
       const session = pendingSession();
       mockGetSessionIdForPhone.mockReturnValue('sess-1');

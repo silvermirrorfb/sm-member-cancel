@@ -172,13 +172,13 @@ const OPT_OUT_REQUEST = /\b(?:stop|quit)\s+(?:texting|messaging)(?:\s+me)?\b|\b(
 // standalone "No" is an answer, not negation: "No I want to unsubscribe" is
 // an explicit opt-out (codex round-9), while "I'm not trying to
 // unsubscribe" negates.
-const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|not|never)\s+(?:ever\s+|really\s+)?(?:(?:want|wanna|trying|asking|looking|going)\s+(?:you\s+to\s+|to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
+const OPT_OUT_NEGATED = /\b(?:do\s*n[o']?t|wo\s*n[o']?t|will\s+not|ca\s*n[o']?t|cannot|not|never)\s+(?:ever\s+|really\s+|ready\s+to\s+)?(?:(?:want|wanna|trying|asking|looking|going)\s+(?:you\s+to\s+|to\s+)?)?(?:unsubscribe|opt\s+(?:me\s+)?out|(?:stop|quit)\s+(?:texting|messaging|sending|contacting))\b/i;
 // Third-party mentions discuss another PERSON's consent ("unsubscribe my
 // daughter", "my husband wants to unsubscribe") and must never mutate the
 // SENDER's consent state; they go to chat (codex round-10). Bounded to
 // person words: sender-owned objects like "my number" or "my phone" are the
 // sender opting out (codex round-11), so the default stays opt-out.
-const OPT_OUT_THIRD_PARTY = /\b(?:unsubscribe|opt\s+out)\s+(?:my|our|his|her|their)\s+(?:husband|wife|spouse|partner|boyfriend|girlfriend|daughter|son|kids?|child|children|mom|mother|dad|father|sister|brother|friend|grand\w+)\b|\b(?:unsubscribe|opt\s+out)\s+(?:him|her|them)\b|\b(?:my|our|his|her|their)\s+\w+\s+(?:wants?|needs?|would like|is trying)\s+to\s+(?:unsubscribe|opt\s+out)\b/i;
+const OPT_OUT_THIRD_PARTY = /\b(?:unsubscribe|opt\s+out|(?:stop|quit)\s+(?:texting|messaging|contacting))\s+(?:my|our|his|her|their)\s+(?:husband|wife|spouse|partner|boyfriend|girlfriend|daughter|son|kids?|child|children|mom|mother|dad|father|sister|brother|friend|grand\w+)\b|\b(?:unsubscribe|opt\s+out|(?:stop|quit)\s+(?:texting|messaging|contacting))\s+(?:him|her|them)\b|\b(?:my|our|his|her|their)\s+\w+\s+(?:wants?|needs?|would like|is trying)\s+to\s+(?:unsubscribe|opt\s+out)\b/i;
 // Other-target requests ("unsubscribe me from email updates", "unsubscribe
 // me from my membership") are not an SMS consent revocation; the chat bot
 // handles them (codex rounds 11 and 12). Membership and appointment targets
@@ -187,8 +187,9 @@ const OPT_OUT_OTHER_TARGET = /\b(?:unsubscribe|opt\s+(?:me\s+)?out)\b[^.!?,;]{0,
 // A clause that names an SMS target keeps its opt-out even when it also
 // names another channel: "unsubscribe me from texts and emails" revokes SMS
 // consent (codex round-13); the other-target veto only applies to clauses
-// with NO SMS target.
-const OPT_OUT_SMS_TARGET = /\b(?:texts?|texting|messages?|messaging|sms)\b/i;
+// with NO SMS target. Deliberately excludes bare "messages"/"messaging":
+// "email messages" would otherwise read as an SMS target (codex round-14).
+const OPT_OUT_SMS_TARGET = /\b(?:texts?|texting|sms)\b/i;
 
 // Phrase-level opt-outs are evaluated PER CLAUSE so an unrelated clause can
 // never veto an explicit SMS opt-out clause ("Unsubscribe me from email,
@@ -223,8 +224,8 @@ function isNegative(text) {
   // negator plus one verb. The "not" negator is deliberately NOT stripped:
   // "not today" is itself a refusal keyword.
   const refusalScope = value
-    .replace(/\b(?:do\s*n[o']?t|never)\s+(?:\w+\s+){0,3}?(?:skip|pass|decline)\b/g, ' ')
-    .replace(/\b(?:do\s*n[o']?t|never)\s+\w+\b/g, ' ');
+    .replace(/\b(?:do\s*n[o']?t|wo\s*n[o']?t|will\s+not|ca\s*n[o']?t|cannot|never)\s+(?:\w+\s+){0,3}?(?:skip|pass|decline)\b/g, ' ')
+    .replace(/\b(?:do\s*n[o']?t|wo\s*n[o']?t|will\s+not|ca\s*n[o']?t|cannot|never)\s+\w+\b/g, ' ');
   // Beyond the explicit refusal keywords, only an UNAMBIGUOUS, non-negated,
   // sender-directed, SMS-targeted opt-out clause counts as negative (codex
   // rounds 7, 10, 11, 12): a stray "stop" or "unsubscribe" in ordinary
