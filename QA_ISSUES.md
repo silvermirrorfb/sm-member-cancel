@@ -2,7 +2,7 @@
 
 **Purpose:** Canonical, living ledger of every known production issue across the cancel bot and outbound SMS systems in this repo. Read this before opening any PR. Update this when shipping a fix or surfacing a new issue.
 
-**Last updated:** May 28, 2026 (Phase 1-10 decision-audit branch + P2 code-level follow-up branch. Decision-audit branch `fix/cancel-bot-decision-audit-2026-05-27` shipped cancel-bot #25-29 plus lock-in regressions and the Decision 7 open-conflict surface. Stacked follow-up branch `fix/cancel-bot-code-level-sla-and-perk-enforcement` shipped cancel-bot #30 server-side SLA strings stripped + cancel-bot #31 runtime perk-value injection stripped. Both branches awaiting Matt's ship word; second branch depends on the first merging first.)
+**Last updated:** July 22, 2026 (outbound-sms #15, #16, #17 fixed in code on branch `fix/carveout-followup-hardening`, awaiting Matt's merge; Klaviyo transactional carve-out for the applied follow-up ratified in CLAUDE.md and docs/outbound-sms-system-and-issues.md. Prior update May 28, 2026: Phase 1-10 decision-audit branch + P2 code-level follow-up branch. Decision-audit branch `fix/cancel-bot-decision-audit-2026-05-27` shipped cancel-bot #25-29 plus lock-in regressions and the Decision 7 open-conflict surface. Stacked follow-up branch `fix/cancel-bot-code-level-sla-and-perk-enforcement` shipped cancel-bot #30 server-side SLA strings stripped + cancel-bot #31 runtime perk-value injection stripped. Both branches awaiting Matt's ship word; second branch depends on the first merging first.)
 **Maintainer:** Matt Maroone, with AI agent updates on every PR merge
 **Source docs:** `docs/outbound-sms-system-and-issues.md`, `docs/cancel-bot-system-and-issues.md`
 
@@ -281,6 +281,17 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 **Symptom:** The applied-outcome follow-up SMS had no durable idempotency. The MessageSid replay cache is in-memory and per-instance, so a Twilio webhook redelivery (or a double YES) landing on a different serverless instance could re-run the deferred apply path and send the follow-up twice.
 
 **Fix:** New `claimAppliedFollowupSend` in `src/lib/sms-member-registry.js`: a durable Redis SET NX claim with a 24h TTL, keyed `appt:<appointmentId>` (falling back to `phone:<last10>` when no appointment id survived). The webhook takes the claim AFTER the send-time STOP gate (a suppressed pass never consumes it) and BEFORE the Twilio send; anything but a fresh claim withholds the send (fail closed, at-most-once). Tests: `__tests__/sms-followup-claim.test.js` (NX semantics, TTL, fail-closed paths) plus route-level double-delivery, claim-not-burned-on-STOP, and claim-refused tests in `__tests__/twilio-webhook-route.test.js`.
+
+---
+
+### outbound-sms #17
+**Status:** FIXED IN CODE 2026-07-22 (branch `fix/carveout-followup-hardening`, awaiting Matt's merge)
+**Severity:** PII hygiene (raw member phone numbers in error logs)
+**Discovered:** 2026-07-22 (deferred follow-up from the #86 review round)
+
+**Symptom:** Error logs on the applied follow-up send path echoed raw E.164 phone numbers: Twilio failure text includes the To number, and stop-set or claim errors can embed the number too. Vercel log drains and Sentry then hold member phone numbers in plain text.
+
+**Fix:** `maskPhoneDigits` in the webhook route masks anything phone-shaped (8+ digits) down to `***` plus the last 4 before logging, applied to all three send-path error catches (stop-set check threw, send claim threw, Twilio send failed). Tests force each error with a full E.164 embedded and assert no full number reaches the logs. Related pre-existing gap, NOT addressed here: `docs/MONITORING_SUMMARY_sms-path1.md` item 3 notes the SMS Sheet logs the outbound phone unmasked by design; that is a Sheet-scope decision, not an error-log leak.
 
 ---
 

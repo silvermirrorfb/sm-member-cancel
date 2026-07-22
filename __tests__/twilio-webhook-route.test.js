@@ -2002,6 +2002,88 @@ describe('twilio webhook route', () => {
       expect(outboundRows.map(r => r.content).join(' ')).not.toContain("You're all set");
     });
 
+    it('logs NO full phone number when the follow-up send fails (PII masked to last 4)', async () => {
+      // Twilio error text echoes the To number. The send-path error logs must
+      // carry at most the last 4 digits.
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        isMember: false,
+        deltaDollars: 50,
+        totalDollars: 169,
+        pricing: { walkinDelta: 50, walkinTotal: 169 },
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockSendTwilioSms.mockRejectedValue(new Error("The 'To' phone number +12134401333 is not currently reachable"));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).toContain('applied follow-up send failed');
+      expect(logged).not.toContain('12134401333');
+      expect(logged).toContain('1333');
+      errorSpy.mockRestore();
+    });
+
+    it('logs NO full phone number when the stop-set check throws with the number in the error text', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        totalDollars: 169,
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockCheckStopSetStrict.mockRejectedValue(new Error('lookup failed for +12134401333'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).toContain('stop-set check threw');
+      expect(logged).not.toContain('12134401333');
+      errorSpy.mockRestore();
+    });
+
+    it('logs NO full phone number when the send claim throws with the number in the error text', async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        totalDollars: 169,
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockClaimAppliedFollowupSend.mockRejectedValue(new Error('claim write failed for +12134401333'));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+      const logged = errorSpy.mock.calls.flat().map(String).join(' ');
+      expect(logged).toContain('follow-up send claim threw');
+      expect(logged).not.toContain('12134401333');
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
     it('sends NO follow-up when the deferred apply itself throws', async () => {
       const session = sessionWith({
         offerKind: 'duration',

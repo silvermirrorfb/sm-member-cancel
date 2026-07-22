@@ -145,6 +145,17 @@ function deferWork(fn) {
   }
 }
 
+// PII-lean logging on the send path: error text can echo the destination
+// number (Twilio errors include the To number), so anything phone-shaped is
+// masked down to its last 4 digits before it reaches the logs.
+function maskPhoneDigits(value) {
+  return String(value ?? '').replace(/\+?\d[\d\s().-]{7,}\d/g, match => {
+    const digits = match.replace(/\D/g, '');
+    if (digits.length < 8) return match;
+    return `***${digits.slice(-4)}`;
+  });
+}
+
 function isAffirmative(text) {
   return YES_KEYWORDS.test(String(text || '').toLowerCase());
 }
@@ -637,7 +648,7 @@ async function runDeferredIntentWork({
         followupText = null;
       }
     } catch (err) {
-      console.error('[sms-webhook] stop-set check threw, follow-up suppressed:', err?.message || err);
+      console.error('[sms-webhook] stop-set check threw, follow-up suppressed:', maskPhoneDigits(err?.message || err));
       followupText = null;
     }
     // Durable once-only send claim (Redis SET NX), taken AFTER the STOP gate
@@ -658,7 +669,7 @@ async function runDeferredIntentWork({
       try {
         claimed = (await claimAppliedFollowupSend(claimKey)) === true;
       } catch (err) {
-        console.error('[sms-webhook] follow-up send claim threw, follow-up suppressed:', err?.message || err);
+        console.error('[sms-webhook] follow-up send claim threw, follow-up suppressed:', maskPhoneDigits(err?.message || err));
       }
       if (!claimed) {
         console.log('[sms-webhook] applied follow-up suppressed: send claim not acquired (duplicate delivery or claim unavailable)');
@@ -669,7 +680,7 @@ async function runDeferredIntentWork({
       try {
         await sendTwilioSms({ to: from, body: followupText, trimBody: trimSmsBodyShort });
       } catch (err) {
-        console.error('[sms-webhook] applied follow-up send failed:', err?.message || err);
+        console.error('[sms-webhook] applied follow-up send failed:', maskPhoneDigits(err?.message || err));
         followupText = null;
       }
     }
