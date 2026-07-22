@@ -196,10 +196,27 @@ function pickIndefiniteArticle(phrase) {
   return /^[aeiou]/.test(token) ? 'an' : 'a';
 }
 
-function withIndefiniteArticle(phrase) {
+function withIndefiniteArticle(phrase, { capitalize = false } = {}) {
   const value = String(phrase || '').trim();
-  if (!value) return 'an add-on';
-  return `${pickIndefiniteArticle(value)} ${value}`;
+  if (!value) return capitalize ? 'An add-on' : 'an add-on';
+  const article = pickIndefiniteArticle(value);
+  const cased = capitalize ? article.charAt(0).toUpperCase() + article.slice(1) : article;
+  return `${cased} ${value}`;
+}
+
+// Membership-aware price sentence tail for the add-on YES ack. A KNOWN member is
+// quoted the member price; a KNOWN non-member is quoted the walk-in price with NO
+// member-discount tease (owner call 2026-07-22 after the live test read wrong);
+// only UNKNOWN membership keeps the generic note.
+function buildAddonPriceTail(offer, walkinPrice) {
+  const memberPrice = Number(offer?.pricing?.memberPrice);
+  if (offer?.isMember === true && Number.isFinite(memberPrice) && memberPrice > 0) {
+    return `is $${memberPrice} with your membership.`;
+  }
+  if (offer?.isMember === false) {
+    return `is $${walkinPrice}.`;
+  }
+  return `is $${walkinPrice} (members get 20% off).`;
 }
 
 function buildPendingOfferFinalizeReply(offer) {
@@ -208,10 +225,11 @@ function buildPendingOfferFinalizeReply(offer) {
     const price = Number(offer?.pricing?.walkinPrice || 0);
     const allowedName = getAllowedAddonDisplayName(offer?.addOnName);
     if (Number.isFinite(price)) {
+      const priceTail = buildAddonPriceTail(offer, price);
       if (allowedName) {
-        return `Thanks, we got your YES. ${withIndefiniteArticle(allowedName)} is $${price} (members get 20% off). Our team will confirm before your appointment.`;
+        return `Thanks, we got your YES. ${withIndefiniteArticle(allowedName, { capitalize: true })} ${priceTail} Our team will confirm before your appointment.`;
       }
-      return `Thanks, we got your YES. The add-on is $${price} (members get 20% off). Our team will confirm before your appointment.`;
+      return `Thanks, we got your YES. The add-on ${priceTail} Our team will confirm before your appointment.`;
     }
     if (allowedName) {
       return `Thanks, we got your YES. We received your request for ${withIndefiniteArticle(allowedName)} and our team will confirm before your appointment.`;

@@ -740,7 +740,10 @@ describe('twilio webhook route', () => {
     await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('an Antioxidant Peel is $95 (members get 20% off).');
+    // Sentence-cased article; a KNOWN non-member is never teased with member
+    // pricing (owner call 2026-07-22 after the live test read wrong).
+    expect(text).toContain('An Antioxidant Peel is $95.');
+    expect(text).not.toContain('members get 20% off');
     expect(text).toContain('Our team will confirm before your appointment.');
     expect(session.pendingUpgradeOffer).toBeNull();
     expect(mockLookupMember).not.toHaveBeenCalled();
@@ -751,6 +754,70 @@ describe('twilio webhook route', () => {
       issue_type: 'sms_upgrade_manual_followup',
       reason: 'manual_addon_confirmation',
     });
+  });
+
+  it('quotes the member price to a KNOWN member in the add-on confirmation', async () => {
+    process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Antioxidant Peel',
+        isMember: true,
+        pricing: { memberPrice: 76, walkinPrice: 95 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+    await flushDeferred();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('An Antioxidant Peel is $76 with your membership.');
+    expect(text).not.toContain('members get 20% off');
+  });
+
+  it('keeps the generic member note only when membership is UNKNOWN on the pending add-on offer', async () => {
+    process.env.BOULEVARD_ENABLE_UPGRADE_MUTATION = 'false';
+    const session = {
+      id: 'sess-1',
+      status: 'active',
+      smsInboundCount: 0,
+      pendingUpgradeOffer: {
+        offerKind: 'addon',
+        appointmentId: 'appt-1',
+        addOnName: 'Antioxidant Peel',
+        pricing: { memberPrice: 76, walkinPrice: 95 },
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      },
+    };
+    mockGetSessionIdForPhone.mockReturnValue('sess-1');
+    mockGetSession.mockReturnValue(session);
+
+    const req = new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+      method: 'POST',
+      headers: { 'x-twilio-signature': 'sig' },
+      body: 'From=%2B12134401333&Body=Yes&MessageSid=SM-in-1',
+    });
+
+    const res = await POST(req);
+    const text = await res.text();
+    await flushDeferred();
+
+    expect(res.status).toBe(200);
+    expect(text).toContain('An Antioxidant Peel is $95 (members get 20% off).');
   });
 
   it('applies pending add-on YES through the live mutation path when enabled', async () => {
@@ -905,7 +972,9 @@ describe('twilio webhook route', () => {
     await flushDeferred();
 
     expect(res.status).toBe(200);
-    expect(text).toContain('an Antioxidant Peel is $50');
+    // This pending offer is a KNOWN member, so the ack quotes the member price
+    // (copy contract 2026-07-22; the old walk-in-with-discount-note copy was the bug).
+    expect(text).toContain('An Antioxidant Peel is $40 with your membership.');
     expect(text).toContain('Our team will confirm before your appointment.');
     expect(remoteSession.pendingUpgradeOffer).toBeNull();
     expect(mockBindPhoneToSession).toHaveBeenCalledWith('+12134401333', 'sess-remote');
