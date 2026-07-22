@@ -23,16 +23,16 @@ const mockLogSupportIncident = vi.fn();
 const mockNotifyUpgradeIncidentOnce = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 const mockSendTwilioSms = vi.fn();
-const mockIsOnStopSet = vi.fn();
+const mockCheckStopSetStrict = vi.fn();
 const originalEnv = process.env;
 
-// Passthrough mock: only isOnStopSet is overridden so the applied-outcome
-// follow-up's send-time STOP gate is controllable; every other registry export
-// (STOP/START handlers use addToStopSet/removeFromStopSet via dynamic import)
-// keeps its real no-Redis no-op behavior.
+// Passthrough mock: only the strict tri-state stop-set check is overridden so
+// the applied-outcome follow-up's send-time STOP gate is controllable; every
+// other registry export (STOP/START handlers use addToStopSet/removeFromStopSet
+// via dynamic import) keeps its real no-Redis no-op behavior.
 vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, isOnStopSet: (...args) => mockIsOnStopSet(...args) };
+  return { ...actual, checkStopSetStrict: (...args) => mockCheckStopSetStrict(...args) };
 });
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -139,7 +139,7 @@ describe('twilio webhook route', () => {
     mockNotifyUpgradeIncidentOnce.mockReset().mockResolvedValue({ sent: true, deduped: false });
     mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
     mockSendTwilioSms.mockResolvedValue({ sid: 'SM-followup-1' });
-    mockIsOnStopSet.mockResolvedValue(false);
+    mockCheckStopSetStrict.mockResolvedValue('off');
   });
 
   afterEach(() => {
@@ -1468,7 +1468,7 @@ describe('twilio webhook route', () => {
       expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
       expect(mockSendTwilioSms.mock.calls[0][0]).toMatchObject({
         to: '+12134401333',
-        body: "You're all set, your facial is now 50 minutes, $169 total. See you soon.",
+        body: "You're all set, your facial is now 50 minutes for $50 more. See you soon.",
       });
     });
 
@@ -1491,7 +1491,7 @@ describe('twilio webhook route', () => {
       expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
       expect(mockSendTwilioSms.mock.calls[0][0]).toMatchObject({
         to: '+12134401333',
-        body: "You're all set, Neck Firming is added to today's facial, $20 total. See you soon.",
+        body: "You're all set, Neck Firming is added to today's facial for $20. See you soon.",
       });
     });
 
@@ -1512,7 +1512,7 @@ describe('twilio webhook route', () => {
       await flushDeferred();
 
       expect(mockSendTwilioSms).toHaveBeenCalledTimes(1);
-      expect(mockSendTwilioSms.mock.calls[0][0].body).toBe("You're all set, Neck Firming is added to today's facial, $25 total. See you soon.");
+      expect(mockSendTwilioSms.mock.calls[0][0].body).toBe("You're all set, Neck Firming is added to today's facial for $25. See you soon.");
     });
 
     it('sends NO follow-up when the apply fails: the manual-confirm stays the last word', async () => {
@@ -1596,7 +1596,7 @@ describe('twilio webhook route', () => {
       mockGetSessionIdForPhone.mockReturnValue('sess-1');
       mockGetSession.mockReturnValue(session);
       mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
-      mockIsOnStopSet.mockResolvedValue(true);
+      mockCheckStopSetStrict.mockResolvedValue('on');
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
       const res = await POST(yesRequest());
@@ -1623,7 +1623,28 @@ describe('twilio webhook route', () => {
       mockGetSessionIdForPhone.mockReturnValue('sess-1');
       mockGetSession.mockReturnValue(session);
       mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
-      mockIsOnStopSet.mockRejectedValue(new Error('redis down'));
+      mockCheckStopSetStrict.mockRejectedValue(new Error('redis down'));
+
+      const res = await POST(yesRequest());
+      await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(mockSendTwilioSms).not.toHaveBeenCalled();
+    });
+
+    it("SUPPRESSES the follow-up when the stop-set state is 'unknown' (no Redis answer): never send on doubt", async () => {
+      const session = sessionWith({
+        offerKind: 'duration',
+        appointmentId: 'appt-1',
+        targetDurationMinutes: 50,
+        deltaDollars: 50,
+        totalDollars: 169,
+      });
+      mockGetSessionIdForPhone.mockReturnValue('sess-1');
+      mockGetSession.mockReturnValue(session);
+      mockReverifyAndApplyUpgradeForProfile.mockResolvedValue({ success: true, reason: 'applied' });
+      mockCheckStopSetStrict.mockResolvedValue('unknown');
 
       const res = await POST(yesRequest());
       await res.text();
@@ -1684,7 +1705,7 @@ describe('twilio webhook route', () => {
       expect(body).not.toContain('$');
     });
 
-    it('omits the price when a duration offer has no persisted totalDollars (never guesses from walk-in tables)', async () => {
+    it('omits the price when a duration offer has no persisted deltaDollars (never guesses from quote tables)', async () => {
       const session = sessionWith({
         offerKind: 'duration',
         appointmentId: 'appt-1',
@@ -1804,7 +1825,7 @@ describe('twilio webhook route', () => {
         mockNotifyUpgradeIncidentOnce.mockResolvedValue({ sent: true, deduped: false });
         mockLogSmsChatMessages.mockResolvedValue({ logged: true, count: 1 });
         mockSendTwilioSms.mockResolvedValue({ sid: 'SM-followup-1' });
-        mockIsOnStopSet.mockResolvedValue(false);
+        mockCheckStopSetStrict.mockResolvedValue('off');
         mockGetAllActiveSessions.mockResolvedValue([]);
         const session = sessionWith({
           offerKind: 'duration',

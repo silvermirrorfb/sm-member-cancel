@@ -31,7 +31,7 @@ import {
   reverifyAndApplyUpgradeForProfile,
   summarizeBoulevardApplyError,
 } from '../../../../../lib/boulevard';
-import { isOnStopSet, lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
+import { checkStopSetStrict, lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
 import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
@@ -279,18 +279,18 @@ function buildAppliedFollowupSms(offer, { priceDisclosed = true } = {}) {
       }
     }
     if (price != null) {
-      return `You're all set, ${addOnName} is added to today's facial, $${price} total. See you soon.`;
+      return `You're all set, ${addOnName} is added to today's facial for $${price}. See you soon.`;
     }
     return `You're all set, ${addOnName} is added to today's facial. See you soon.`;
   }
   const minutes = Number(offer?.targetDurationMinutes) > 0 ? Number(offer.targetDurationMinutes) : 50;
-  // totalDollars is the member-aware figure resolveUpgradePrice persisted on the
-  // offer at quote time, the exact number the apply wrote to the booking line.
-  // It is the ONLY acceptable source; the pricing-table totals are quote-table
-  // values, not the disclosed quote.
-  const total = priceDisclosed ? Number(offer?.totalDollars) : NaN;
-  if (Number.isFinite(total) && total > 0) {
-    return `You're all set, your facial is now ${minutes} minutes, $${total} total. See you soon.`;
+  // Echo the figure the thread actually disclosed: the duration offer and its
+  // YES ack both quote deltaDollars ("for $50 more") and NEVER a total (see
+  // buildDurationPricingText above, same discipline). Stating a derived total
+  // here would assert a number the member never saw.
+  const delta = priceDisclosed ? Number(offer?.deltaDollars) : NaN;
+  if (Number.isFinite(delta) && delta > 0) {
+    return `You're all set, your facial is now ${minutes} minutes for $${delta} more. See you soon.`;
   }
   return `You're all set, your facial is now ${minutes} minutes. See you soon.`;
 }
@@ -624,13 +624,16 @@ async function runDeferredIntentWork({
     followupText = buildAppliedFollowupSms(offerForLog, { priceDisclosed: hasPendingOffer === true });
     // STOP gate at SEND TIME, not YES time: the deferred apply can run minutes
     // (webhook maxDuration 300) and the member can text STOP inside that window.
-    // Same authoritative suppression set every other outbound send in this repo
-    // consults (pre-appointment route, missed-call dispatcher Gate 3). On a
-    // stop-set hit OR an unexpected check throw, the courtesy follow-up is
-    // withheld; the apply itself already stands.
+    // Same authoritative suppression SET every other outbound send consults, but
+    // via the STRICT tri-state check: the send happens ONLY on an affirmative
+    // 'off' from Redis. 'on', 'unknown' (no Redis answer, lookup error), or an
+    // unexpected throw all withhold the courtesy follow-up; the apply itself
+    // already stands. (The boolean isOnStopSet stays fail-open for OFFER sends
+    // by design; a courtesy confirmation is the reverse trade.)
     try {
-      if (await isOnStopSet(from)) {
-        console.log('[sms-webhook] applied follow-up suppressed: recipient on stop set at send time');
+      const stopVerdict = await checkStopSetStrict(from);
+      if (stopVerdict !== 'off') {
+        console.log(`[sms-webhook] applied follow-up suppressed: stop-set verdict '${stopVerdict}' at send time`);
         followupText = null;
       }
     } catch (err) {
