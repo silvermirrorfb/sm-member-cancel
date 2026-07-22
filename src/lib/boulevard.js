@@ -3244,12 +3244,13 @@ function toBookingWarningList(rawWarnings) {
   }));
 }
 
-// A STAFF_DOUBLE_BOOKED warning is the benign SELF-OVERLAP of an in-place duration
-// edit when it names the exact line being edited AND an independent schedule read has
-// proven no OTHER real appointment occupies that staff/time window. Boulevard returns
-// warning ids as BARE uuids while the code carries full urn:blvd: ids, so every
-// comparison normalizes to the bare uuid tail via bareBoulevardId. (This bare-vs-urn
-// mismatch is exactly what falsely aborted the first dry-run harness.)
+// A STAFF_DOUBLE_BOOKED warning is the benign SELF-OVERLAP of an in-place booking
+// edit when it names a line belonging to the edit itself (the edited base line, or,
+// on the add-on flow, the newly added add-on line) AND an independent schedule read
+// has proven no OTHER real appointment occupies that staff/time window. Boulevard
+// returns warning ids as BARE uuids while the code carries full urn:blvd: ids, so
+// every comparison normalizes to the bare uuid tail via bareBoulevardId. (This
+// bare-vs-urn mismatch is exactly what falsely aborted the first dry-run harness.)
 function isSelfOverlapStaffDoubleBooked(warning, selfOverlapContext) {
   if (!selfOverlapContext || selfOverlapContext.staffWindowClear !== true) return false;
   if (String(warning?.code || '').trim().toUpperCase() !== 'STAFF_DOUBLE_BOOKED') return false;
@@ -3261,15 +3262,26 @@ function isSelfOverlapStaffDoubleBooked(warning, selfOverlapContext) {
   const matchesByServiceAndStaff =
     Boolean(warnServiceId) && warnServiceId === bareBoulevardId(selfOverlapContext.sourceServiceId) &&
     Boolean(warnStaffId) && warnStaffId === bareBoulevardId(selfOverlapContext.providerId);
-  return matchesByBookingServiceId || matchesByServiceAndStaff;
+  // Add-on flow: the warning may name the NEW add-on line instead of the edited
+  // base line (live-proven 2026-07-22, appointment 3599d10b). Both id fields are
+  // optional on the context; absent (the duration flow) they can never match.
+  const matchesByAddonBookingServiceId =
+    Boolean(warnBookingServiceId) && Boolean(selfOverlapContext.addonBookingServiceId) &&
+    warnBookingServiceId === bareBoulevardId(selfOverlapContext.addonBookingServiceId);
+  const matchesByAddonServiceAndStaff =
+    Boolean(warnServiceId) && Boolean(selfOverlapContext.addonServiceId) &&
+    warnServiceId === bareBoulevardId(selfOverlapContext.addonServiceId) &&
+    Boolean(warnStaffId) && warnStaffId === bareBoulevardId(selfOverlapContext.providerId);
+  return matchesByBookingServiceId || matchesByServiceAndStaff || matchesByAddonBookingServiceId || matchesByAddonServiceAndStaff;
 }
 
 // Discriminating warning policy. RESOURCE_DOUBLE_BOOKED and STAFF_DOES_NOT_PERFORM_SERVICE
 // are always blocking. STAFF_DOUBLE_BOOKED is blocking UNLESS it is the proven benign
 // self-overlap of an in-place edit (selfOverlapContext supplied AND staffWindowClear AND
-// the warning names the edited line). The self-overlap context is supplied ONLY by the
-// in-place duration apply path; every other caller (e.g. the add-on path) passes no
-// context, so STAFF_DOUBLE_BOOKED stays a hard block for them, unchanged.
+// the warning names a line of the edit itself). The self-overlap context is supplied by
+// the in-place duration apply path AND (since the 2026-07-22 live proof that the add-on
+// edit-draft always self-overlaps its source appointment) the add-on apply path; any
+// caller passing no context keeps STAFF_DOUBLE_BOOKED as a hard block, unchanged.
 function hasBlockingBookingWarnings(warnings = [], selfOverlapContext = null) {
   if (!Array.isArray(warnings) || warnings.length === 0) return false;
   const blockingCodes = new Set([
@@ -3575,7 +3587,7 @@ function getPrimaryAppointmentService(appointmentContext) {
   return appointmentServices.find(service => String(service?.staffId || '').trim()) || appointmentServices[0] || null;
 }
 
-async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointmentContext, addOnServiceId) {
+async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointmentContext, addOnServiceId, options = {}) {
   const appointmentId = String(appointmentContext?.appointmentId || '').trim();
   const targetAddonServiceId = String(addOnServiceId || '').trim();
   const providerId = String(appointmentContext?.providerId || '').trim();
@@ -3585,6 +3597,10 @@ async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointme
       reason: 'addon_booking_from_appointment_missing_fields',
     };
   }
+  // The add-on's own service minutes extend the block past the source endOn, so the
+  // proven-clear window must cover [start, endOn + addonDuration]. 0 when the add-on
+  // is concurrent (adds no block time); negative/garbage clamps to 0.
+  const addonDurationMinutes = Math.max(0, Math.round(Number(options?.addonDurationMinutes)) || 0);
 
   const bookingCreateQuery = `
     mutation BookingCreateFromAppointmentForAddon($input: BookingCreateFromAppointmentInput!) {
@@ -3634,19 +3650,15 @@ async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointme
       warnings: createWarnings,
     };
   }
-  if (hasBlockingBookingWarnings(createWarnings)) {
-    return {
-      applied: false,
-      reason: 'addon_booking_from_appointment_warning_block',
-      warnings: createWarnings,
-    };
-  }
 
+  // Resolve the editing-linked line ids BEFORE any warning gate (mirrors the
+  // duration path) so the self-overlap discrimination has the ids to match against.
   const bookingClientId = String(
     booking?.bookingClients?.[0]?.id || '',
   ).trim();
   const sourcePrimaryAppointmentService = getPrimaryAppointmentService(appointmentContext);
   const sourceAppointmentServiceId = String(sourcePrimaryAppointmentService?.id || '').trim();
+  const sourceServiceId = String(sourcePrimaryAppointmentService?.serviceId || appointmentContext?.serviceId || '').trim();
   const bookingServices = Array.isArray(booking?.bookingServices) ? booking.bookingServices : [];
   const baseBookingService = bookingServices.find(service =>
     !String(service?.baseBookingServiceId || '').trim() &&
@@ -3658,6 +3670,59 @@ async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointme
       applied: false,
       reason: 'addon_booking_from_appointment_missing_booking_context',
       bookingId,
+    };
+  }
+
+  // Prove the staff window [start, endOn + addonDuration] is clear of OTHER real
+  // appointments and timeblocks, recomputed FRESH on each gate that sees a
+  // STAFF_DOUBLE_BOOKED; a proven collision sticks. FAIL CLOSED when start or endOn
+  // cannot be parsed (windowEndOn null -> the guard refuses). Same policy, guard, and
+  // scan primitives as the gauntleted duration path: the edit-draft ALWAYS
+  // self-overlaps its own source appointment (live-proven on the add-on flow
+  // 2026-07-22, appointment 3599d10b: every add-on YES aborted here with no real
+  // collision on the staff), so a context-less warning gate can never commit.
+  let collisionProven = false;
+  let addonBookingServiceId = '';
+  async function selfOverlapContext() {
+    let staffWindowClear;
+    if (collisionProven) {
+      staffWindowClear = false;
+    } else {
+      const startMs = Date.parse(appointmentContext?.startOn);
+      const endMs = Date.parse(appointmentContext?.endOn);
+      const windowEndMs = Number.isFinite(startMs) && Number.isFinite(endMs)
+        ? endMs + addonDurationMinutes * 60000
+        : NaN;
+      staffWindowClear = await isStaffWindowClearOfOtherAppointments(apiUrl, headers, {
+        appointmentId,
+        providerId,
+        locationId: appointmentContext?.locationId || null,
+        startOn: appointmentContext?.startOn || null,
+        windowEndOn: Number.isFinite(windowEndMs) ? new Date(windowEndMs).toISOString() : null,
+      });
+      if (!staffWindowClear) collisionProven = true;
+    }
+    return {
+      baseBookingServiceId,
+      sourceServiceId,
+      providerId,
+      addonServiceId: targetAddonServiceId,
+      addonBookingServiceId,
+      staffWindowClear,
+    };
+  }
+  async function warningsBlock(warnings) {
+    const hasStaffDoubleBooked = Array.isArray(warnings)
+      && warnings.some(w => String(w?.code || '').trim().toUpperCase() === 'STAFF_DOUBLE_BOOKED');
+    const context = hasStaffDoubleBooked ? await selfOverlapContext() : null;
+    return hasBlockingBookingWarnings(warnings, context);
+  }
+
+  if (await warningsBlock(createWarnings)) {
+    return {
+      applied: false,
+      reason: 'addon_booking_from_appointment_warning_block',
+      warnings: createWarnings,
     };
   }
 
@@ -3706,7 +3771,10 @@ async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointme
       bookingId,
     };
   }
-  if (hasBlockingBookingWarnings(addOnWarnings)) {
+  // The self-overlap warning on this gate names the NEW add-on line, so record its
+  // id before discriminating (live-proven 2026-07-22).
+  addonBookingServiceId = String(addOnAttempt.payload?.bookingService?.id || '').trim();
+  if (await warningsBlock(addOnWarnings)) {
     return {
       applied: false,
       reason: 'addon_booking_add_service_addon_warning_block',
@@ -3757,7 +3825,7 @@ async function tryApplyAddonViaBookingFromAppointment(apiUrl, headers, appointme
       bookingId,
     };
   }
-  if (hasBlockingBookingWarnings(completeWarnings)) {
+  if (await warningsBlock(completeWarnings)) {
     return {
       applied: false,
       reason: 'addon_booking_complete_warning_block',
@@ -4138,6 +4206,9 @@ async function reverifyAndApplyUpgradeForProfile(profile, pendingOffer, options 
       auth.headers,
       appointmentContext,
       addOnService.id,
+      // The resolved add-on's own minutes size the proven-clear collision window
+      // (endOn + this many minutes); 0 for a concurrent add-on.
+      { addonDurationMinutes: addOnService.defaultDuration },
     );
     if (bookingFromAppointmentApplied.applied) {
       return {
