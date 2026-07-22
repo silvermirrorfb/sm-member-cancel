@@ -705,19 +705,29 @@ export async function POST(request) {
     if (STOP_KEYWORDS.test(body)) {
       console.log(`[sms-webhook] STOP received from ${from} — opting out`);
 
-      // Remove from Redis registry so pre-appointment scan won't re-queue them
-      // AND add to the authoritative STOP set so outbound sends are blocked
-      // immediately regardless of Klaviyo propagation timing.
+      // STOP set FIRST, in its own try/catch: this is the authoritative
+      // suppression write that blocks outbound sends immediately regardless
+      // of Klaviyo propagation timing, and it must land even if the slow O(N)
+      // registry scan below throws or hangs.
+      try {
+        const registry = await import('../../../../../lib/sms-member-registry');
+        if (typeof registry.addToStopSet === 'function') {
+          await registry.addToStopSet(from);
+        }
+      } catch (e) {
+        console.warn('[sms-webhook] Could not add to stop-set:', e.message);
+      }
+
+      // Registry cleanup SECOND, isolated: removing the member keeps the
+      // pre-appointment scan from re-queueing them, but it is best-effort
+      // hygiene and a failure here must never cost the STOP write above.
       try {
         const registry = await import('../../../../../lib/sms-member-registry');
         if (typeof registry.removeMemberByPhone === 'function') {
           await registry.removeMemberByPhone(from);
         }
-        if (typeof registry.addToStopSet === 'function') {
-          await registry.addToStopSet(from);
-        }
       } catch (e) {
-        console.warn('[sms-webhook] Could not update registry/stop-set:', e.message);
+        console.warn('[sms-webhook] Could not remove from registry:', e.message);
       }
 
       // Propagate unsubscribe to Klaviyo so pre-appointment Klaviyo gate

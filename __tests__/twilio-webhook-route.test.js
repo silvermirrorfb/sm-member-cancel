@@ -24,6 +24,8 @@ const mockNotifyUpgradeIncidentOnce = vi.fn();
 const mockLogSmsChatMessages = vi.fn();
 const mockSendTwilioSms = vi.fn();
 const mockCheckStopSetStrict = vi.fn();
+const mockAddToStopSet = vi.fn();
+const mockRemoveMemberByPhone = vi.fn();
 const mockCheckKlaviyoSmsOptIn = vi.fn();
 const mockUnsubscribeKlaviyoSms = vi.fn();
 const originalEnv = process.env;
@@ -38,13 +40,19 @@ vi.mock('../src/lib/klaviyo.js', () => ({
   unsubscribeKlaviyoSms: (...args) => mockUnsubscribeKlaviyoSms(...args),
 }));
 
-// Passthrough mock: only the strict tri-state stop-set check is overridden so
-// the applied-outcome follow-up's send-time STOP gate is controllable; every
-// other registry export (STOP/START handlers use addToStopSet/removeFromStopSet
-// via dynamic import) keeps its real no-Redis no-op behavior.
+// Passthrough mock: the strict tri-state stop-set check (follow-up send gate)
+// plus the inbound STOP handler's two writes (addToStopSet, removeMemberByPhone)
+// are overridden so their ordering and failure isolation are testable; every
+// other registry export (START uses removeFromStopSet via dynamic import) keeps
+// its real no-Redis no-op behavior.
 vi.mock('../src/lib/sms-member-registry.js', async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, checkStopSetStrict: (...args) => mockCheckStopSetStrict(...args) };
+  return {
+    ...actual,
+    checkStopSetStrict: (...args) => mockCheckStopSetStrict(...args),
+    addToStopSet: (...args) => mockAddToStopSet(...args),
+    removeMemberByPhone: (...args) => mockRemoveMemberByPhone(...args),
+  };
 });
 
 vi.mock('../src/lib/rate-limit.js', () => ({
@@ -154,6 +162,8 @@ describe('twilio webhook route', () => {
     mockCheckStopSetStrict.mockResolvedValue('off');
     mockCheckKlaviyoSmsOptIn.mockResolvedValue({ subscribed: false, consent: 'UNSUBSCRIBED' });
     mockUnsubscribeKlaviyoSms.mockResolvedValue({ ok: true });
+    mockAddToStopSet.mockResolvedValue(true);
+    mockRemoveMemberByPhone.mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -1440,6 +1450,68 @@ describe('twilio webhook route', () => {
   // apply, so a COMPLETED apply (bookingComplete success) must be announced by a
   // result-specific follow-up SMS from the deferred worker. A non-applied YES
   // keeps the manual-confirm string as the last word and sends NOTHING else.
+  describe('inbound STOP handling', () => {
+    function stopRequest() {
+      return new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {
+        method: 'POST',
+        headers: { 'x-twilio-signature': 'sig' },
+        body: 'From=%2B12134401333&Body=STOP&MessageSid=SM-stop-1',
+      });
+    }
+
+    beforeEach(() => {
+      mockParseTwilioFormBody.mockReturnValue({
+        From: '+12134401333',
+        Body: 'STOP',
+        MessageSid: 'SM-stop-1',
+      });
+    });
+
+    it('records the opt-out in the STOP set even when the registry scan throws', async () => {
+      // The STOP set write is the authoritative TCPA suppression record. A
+      // throwing (or hanging) registry cleanup scan must never cost it.
+      mockRemoveMemberByPhone.mockRejectedValue(new Error('redis scan blew up'));
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const res = await POST(stopRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+      warnSpy.mockRestore();
+    });
+
+    it('adds to the STOP set BEFORE the slow registry scan runs', async () => {
+      const res = await POST(stopRequest());
+      const text = await res.text();
+      await flushDeferred();
+
+      expect(res.status).toBe(200);
+      expect(text).toContain('unsubscribed');
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+      expect(mockRemoveMemberByPhone).toHaveBeenCalledWith('+12134401333');
+      expect(mockAddToStopSet.mock.invocationCallOrder[0])
+        .toBeLessThan(mockRemoveMemberByPhone.mock.invocationCallOrder[0]);
+    });
+
+    it('records the STOP set even when the registry scan hangs (write is not queued behind it)', async () => {
+      // A scan that never settles must not delay the authoritative STOP
+      // write. The handler is still awaiting the hung scan here, so the POST
+      // promise is deliberately left unsettled; the assertion is that the
+      // STOP write already landed before the scan.
+      let scanStarted = false;
+      mockRemoveMemberByPhone.mockImplementation(() => new Promise(() => { scanStarted = true; }));
+
+      POST(stopRequest());
+      await flushDeferred();
+
+      expect(scanStarted).toBe(true);
+      expect(mockAddToStopSet).toHaveBeenCalledWith('+12134401333');
+    });
+  });
+
   describe('applied-outcome follow-up SMS', () => {
     function yesRequest() {
       return new Request('https://sm-member-cancel.vercel.app/api/sms/twilio/webhook', {

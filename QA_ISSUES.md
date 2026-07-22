@@ -262,6 +262,17 @@ The masking chain that hid this outage for 5 days is tracked separately as cross
 
 ---
 
+### outbound-sms #15
+**Status:** FIXED IN CODE 2026-07-22 (branch `fix/carveout-followup-hardening`, awaiting Matt's merge)
+**Severity:** compliance risk (a STOP could go unrecorded)
+**Discovered:** 2026-07-22 (deferred follow-up from the #86 review round)
+
+**Symptom:** In the inbound STOP handler, the authoritative STOP-set write (`addToStopSet`) ran AFTER the slow O(N) registry cleanup scan (`removeMemberByPhone`) and inside the same try/catch. If the scan threw or hung, the STOP was never recorded in the suppression set, so an opted-out member could still receive outbound sends until Klaviyo propagation caught up.
+
+**Fix:** `addToStopSet` now runs FIRST, and each write sits in its own try/catch, so an inbound STOP is recorded even if the registry scan throws or hangs. Three regression tests in `__tests__/twilio-webhook-route.test.js` (`inbound STOP handling`) cover: scan throws, ordering, and scan hangs.
+
+---
+
 ## Cancel bot issues
 
 ### cancel-bot #1
