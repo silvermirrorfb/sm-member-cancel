@@ -247,6 +247,31 @@ async function removeFromStopSet(phone) {
   }
 }
 
+// Strict tri-state stop-set check for callers that must FAIL CLOSED (the
+// applied-outcome courtesy follow-up): 'on' | 'off' | 'unknown'. 'off' is
+// returned ONLY when Redis affirmatively answered for every candidate key; no
+// Redis client, an unnormalizable phone, or any lookup error returns 'unknown',
+// never 'off'. The boolean isOnStopSet above keeps its deliberate fail-open
+// shape for offer sends (never block a legitimate offer on a Redis flap); do
+// not merge the two.
+async function checkStopSetStrict(phone) {
+  const redis = getRedis();
+  if (!redis) return 'unknown';
+  const norm = normalizeStopPhone(phone);
+  if (!norm) return 'unknown';
+  const candidates = [norm, norm.slice(-10)];
+  try {
+    for (const c of candidates) {
+      const hit = await redis.sismember(STOP_SET_KEY, c);
+      if (hit) return 'on';
+    }
+    return 'off';
+  } catch (e) {
+    console.warn('[stop-set] Strict check failed:', e.message);
+    return 'unknown';
+  }
+}
+
 export {
   getRegisteredMembers,
   registerMember,
@@ -256,6 +281,7 @@ export {
   REGISTRY_PREFIX,
   addToStopSet,
   isOnStopSet,
+  checkStopSetStrict,
   removeFromStopSet,
   STOP_SET_KEY,
   PHONE_INDEX_KEY,

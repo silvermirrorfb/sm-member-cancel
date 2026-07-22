@@ -17,6 +17,8 @@ import {
   buildTwimlMessage,
   isValidTwilioSignature,
   parseTwilioFormBody,
+  sendTwilioSms,
+  trimSmsBodyShort,
 } from '../../../../../lib/twilio';
 import {
   buildSmsUpgradePendingReply,
@@ -29,7 +31,7 @@ import {
   reverifyAndApplyUpgradeForProfile,
   summarizeBoulevardApplyError,
 } from '../../../../../lib/boulevard';
-import { lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
+import { checkStopSetStrict, lookupClientIdByPhoneFromIndex, normalizePhoneForIndex } from '../../../../../lib/sms-member-registry';
 import { logSmsChatMessages, logSupportIncident, notifyUpgradeIncidentOnce, SMS_UPGRADE_INCIDENT_ISSUE_TYPE } from '../../../../../lib/notify';
 import { POST as postChatMessage } from '../../../chat/message/route';
 
@@ -242,6 +244,55 @@ function buildPendingOfferFinalizeReply(offer) {
     return `Thanks, we got your YES. ${pricingText} Our team will confirm before your appointment.`;
   }
   return 'Thanks for replying YES. We received your upgrade request and our team will confirm it before your appointment.';
+}
+
+// Result-specific follow-up for a COMPLETED apply (reverifyAndApplyUpgradeForProfile
+// returns success only after bookingComplete plus verification). Sent from the
+// deferred worker because the instant TwiML reply goes out before the outcome
+// exists (Twilio's reply window is seconds, the apply can take minutes). Price is
+// pulled from the SAME offer context the apply used, honoring the member rules:
+// a KNOWN member gets the member figure, a KNOWN non-member the walk-in figure,
+// unknown membership the figure that was quoted at offer time. When no figure is
+// resolvable the price clause is omitted, never guessed.
+function buildAppliedFollowupSms(offer, { priceDisclosed = true } = {}) {
+  const offerKind = String(offer?.offerKind || 'duration').toLowerCase();
+  // A figure appears in the follow-up ONLY when it was disclosed to the member
+  // in this thread (a pending offer they said YES to) AND it resolves within its
+  // own membership lane. No cross-lane fallbacks, no guessing: a KNOWN member
+  // whose member figure is unresolvable gets outcome-only copy, never the
+  // walk-in number (owner call 2026-07-22 round 2). The no-pending re-derive
+  // path always gets outcome-only copy: never state a total the member never
+  // saw quoted (NY ARL posture).
+  if (offerKind === 'addon') {
+    const addOnName = getAllowedAddonDisplayName(offer?.addOnName) || 'your add-on';
+    let price = null;
+    if (priceDisclosed) {
+      const memberPrice = Number(offer?.pricing?.memberPrice);
+      const walkinPrice = Number(offer?.pricing?.walkinPrice);
+      const offeredPrice = Number(offer?.pricing?.offeredPrice);
+      if (offer?.isMember === true) {
+        price = Number.isFinite(memberPrice) && memberPrice > 0 ? memberPrice : null;
+      } else if (offer?.isMember === false) {
+        price = Number.isFinite(walkinPrice) && walkinPrice > 0 ? walkinPrice : null;
+      } else {
+        price = Number.isFinite(offeredPrice) && offeredPrice > 0 ? offeredPrice : null;
+      }
+    }
+    if (price != null) {
+      return `You're all set, ${addOnName} is added to today's facial for $${price}. See you soon.`;
+    }
+    return `You're all set, ${addOnName} is added to today's facial. See you soon.`;
+  }
+  const minutes = Number(offer?.targetDurationMinutes) > 0 ? Number(offer.targetDurationMinutes) : 50;
+  // Echo the figure the thread actually disclosed: the duration offer and its
+  // YES ack both quote deltaDollars ("for $50 more") and NEVER a total (see
+  // buildDurationPricingText above, same discipline). Stating a derived total
+  // here would assert a number the member never saw.
+  const delta = priceDisclosed ? Number(offer?.deltaDollars) : NaN;
+  if (Number.isFinite(delta) && delta > 0) {
+    return `You're all set, your facial is now ${minutes} minutes for $${delta} more. See you soon.`;
+  }
+  return `You're all set, your facial is now ${minutes} minutes. See you soon.`;
 }
 
 function buildUpgradeApplyReply(upgradeResult, opportunity, pendingOffer = null) {
@@ -547,6 +598,9 @@ async function runDeferredIntentWork({
       upgradeResult,
     }));
   }
+
+  // Audit row FIRST (round-2 fix): the ack row is written before any Twilio
+  // call so a hung or failed follow-up send can never eat the audit trail.
   await logUpgradeReplyOutbound({
     sessionId,
     from,
@@ -555,6 +609,57 @@ async function runDeferredIntentWork({
     upgradeResult,
     content: sentReplyText,
   });
+
+  // Outcome truth (owner call 2026-07-22): a COMPLETED apply is announced with a
+  // result-specific follow-up SMS so the member is not left believing a human
+  // still has to finish it. STRICTLY success-gated: every non-applied path
+  // (mutation disabled, member unresolvable, reverify refusal, warning block,
+  // mutation failure) returns earlier or lands here with success false and sends
+  // nothing, leaving the manual-confirm ack as the last word. Price appears only
+  // when a pending offer disclosed it (see buildAppliedFollowupSms). A failed
+  // follow-up send is swallowed: the member still holds the safe manual-confirm,
+  // and the booking itself is already correct.
+  let followupText = null;
+  if (upgradeResult?.success === true) {
+    followupText = buildAppliedFollowupSms(offerForLog, { priceDisclosed: hasPendingOffer === true });
+    // STOP gate at SEND TIME, not YES time: the deferred apply can run minutes
+    // (webhook maxDuration 300) and the member can text STOP inside that window.
+    // Same authoritative suppression SET every other outbound send consults, but
+    // via the STRICT tri-state check: the send happens ONLY on an affirmative
+    // 'off' from Redis. 'on', 'unknown' (no Redis answer, lookup error), or an
+    // unexpected throw all withhold the courtesy follow-up; the apply itself
+    // already stands. (The boolean isOnStopSet stays fail-open for OFFER sends
+    // by design; a courtesy confirmation is the reverse trade.)
+    try {
+      const stopVerdict = await checkStopSetStrict(from);
+      if (stopVerdict !== 'off') {
+        console.log(`[sms-webhook] applied follow-up suppressed: stop-set verdict '${stopVerdict}' at send time`);
+        followupText = null;
+      }
+    } catch (err) {
+      console.error('[sms-webhook] stop-set check threw, follow-up suppressed:', err?.message || err);
+      followupText = null;
+    }
+    if (followupText) {
+      try {
+        await sendTwilioSms({ to: from, body: followupText, trimBody: trimSmsBodyShort });
+      } catch (err) {
+        console.error('[sms-webhook] applied follow-up send failed:', err?.message || err);
+        followupText = null;
+      }
+    }
+  }
+
+  if (followupText) {
+    await logUpgradeReplyOutbound({
+      sessionId,
+      from,
+      activeSession,
+      offer: offerForLog,
+      upgradeResult,
+      content: followupText,
+    });
+  }
 }
 
 export async function POST(request) {
