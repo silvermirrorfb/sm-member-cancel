@@ -9,6 +9,10 @@ const MEMBER_LOOKUP_TAG_RE = /<member_lookup>\s*([\s\S]*?)\s*<\/member_lookup>/;
 const MEMBER_LOOKUP_TAG_RE_GLOBAL = /<member_lookup>[\s\S]*?<\/member_lookup>/g;
 const SESSION_SUMMARY_TAG_RE = /<session_summary>\s*([\s\S]*?)\s*<\/session_summary>/;
 const SESSION_SUMMARY_TAG_RE_GLOBAL = /<session_summary>[\s\S]*?<\/session_summary>/g;
+const BOOKING_ISSUE_TAG_RE = /<booking_issue>\s*([\s\S]*?)\s*<\/booking_issue>/;
+const BOOKING_ISSUE_TAG_RE_GLOBAL = /<booking_issue>[\s\S]*?<\/booking_issue>/g;
+const BOOKING_ISSUE_STEPS = ['selecting', 'payment', 'unclear'];
+const BOOKING_ISSUE_MAX_FIELD_CHARS = 2000;
 
 let cachedSystemPrompt = null;
 let cachedMissedCallPrompt = null;
@@ -290,11 +294,60 @@ function stripSummaryFromResponse(text) {
 }
 
 /**
- * Strip ALL system tags from response (lookup + summary).
+ * Parse the booking_issue JSON from Claude's response.
+ * Emitted once the two-question capture (error text + failing step) is complete;
+ * the route turns it into the hello@ escalation email.
+ * Validates required fields so a stray or injected tag cannot fire an email.
+ */
+function parseBookingIssue(text) {
+  const match = String(text || '').match(BOOKING_ISSUE_TAG_RE);
+  if (!match) return null;
+
+  try {
+    const parsed = JSON.parse(match[1]);
+    // Collapse whitespace before anything else. An error message is one line by
+    // nature, and the escalation email interpolates this text directly above its
+    // Name/Email/Phone block: newlines would let a guest forge those fields and
+    // turn a staff notification into a convincing phishing email sent from our
+    // own authenticated sender.
+    const errorText = typeof parsed.error_text === 'string'
+      ? parsed.error_text.replace(/\s+/g, ' ').trim()
+      : '';
+    const step = typeof parsed.step === 'string' ? parsed.step.trim().toLowerCase() : '';
+    // Both fields are the whole point of the capture. Without them the email
+    // would carry no more information than the detection-time incident record,
+    // so treat a partial tag as no tag at all.
+    if (!errorText || !BOOKING_ISSUE_STEPS.includes(step)) {
+      console.warn('booking_issue tag missing or invalid required fields, ignoring');
+      return null;
+    }
+    return {
+      error_text: errorText.slice(0, BOOKING_ISSUE_MAX_FIELD_CHARS),
+      step,
+    };
+  } catch (err) {
+    // Deliberately not logging err: V8 embeds a slice of the parsed input in the
+    // message, and that input is guest-typed error text that routinely carries an
+    // email address or a card fragment.
+    console.error('Failed to parse booking_issue JSON:', err?.name || 'SyntaxError');
+    return null;
+  }
+}
+
+/**
+ * Strip booking_issue tags from the response.
+ */
+function stripBookingIssue(text) {
+  return String(text || '').replace(BOOKING_ISSUE_TAG_RE_GLOBAL, '').trim();
+}
+
+/**
+ * Strip ALL system tags from response (lookup + summary + booking issue).
  */
 function stripAllSystemTags(text) {
   let cleaned = stripMemberLookup(text);
   cleaned = stripSummaryFromResponse(cleaned);
+  cleaned = stripBookingIssue(cleaned);
   return cleaned;
 }
 
@@ -314,6 +367,8 @@ export {
   verifyAnthropicModel,
   parseMemberLookup,
   stripMemberLookup,
+  parseBookingIssue,
+  stripBookingIssue,
   parseSessionSummary,
   stripSummaryFromResponse,
   stripAllSystemTags,

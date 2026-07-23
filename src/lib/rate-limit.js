@@ -30,6 +30,10 @@ const DEFAULT_ROUTE_SETTINGS = Object.freeze({
   message: { failMode: 'open' },
   'twilio-webhook': { failMode: 'open' },
   'qa-upgrade-check': { failMode: 'closed' },
+  // Booking escalations put attacker-typed text into a staff inbox, so this one
+  // fails CLOSED. Dropping an escalation email is safe: the detection-time
+  // logSupportIncident record still exists, so nothing is lost.
+  'booking-escalation': { failMode: 'closed' },
 });
 
 const ROUTE_ENV_ALIASES = Object.freeze({

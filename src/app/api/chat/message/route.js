@@ -6,6 +6,7 @@ import {
     buildSystemPromptWithProfile,
     sendMessage,
     parseMemberLookup,
+    parseBookingIssue,
     parseSessionSummary,
     stripAllSystemTags,
 } from '../../../../lib/claude';
@@ -16,7 +17,7 @@ import {
     evaluateUpgradeOpportunityForProfile,
     reverifyAndApplyUpgradeForProfile,
 } from '../../../../lib/boulevard';
-import { logChatMessages, logSupportIncident } from '../../../../lib/notify';
+import { logChatMessages, logSupportIncident, sendBookingEscalationEmail, sendOpsAlertEmail } from '../../../../lib/notify';
 import { OPENING_MESSAGE } from '../../../../lib/chat-config';
 import { buildRateLimitHeaders, checkRateLimit, resolveClientRateLimitKey } from '../../../../lib/rate-limit';
 import { markUpgradeOfferEvent } from '../../../../lib/sms-sessions';
@@ -37,6 +38,9 @@ const MAX_RECOVERY_TOTAL_CHARS = 30000;
 const MEMBERSHIP_EMAIL = 'memberships@silvermirror.com';
 const HELLO_EMAIL = 'hello@silvermirror.com';
 const SUPPORT_PHONE = '(888) 677-0055';
+// A failed booking escalation may be retried on a later turn, but not forever: the
+// guest is only promised the handoff once, and each attempt mails the team.
+const MAX_BOOKING_ESCALATION_ATTEMPTS = 3;
 const CANCELLATION_KEYWORDS = /\b(cancel|cancellation|terminate|end membership|stop membership)\b/i;
 // Explicit account-deletion / data-erasure requests. Distinct from membership
 // cancellation: deletion is handled by hello@, never by the cancellation flow.
@@ -133,22 +137,6 @@ function extractLocation(text) {
     const input = String(text || '').toLowerCase();
     const hit = LOCATION_CANDIDATES.find(loc => input.includes(loc.toLowerCase()));
     return hit || null;
-}
-
-export function buildSupportIncidentResponse() {
-    // Wording matches HARD RULE - NO HUMAN-TEAM SLA PROMISES and HARD RULE - NO FABRICATED
-    // ESCALATION in src/lib/system-prompt.txt. No fabricated team ("QA team" does not exist
-    // and has no defined SLA), no specific timeline ("48 hours" is not a real SLA), no
-    // outcome guarantee. Uses the canonical "Someone will follow up about next steps"
-    // pattern plus the BOOKING/PAYMENT ISSUE FLOW guidance: flag for follow-up, give the
-    // urgent phone path, ask for troubleshooting details. See also: codex-review-2026-05-27
-    // P2 follow-up findings.
-    return [
-      "Thanks for flagging this. I'm flagging this for follow-up.",
-      `The fastest way to get help is to call ${SUPPORT_PHONE}.`,
-      `For non-urgent follow-up, email ${HELLO_EMAIL}. Someone will follow up with you about next steps.`,
-      'If you can, please share your location, device/browser, and a screenshot to help troubleshoot.',
-    ].join(' ');
 }
 
 function isInactiveAccountStatus(status) {
@@ -837,7 +825,11 @@ export async function POST(request) {
             });
       }
 
-      // Booking/payment incident fast-path: auto-alert QA + write to support sheet
+      // Booking/payment incident detection: alert QA + write to support sheet, then let
+      // the model run the BOOKING SUPPORT flow in system-prompt.txt (two-question capture,
+      // one page-level fix, then escalate). This logging is the safety net that guarantees
+      // an incident record even if the guest abandons the chat before the capture finishes;
+      // the richer hello@ escalation fires later, off the <booking_issue> tag.
       if (!session.memberProfile && session.mode !== 'membership' && isBookingPaymentIncident(sanitizedMessage)) {
             const incident = {
                   date: new Date().toISOString(),
@@ -851,26 +843,40 @@ export async function POST(request) {
                   user_message: sanitizedMessage,
             };
 
-            let supportNotifications = null;
-            try {
-                  supportNotifications = await logSupportIncident(incident);
-            } catch (err) {
-                  console.error('Support incident logging failed:', err);
+            // Carry the contact details extracted from the first report so the
+            // escalation email can include them once the capture completes.
+            if (!session.bookingIssueContext) {
+                  session.bookingIssueContext = {
+                        session_created: sessionCreated,
+                        name: incident.name,
+                        email: incident.email,
+                        phone: incident.phone,
+                        location: incident.location,
+                        user_message: incident.user_message,
+                  };
+                  await saveSession(session);
             }
 
-            const supportResponse = buildSupportIncidentResponse();
-            await addMessage(sessionId, 'assistant', supportResponse);
-            pendingTranscriptEntries.push({ role: 'assistant', content: supportResponse });
-            await flushChatTranscript(session, sessionCreated, pendingTranscriptEntries, 'support incident response');
-
-            return NextResponse.json({
-                  message: supportResponse,
-                  sessionId,
-                  supportIncident: true,
-                  supportNotifications,
-            }, {
-                  headers: buildRateLimitHeaders(rateLimit),
-            });
+            // Tracked separately from the context above: logSupportIncident fans out with
+            // allSettled and never throws, so a Sheets or SMTP blip would otherwise be
+            // swallowed and never retried, leaving no record at all if the guest abandons
+            // the chat before the capture completes. Retry while it has not landed.
+            if (!session.bookingIssueLogged) {
+                  let logged = false;
+                  try {
+                        const result = await logSupportIncident(incident);
+                        logged = Boolean(result?.email?.sent || result?.sheet?.logged);
+                        if (!logged) {
+                              console.error('Support incident not recorded, will retry:', result?.email?.reason || result?.sheet?.reason || 'unknown');
+                        }
+                  } catch (err) {
+                        console.error('Support incident logging failed:', err.message);
+                  }
+                  if (logged) {
+                        session.bookingIssueLogged = true;
+                        await saveSession(session);
+                  }
+            }
       }
 
       // Expire stale pending upgrade offers
@@ -1186,6 +1192,73 @@ export async function POST(request) {
                 }, {
                             headers: buildRateLimitHeaders(rateLimit),
                 });
+            }
+      }
+
+      // Booking-issue escalation: the model emits <booking_issue> once it has the guest's
+      // exact error text and the step it failed on. Only honored for a session that
+      // actually reported a booking problem, so a stray or injected tag cannot fire mail.
+      if (session.bookingIssueContext && !session.bookingIssueEscalatedAt) {
+            const bookingIssue = parseBookingIssue(response);
+            if (bookingIssue) {
+                  // Claim the escalation BEFORE awaiting the send: a check-then-act around
+                  // the await lets two concurrent turns on one session both mail the team.
+                  // Released again below if the send fails and a retry is still allowed.
+                  const attempts = (session.bookingIssueEscalationAttempts || 0) + 1;
+                  session.bookingIssueEscalatedAt = new Date().toISOString();
+                  session.bookingIssueEscalationAttempts = attempts;
+                  await saveSession(session);
+
+                  // Per-session is not a real bound on its own: session ids are caller
+                  // chosen, so rotating them resets the flag for free. This limiter is what
+                  // actually caps how much guest-authored text can reach the staff inbox.
+                  const escalationLimit = await checkRateLimit(ip, 'booking-escalation', 2, 60 * 60 * 1000);
+                  let escalation = { sent: false, reason: 'rate limited' };
+                  if (escalationLimit.allowed) {
+                        try {
+                              escalation = await sendBookingEscalationEmail({
+                                    date: new Date().toISOString(),
+                                    session_id: sessionId,
+                                    session_created: session.bookingIssueContext.session_created,
+                                    error_text: bookingIssue.error_text,
+                                    step: bookingIssue.step,
+                                    name: session.bookingIssueContext.name,
+                                    email: session.bookingIssueContext.email,
+                                    phone: session.bookingIssueContext.phone,
+                                    location: session.bookingIssueContext.location,
+                              });
+                        } catch (err) {
+                              escalation = { sent: false, reason: err.message };
+                        }
+                  }
+
+                  if (!escalation?.sent) {
+                        // The bot has just told the guest their details are going to the
+                        // team. If that did not happen, it must be loud, not a silent
+                        // no-op: this is the failure class behind cancel-bot Issue 6.
+                        console.error('Booking escalation not sent:', escalation?.reason || 'unknown', 'session:', sessionId);
+                        if (escalationLimit.allowed) {
+                              try {
+                                    await sendOpsAlertEmail({
+                                          subject: '[Cancel Bot] Booking escalation email failed',
+                                          text: [
+                                                'A guest was told their booking issue is going to the team, but the escalation email did not send.',
+                                                `Session ID: ${sessionId}`,
+                                                `Reason: ${escalation?.reason || 'unknown'}`,
+                                                `Attempt: ${attempts} of ${MAX_BOOKING_ESCALATION_ATTEMPTS}`,
+                                                'The detection-time incident record is still on the support sheet.',
+                                          ].join('\n'),
+                                    });
+                              } catch (err) {
+                                    console.error('Booking escalation ops alert failed:', err.message);
+                              }
+                        }
+                        // Release the claim so a later turn can retry, up to the cap.
+                        if (attempts < MAX_BOOKING_ESCALATION_ATTEMPTS) {
+                              session.bookingIssueEscalatedAt = null;
+                              await saveSession(session);
+                        }
+                  }
             }
       }
 

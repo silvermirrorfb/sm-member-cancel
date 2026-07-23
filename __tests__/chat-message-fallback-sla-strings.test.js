@@ -3,54 +3,23 @@ import fs from 'fs';
 import path from 'path';
 
 import {
-  buildSupportIncidentResponse,
   buildLookupFailureMessage,
   buildPostLookupGreeting,
 } from '../src/app/api/chat/message/route.js';
 
-// These tests cover the three deterministic, server-side fallback responses in
+// These tests cover the deterministic, server-side fallback responses in
 // src/app/api/chat/message/route.js that bypass Claude entirely. Codex's review
 // of the decision-audit branch flagged these as P2 because the prompt's
 // HARD RULE - NO HUMAN-TEAM SLA PROMISES could not reach them (the LLM never sees
 // these strings). Tests assert: (1) the banned timeline patterns are gone, (2) the
-// fabricated-team language ("QA team") is gone from the booking/payment incident
-// response, (3) the GOOD generic-handoff pattern is used.
+// GOOD generic-handoff pattern is used.
+//
+// buildSupportIncidentResponse was removed when the booking/payment canned reply was
+// retired: booking issues now run through the model via the BOOKING SUPPORT flow in
+// system-prompt.txt, so the prompt's SLA rules reach that copy directly. The
+// end-to-end source scan at the bottom of this file still guards route.js as a whole.
 
 describe('chat/message route fallback strings: HARD RULE - NO HUMAN-TEAM SLA PROMISES enforcement', () => {
-  describe('buildSupportIncidentResponse (booking/payment incident fallback)', () => {
-    it('does not promise a specific timeline', () => {
-      const response = buildSupportIncidentResponse();
-      expect(response).not.toMatch(/within 48 hours/i);
-      expect(response).not.toMatch(/within 24 hours/i);
-      expect(response).not.toMatch(/within 24[-\s]?48 hours/i);
-      expect(response).not.toMatch(/within the hour/i);
-      expect(response).not.toMatch(/by tomorrow/i);
-      expect(response).not.toMatch(/by end of (day|week)/i);
-      expect(response).not.toMatch(/aim to respond within/i);
-    });
-
-    it('does not claim a QA team was alerted (HARD RULE - NO FABRICATED ESCALATION)', () => {
-      const response = buildSupportIncidentResponse();
-      expect(response).not.toMatch(/alerted (our )?QA team/i);
-      expect(response).not.toMatch(/notified (our )?QA/i);
-      expect(response).not.toMatch(/escalated to engineering/i);
-      expect(response).not.toMatch(/opened a ticket/i);
-    });
-
-    it('uses the GOOD pattern: flag for follow-up, give phone path, ask troubleshooting details', () => {
-      const response = buildSupportIncidentResponse();
-      expect(response).toMatch(/flagging this for follow-up/i);
-      expect(response).toMatch(/Someone will follow up with you about next steps/i);
-      expect(response).toMatch(/fastest way to get help is to call/i);
-      expect(response).toMatch(/location, device\/browser, and a screenshot/i);
-    });
-
-    it('contains no em or en dashes', () => {
-      const response = buildSupportIncidentResponse();
-      expect(response).not.toMatch(/[–—]/);
-    });
-  });
-
   describe('buildLookupFailureMessage (second-attempt cancellation lookup failure)', () => {
     it('attempt 2 does not promise a specific timeline (either variant)', () => {
       // pickVariant is deterministic for a given seed; we test both seed values

@@ -332,6 +332,83 @@ Fastest Path Shared With Guest: Call (888) 677-0055
   }
 }
 
+const BOOKING_ISSUE_STEP_LABELS = {
+  selecting: 'While selecting an appointment',
+  payment: 'During payment / checkout',
+  unclear: 'Not clear from the conversation',
+};
+
+// Booking-issue escalation email. Fires only after the bot has captured the
+// guest's exact error text and the step it failed on, so this carries context
+// the detection-time incident email (sendSupportIncidentEmail) cannot have yet.
+// Recipient is deliberately its own env var: EMAIL_ESCALATION is the cancel-bot
+// upset/reaction channel and EMAIL_QA_ALERT is the QA incident channel. Booking
+// escalations go to the team inbox that answers guests.
+async function sendBookingEscalationEmail(details) {
+  const host = process.env.SMTP_HOST;
+  const port = parseInt(process.env.SMTP_PORT || '587');
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.EMAIL_FROM || 'info@silvermirror.com';
+  const to = process.env.EMAIL_BOOKING_ESCALATION || 'hello@silvermirror.com';
+
+  if (!host || !user || !pass) {
+    console.warn('SMTP not configured, booking escalation email not sent for session:', details.session_id);
+    return { sent: false, reason: 'SMTP not configured' };
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
+  });
+
+  // The session id is caller chosen, so it is guest-controlled text landing in a
+  // staff subject line. Keep it to one short token.
+  const safeSessionId = String(details.session_id || 'unknown').replace(/\s+/g, ' ').trim().slice(0, 64);
+  const subject = `[Booking Issue] Guest reported a booking problem, session ${safeSessionId}`;
+  const chatlogSheetId = String(process.env.GOOGLE_CHATLOG_SHEET_ID || '').trim();
+  const chatlogLink = chatlogSheetId
+    ? `https://docs.google.com/spreadsheets/d/${chatlogSheetId}`
+    : 'Not configured';
+  const stepLabel = BOOKING_ISSUE_STEP_LABELS[details.step] || BOOKING_ISSUE_STEP_LABELS.unclear;
+  const body = `
+A guest reported a booking or payment problem in the chat widget.
+
+Session ID: ${details.session_id}
+Session started: ${details.session_created || 'Not recorded'}
+Transcript (Chatlog Sheet, filter by Session ID): ${chatlogLink}
+
+Date: ${details.date}
+Where it failed: ${stepLabel}
+Error the guest reported:
+${details.error_text}
+
+Name: ${details.name || 'Not provided'}
+Email: ${details.email || 'Not provided'}
+Phone: ${details.phone || 'Not provided'}
+Location Mentioned: ${details.location || 'Not provided'}
+
+Shared with guest: the support number (888) 677-0055.
+No timeline or outcome was promised to the guest.
+`.trim();
+
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text: body,
+      html: `<pre style="font-family:Arial, sans-serif; white-space:pre-wrap;">${body.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`,
+    });
+    return { sent: true };
+  } catch (err) {
+    console.error('Booking escalation email send failed:', err);
+    return { sent: false, reason: err.message };
+  }
+}
+
 // Generic ops/alerting email (e.g. the zero-outbound-SMS health check,
 // the inline sms-upgrade-scan HTTP failure alert). Goes to EMAIL_OPS_ALERTS
 // with a hardcoded fallback to matt@silvermirror.com so ops alerts can never
@@ -1532,6 +1609,7 @@ export {
   safeIsoDate,
   sendSummaryEmail,
   sendSupportIncidentEmail,
+  sendBookingEscalationEmail,
   sendReasonAlert,
   sendOpsAlertEmail,
   sendUpgradeIncidentEmail,

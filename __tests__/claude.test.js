@@ -824,7 +824,7 @@ describe('system prompt: firm-refusal short-circuit (Christina case, cancel-bot 
   it('routes the bot to the standard cancellation confirmation pattern after firm refusal', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toMatch(/proceeds directly to the standard cancellation confirmation pattern/i);
-    expect(prompt).toContain("Got it, I'm processing your cancellation now. Anything else I can help with?");
+    expect(prompt).toContain("Got it, I'm submitting your cancellation request to our memberships team now. Anything else I can help with?");
   });
 
   it('overrides numbered HARD RULE 1 final-warning tail and Step 5', () => {
@@ -859,7 +859,7 @@ describe('system prompt: firm-refusal short-circuit (Christina case, cancel-bot 
   it('includes the Christina GOOD example with direct cancellation and no loss-framing', () => {
     const prompt = getSystemPrompt();
     expect(prompt).toContain('Example GOOD (Christina case, firm-refusal short-circuit)');
-    const goodChristina = "Got it, Christina, I'm processing your cancellation now. Any unused credits remain valid for 90 days from your last bill date. Anything else I can help with?";
+    const goodChristina = "Got it, Christina, I'm submitting your cancellation request to our memberships team now. Any unused credits remain valid for 90 days from your last bill date. Anything else I can help with?";
     expect(prompt).toContain(goodChristina);
     // The good response must not contain loss-framing language
     expect(goodChristina.toLowerCase()).not.toContain('giving up');
@@ -901,9 +901,10 @@ describe('system prompt: firm-refusal short-circuit (Christina case, cancel-bot 
     expect(block.toLowerCase()).not.toContain('walking away');
     expect(block.toLowerCase()).not.toContain('before you go');
     expect(block.toLowerCase()).not.toContain('would you like to proceed');
-    // The bot must confirm cancellation immediately
-    expect(block).toMatch(/processing your cancellation/i);
-    // The bot must confirm the 48-hour email
+    // The bot must honor the cancellation immediately. It submits the request to the
+    // team rather than claiming to have processed it (see HARD RULE - THE BOT SUBMITS
+    // REQUESTS, IT DOES NOT EXECUTE THEM); the immediacy is what this test guards.
+    expect(block).toMatch(/submitting your cancellation request/i);
     expect(block).toMatch(/unused credits remain valid for 90 days/i);
   });
 });
@@ -1235,9 +1236,12 @@ describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
     expect(stepMatch).not.toBeNull();
     expect(stepMatch[0].toLowerCase()).not.toContain('within 48 hours');
     expect(stepMatch[0].toLowerCase()).not.toContain('48-hour confirmation');
-    // The 30-day legal notice period IS preserved
-    expect(stepMatch[0]).toMatch(/30 days/);
-    // The 90-day credit validity policy IS preserved
+    // The 30-day processing claim was REMOVED (see HARD RULE - NO BILLING DATE
+    // PREDICTIONS): the bot cannot verify it. The written-notice policy is now
+    // referenced without a day count.
+    expect(stepMatch[0]).not.toMatch(/30 days/);
+    expect(stepMatch[0]).toMatch(/written-notice policy/i);
+    // The 90-day credit validity policy IS still preserved
     expect(stepMatch[0]).toMatch(/90 days/);
   });
 
@@ -1262,8 +1266,11 @@ describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
     const lineMatch = prompt.match(/\n7\. Preferred cancellation confirmation pattern:[^\n]*/);
     expect(lineMatch).not.toBeNull();
     expect(lineMatch[0].toLowerCase()).not.toContain('48-hour');
-    // The 30-day processing legal notice IS preserved
-    expect(lineMatch[0]).toMatch(/30-day processing/);
+    // The 30-day processing claim was REMOVED; the pattern now references the
+    // written-notice policy with no day count, and names the submit framing.
+    expect(lineMatch[0]).not.toMatch(/30-day processing/);
+    expect(lineMatch[0]).toMatch(/SUBMITTING the request to the memberships team/);
+    expect(lineMatch[0]).toMatch(/no day count/i);
     // The 90-day credit validity defined policy IS preserved
     expect(lineMatch[0]).toMatch(/90-day credit validity/);
   });
@@ -1293,11 +1300,19 @@ describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
   });
 
   it('booking/payment issue flow no longer targets a 48-hour response', () => {
+    // The single "flagged for follow-up" line this used to pin was replaced by the
+    // BOOKING SUPPORT flow (capture, one page fix, then escalate). Same intent, asserted
+    // against the whole section: no timeline promise reaches the guest.
     const prompt = getSystemPrompt();
-    const lineMatch = prompt.match(/- Tell the guest the issue has been flagged for follow-up[^\n]*/);
-    expect(lineMatch).not.toBeNull();
-    expect(lineMatch[0].toLowerCase()).not.toContain('within 48 hours');
-    expect(lineMatch[0].toLowerCase()).not.toContain('targeted within');
+    const startIdx = prompt.indexOf('BOOKING SUPPORT: BOOKING/PAYMENT ISSUE FLOW');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endIdx = prompt.indexOf('APPOINTMENT CANCELLATION:', startIdx);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    const section = prompt.slice(startIdx, endIdx).toLowerCase();
+    expect(section).not.toContain('within 48 hours');
+    expect(section).not.toContain('targeted within');
+    expect(section).not.toContain('24-48');
+    expect(section).toContain('someone will follow up with you about next steps');
   });
 
   it('HARD RULE - INFINITE LOOP ESCAPE uses the PR #18 standard handoff phrase, no 24-hour promise', () => {
@@ -1322,8 +1337,8 @@ describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
     const section = prompt.slice(startIdx, endIdx);
     expect(section.toLowerCase()).not.toContain('48-hour');
     expect(section.toLowerCase()).not.toContain('within 48 hours');
-    // 30-day processing and 90-day credit validity preserved
-    expect(section).toMatch(/processing takes 30 days/);
+    // 30-day processing claim REMOVED; 90-day credit validity preserved
+    expect(section).not.toMatch(/processing takes 30 days/);
     expect(section).toMatch(/90 days/);
   });
 
@@ -1337,16 +1352,18 @@ describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
     expect(paraMatch).not.toBeNull();
     expect(paraMatch[0].toLowerCase()).not.toContain('48-hour');
     expect(paraMatch[0].toLowerCase()).not.toContain('within 48 hours');
-    // 30-day legal notice and 90-day credit validity preserved
-    expect(paraMatch[0]).toMatch(/processing takes 30 days/);
+    // 30-day processing claim REMOVED; 90-day credit validity preserved
+    expect(paraMatch[0]).not.toMatch(/processing takes 30 days/);
     expect(paraMatch[0]).toMatch(/90 days/);
   });
 
-  it('FIRM REFUSAL confirmation language ban explicitly allows the 30-day legal notice and 90-day credit policy', () => {
+  it('FIRM REFUSAL confirmation language ban allows the 90-day credit policy but no processing day count', () => {
     const prompt = getSystemPrompt();
     const lineMatch = prompt.match(/Confirmation language must comply with PR #18:[^\n]*/);
     expect(lineMatch).not.toBeNull();
-    expect(lineMatch[0]).toMatch(/30-day processing reference is the legal notice period and is allowed/);
+    // The 30-day processing allowance was withdrawn: the bot cannot verify it.
+    expect(lineMatch[0]).not.toMatch(/30-day processing reference is the legal notice period and is allowed/);
+    expect(lineMatch[0]).toMatch(/no processing day count/i);
     expect(lineMatch[0]).toMatch(/90-day credit validity is defined published policy and is allowed/);
   });
 
@@ -1377,10 +1394,10 @@ describe('PR #27 Decision 2: final escalation/timeline cleanup sweep', () => {
 
   it('preserves legitimate policy timelines that are NOT SM-side process SLAs', () => {
     const prompt = getSystemPrompt();
-    // 30 days written notice (NY auto-renewal legal notice period) preserved
-    expect(prompt).toContain('30 days written notice');
-    // 30-day processing (the legal notice period in practice) preserved
-    expect(prompt).toMatch(/30 days/);
+    // The written-notice policy is still referenced, now without a day count: the
+    // bot cannot verify when the team processes a request or when billing stops.
+    expect(prompt).toContain('cancel anytime with written notice');
+    expect(prompt).not.toContain('30 days written notice');
     // 90 days credit validity (defined published policy) preserved
     expect(prompt).toMatch(/90 days/);
     // 10 minutes early arrival policy preserved
@@ -1422,7 +1439,7 @@ describe('PR #27 Decision 10: standardized commitment language', () => {
     expect(nextSectionStart).toBeGreaterThan(memberCreditsStart);
     const block = prompt.slice(memberCreditsStart, nextSectionStart);
     expect(block).toContain('There is no minimum commitment to be a member');
-    expect(block).toContain('You can cancel anytime with 30 days written notice');
+    expect(block).toContain('You can cancel anytime with written notice');
     expect(block).toContain('The 3-billing-cycle commitment only applies if you accept a pause or switch to bi-monthly billing');
     expect(block).toContain('special schedules that need a few cycles of regular billing on either side to work');
   });
@@ -1757,8 +1774,8 @@ describe('system prompt: first-offer positive emotional reframing rule', () => {
     const block = prompt.slice(startIdx, startIdx + 1000);
     // Member firmly refuses
     expect(block).toMatch(/Please just cancel/i);
-    // Bot does NOT re-warmth, does NOT loss-frame, processes cleanly
-    expect(block).toMatch(/processing your cancellation now/);
+    // Bot does NOT re-warmth, does NOT loss-frame, honors the request cleanly
+    expect(block).toMatch(/submitting your cancellation request to our memberships team now/);
     expect(block).toMatch(/90 days from your last bill date/);
     // The follow-up after firm refusal contains no warmth language
     const followUp = block.slice(block.indexOf('Please just cancel'));
@@ -2114,12 +2131,15 @@ describe('system prompt: Phase 5 HARD RULE - NO HUMAN-TEAM SLA PROMISES', () => 
     expect(goodMatches[0]).not.toMatch(/within 24/);
   });
 
-  it('rule allows defined policies (30-day processing, 90-day credit validity)', () => {
+  it('rule allows the 90-day credit policy but no longer a 30-day processing claim', () => {
     const section = ruleSection();
     const allowIdx = section.indexOf('What this rule DOES allow');
     const crossIdx = section.indexOf('Cross-references', allowIdx);
     const allowBlock = section.slice(allowIdx, crossIdx);
-    expect(allowBlock).toMatch(/30 days/);
+    // "Cancel processing takes 30 days" used to be listed here as a defined policy.
+    // It was withdrawn: the bot cannot verify the team's processing time.
+    expect(allowBlock).not.toMatch(/Cancel processing takes 30 days/);
+    expect(allowBlock).toMatch(/does NOT state a processing day count/i);
     expect(allowBlock).toMatch(/90 days/);
   });
 
